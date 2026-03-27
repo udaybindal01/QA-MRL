@@ -1,0 +1,54 @@
+{
+  "group_0": {
+    "bloom_level": 0.47133333333333327,
+    "subject_area": 0.9813333333333334
+  },
+  "group_1": {
+    "bloom_level": 0.4726666666666667,
+    "subject_area": 0.9813333333333334
+  },
+  "group_2": {
+    "bloom_level": 0.47733333333333333,
+    "subject_area": 0.9826666666666668
+  },
+  "group_3": {
+    "bloom_level": 0.4666666666666667,
+    "subject_area": 0.9806666666666667
+  },
+  "group_4": {
+    "bloom_level": 0.44466666666666665,
+    "subject_area": 0.9813333333333334
+  },
+  "group_5": {
+    "bloom_level": 0.4546666666666666,
+    "subject_area": 0.9826666666666668
+  },
+  "group_6": {
+    "bloom_level": 0.4646666666666667,
+    "subject_area": 0.9813333333333334
+  },
+  "group_7": {
+    "bloom_level": 0.4573333333333333,
+    "subject_area": 0.9813333333333334
+  },
+  "mrl_d64": {
+    "bloom_level": 0.46399999999999997,
+    "subject_area": 0.9826666666666668
+  },
+  "mrl_d128": {
+    "bloom_level": 0.462,
+    "subject_area": 0.9813333333333334
+  },
+  "mrl_d256": {
+    "bloom_level": 0.4646666666666667,
+    "subject_area": 0.982
+  },
+  "mrl_d512": {
+    "bloom_level": 0.45999999999999996,
+    "subject_area": 0.9813333333333334
+  },
+  "full": {
+    "bloom_level": 0.466,
+    "subject_area": 0.9813333333333334
+  }
+}

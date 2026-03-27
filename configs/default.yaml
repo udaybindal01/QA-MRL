@@ -1,0 +1,82 @@
+# QA-MRL Default Configuration
+
+model:
+  backbone: "BAAI/bge-base-en-v1.5"
+  embedding_dim: 768
+  pooling: "cls"
+  normalize_embeddings: true
+  mrl_dims: [64, 128, 256, 384, 512, 768]
+  router:
+    type: "group"            # soft | group | hybrid
+    num_groups: 8
+    group_size: 96
+    hidden_dim: 256
+    temperature: 1.0
+    min_active_groups: 2
+    max_active_groups: 6
+    use_learner_features: true
+    learner_feature_dim: 32
+  asymmetric:
+    enabled: true
+    doc_router_hidden_dim: 128
+
+data:
+  train_path: "data/processed/train.jsonl"
+  val_path: "data/processed/val.jsonl"
+  test_path: "data/processed/test.jsonl"
+  corpus_path: "data/processed/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["biology", "chemistry", "physics", "mathematics", "computer_science"]
+  max_query_length: 128
+  max_passage_length: 256
+  num_hard_negatives: 7
+
+training:
+  seed: 42
+  num_epochs: 10
+  batch_size: 16
+  gradient_accumulation_steps: 2
+  fp16: true
+  max_grad_norm: 1.0
+  optimizer:
+    type: "adamw"
+    lr: 2.0e-5
+    weight_decay: 0.01
+    encoder_lr: 2.0e-5
+    router_lr: 1.0e-4
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.1
+  loss:
+    contrastive_weight: 1.0
+    mrl_weight: 0.5
+    specialization_weight: 0.3
+    sparsity_weight: 0.1
+    bloom_classification_weight: 0.2
+  phases:
+    mrl_warmup_epochs: 3
+    router_warmup_epochs: 2
+    joint_epochs: 5
+  checkpoint_dir: "checkpoints/"
+  save_every_n_steps: 500
+  eval_every_n_steps: 250
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50]
+  bloom_stratified: true
+  tail_topic_threshold: 50
+  measure_latency: true
+
+diagnostics:
+  gradient_attribution: true
+  num_diagnostic_queries: 1000
+  probing:
+    probe_type: "linear"
+    probe_tasks: ["bloom_level", "subject_area", "difficulty", "question_type"]
+    num_dimension_groups: 8
+
+logging:
+  use_wandb: true
+  wandb_project: "qa-mrl"
+  wandb_entity: null
+  log_every_n_steps: 10

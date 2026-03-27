@@ -1,0 +1,82 @@
+# QA-MRL Configuration — MS MARCO Training for BEIR evaluation
+# Train on MS MARCO, evaluate on BEIR to prove generality
+
+model:
+  backbone: "BAAI/bge-base-en-v1.5"
+  embedding_dim: 768
+  pooling: "cls"
+  normalize_embeddings: true
+  mrl_dims: [64, 128, 256, 384, 512, 768]
+  router:
+    type: "group"
+    num_groups: 8
+    group_size: 96
+    hidden_dim: 256
+    temperature: 0.5                      # Lower temp = sharper routing decisions
+    min_active_groups: 3                  # At least 3 groups (288 dims)
+    max_active_groups: 7                  # At most 7 groups (672 dims)
+    use_learner_features: false           # No Bloom features for general retrieval
+    learner_feature_dim: 32
+  asymmetric:
+    enabled: false                        # Simpler: symmetric routing
+
+data:
+  train_path: "/tmp/data/msmarco/train.jsonl"
+  val_path: "/tmp/data/msmarco/val.jsonl"
+  test_path: "/tmp/data/msmarco/test.jsonl"
+  corpus_path: "/tmp/data/msmarco/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["general"]
+  max_query_length: 64                    # MS MARCO queries are short
+  max_passage_length: 256
+  num_hard_negatives: 1                   # Keep low for GPU memory
+
+training:
+  seed: 42
+  num_epochs: 3                           # MS MARCO is huge, 3 epochs is plenty
+  batch_size: 32                          # Larger batch for better in-batch negatives
+  gradient_accumulation_steps: 4          # Effective batch = 128
+  fp16: true
+  max_grad_norm: 1.0
+  optimizer:
+    type: "adamw"
+    lr: 1.0e-5                            # Lower LR for large dataset
+    weight_decay: 0.01
+    encoder_lr: 1.0e-5
+    router_lr: 3.0e-5                     # Router learns slightly faster
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.05
+  loss:
+    contrastive_weight: 1.0               # Contrastive dominates
+    mrl_weight: 0.3
+    specialization_weight: 0.0            # No specialization for general retrieval
+    sparsity_weight: 0.05                 # Light sparsity encouragement
+    bloom_classification_weight: 0.0      # No Bloom for general
+  phases:
+    mrl_warmup_epochs: 1                  # 1 epoch warmup
+    router_warmup_epochs: 0
+    joint_epochs: 2
+  checkpoint_dir: "/tmp/qa-mrl-ckpts-msmarco/"
+  save_every_n_steps: 5000
+  eval_every_n_steps: 2000
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50, 100]
+  bloom_stratified: false
+  tail_topic_threshold: 20
+  measure_latency: true
+
+diagnostics:
+  gradient_attribution: true
+  num_diagnostic_queries: 1000
+  probing:
+    probe_type: "linear"
+    probe_tasks: ["bloom_level", "subject_area"]
+    num_dimension_groups: 8
+
+logging:
+  use_wandb: true
+  wandb_project: "qa-mrl-neurips"
+  wandb_entity: null
+  log_every_n_steps: 50

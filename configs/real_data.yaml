@@ -1,0 +1,84 @@
+# QA-MRL Configuration — Real Educational Data
+# Use with: python scripts/train_qa_mrl.py --config configs/real_data.yaml
+
+model:
+  backbone: "BAAI/bge-base-en-v1.5"
+  embedding_dim: 768
+  pooling: "cls"
+  normalize_embeddings: true
+  mrl_dims: [64, 128, 256, 384, 512, 768]
+  router:
+    type: "group"
+    num_groups: 8
+    group_size: 96
+    hidden_dim: 256
+    temperature: 1.0
+    min_active_groups: 2
+    max_active_groups: 6
+    use_learner_features: true
+    learner_feature_dim: 32
+  asymmetric:
+    enabled: true
+    doc_router_hidden_dim: 128
+
+data:
+  # Real data paths
+  train_path: "/tmp/data/real/train.jsonl"
+  val_path: "/tmp/data/real/val.jsonl"
+  test_path: "/tmp/data/real/test.jsonl"
+  corpus_path: "/tmp/data/real/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
+  max_query_length: 128
+  max_passage_length: 256
+  num_hard_negatives: 3          # Keep at 3 for your 10GB GPU
+
+training:
+  seed: 42
+  num_epochs: 15
+  batch_size: 16                  # Fits 10GB GPU
+  gradient_accumulation_steps: 8  # Effective batch = 128
+  fp16: true
+  max_grad_norm: 1.0
+  optimizer:
+    type: "adamw"
+    lr: 2.0e-5
+    weight_decay: 0.01
+    encoder_lr: 2.0e-5
+    router_lr: 5.0e-5
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.1
+  loss:
+    contrastive_weight: 1.0
+    mrl_weight: 0.3
+    specialization_weight: 0.05
+    sparsity_weight: 0.02
+    bloom_classification_weight: 0.05
+  phases:
+    mrl_warmup_epochs: 3
+    router_warmup_epochs: 2
+    joint_epochs: 5
+  checkpoint_dir: "/tmp/checkpoints_real/"
+  save_every_n_steps: 1000
+  eval_every_n_steps: 500
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50]
+  bloom_stratified: true
+  tail_topic_threshold: 20
+  measure_latency: true
+
+diagnostics:
+  gradient_attribution: true
+  num_diagnostic_queries: 1000
+  probing:
+    probe_type: "linear"
+    probe_tasks: ["bloom_level", "subject_area", "difficulty", "question_type"]
+    num_dimension_groups: 8
+
+logging:
+  use_wandb: true
+  wandb_project: "qa-mrl"
+  wandb_entity: null
+  log_every_n_steps: 10
