@@ -282,7 +282,7 @@ class EducationalRetrievalDataset(Dataset):
         n_enc = self.tokenizer(neg_texts, max_length=self.max_p,
                                padding="max_length", truncation=True, return_tensors="pt")
 
-        bloom = s["bloom_level"] - 1
+        bloom = s["bloom_level"] - 1  # Query Bloom level (0-indexed)
         subject = SUBJECT_TO_IDX.get(s["subject"], 0)
         lf = torch.zeros(6)
         lf[bloom] = 1.0
@@ -294,9 +294,10 @@ class EducationalRetrievalDataset(Dataset):
             "positive_attention_mask": p_enc["attention_mask"].squeeze(0),
             "negative_input_ids": n_enc["input_ids"],
             "negative_attention_mask": n_enc["attention_mask"],
-            "bloom_label": torch.tensor(bloom, dtype=torch.long),
+            "bloom_label": torch.tensor(bloom, dtype=torch.long),  # Query-only
             "subject_label": torch.tensor(subject, dtype=torch.long),
             "learner_features": lf,
+            # v3: No negative_blooms — docs have no Bloom labels
         }
 
 
@@ -322,7 +323,7 @@ class CorpusDataset(Dataset):
             "input_ids": enc["input_ids"].squeeze(0),
             "attention_mask": enc["attention_mask"].squeeze(0),
             "passage_id": p["id"],
-            "bloom_level": p["bloom_level"],
+            "bloom_level": p.get("bloom_level", 0),  # Legacy compat, may not exist in v3 data
             "subject": p["subject"],
             "topic": p.get("topic", ""),
         }

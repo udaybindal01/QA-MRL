@@ -19,7 +19,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.misc import load_config, set_seed
-from models.qa_mrl import QAMRL
+from models.bam import BloomAlignedMRL
 from evaluation.efficient_retrieval import SparseRetriever, EfficiencyBenchmark
 from transformers import AutoTokenizer
 from tqdm import tqdm

@@ -1,5 +1,10 @@
 """
-Full evaluation pipeline — uses actual query→passage ID mappings.
+Full evaluation pipeline v3.
+
+v3 changes:
+- Removed bloom_aligned_recall@10 (invalid: docs have no Bloom level)
+- Added bootstrap confidence intervals for Bloom-stratified metrics
+- Bloom-stratified metrics use query Bloom labels only
 """
 
 import time
@@ -17,6 +22,22 @@ BLOOM_NAMES = {1: "Remember", 2: "Understand", 3: "Apply",
                4: "Analyze", 5: "Evaluate", 6: "Create"}
 
 
+def bootstrap_ci(hits, n_bootstrap=1000, ci=0.95, seed=42):
+    """Compute bootstrap confidence interval for a binary metric."""
+    rng = np.random.RandomState(seed)
+    n = len(hits)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+    means = []
+    for _ in range(n_bootstrap):
+        sample = rng.choice(hits, size=n, replace=True)
+        means.append(sample.mean())
+    means = np.sort(means)
+    lo = means[int((1 - ci) / 2 * n_bootstrap)]
+    hi = means[int((1 + ci) / 2 * n_bootstrap)]
+    return float(hits.mean()), float(lo), float(hi)
+
+
 class FullEvaluator:
 
     def __init__(self, config: dict):
@@ -26,7 +47,8 @@ class FullEvaluator:
     @torch.no_grad()
     def evaluate_model(self, model, test_data_path: str, corpus_path: str,
                        tokenizer, device: torch.device,
-                       mrl_truncation_dims: List[int] = None) -> Dict[str, float]:
+                       mrl_truncation_dims: List[int] = None,
+                       compute_bootstrap: bool = True) -> Dict[str, float]:
         """
         Evaluate by:
         1. Encode the full corpus
@@ -88,19 +110,18 @@ class FullEvaluator:
 
         # 5. Compute similarity and retrieve
         print("  Computing similarities...")
-        # Process in chunks to avoid OOM
         all_rankings = []
         chunk_size = 256
         for i in range(0, len(query_embs), chunk_size):
             q_chunk = query_embs[i:i+chunk_size].to(device)
             c_embs = corpus_embs.to(device)
-            sim = torch.mm(q_chunk, c_embs.t())  # [chunk, corpus]
+            sim = torch.mm(q_chunk, c_embs.t())
             topk_indices = sim.topk(max(self.ks), dim=-1).indices.cpu().numpy()
             all_rankings.append(topk_indices)
             del sim
             torch.cuda.empty_cache() if device.type == "cuda" else None
 
-        rankings = np.concatenate(all_rankings, axis=0)  # [N, K]
+        rankings = np.concatenate(all_rankings, axis=0)
 
         # 6. Compute metrics
         metrics = {}
@@ -130,7 +151,7 @@ class FullEvaluator:
                 ndcgs.append(0.0)
         metrics["ndcg@10"] = float(np.mean(ndcgs))
 
-        # 7. Bloom-stratified metrics
+        # 7. Bloom-stratified metrics (query Bloom only)
         for level in range(1, 7):
             mask = query_blooms == level
             if mask.sum() == 0:
@@ -138,31 +159,23 @@ class FullEvaluator:
             name = BLOOM_NAMES[level]
             level_rankings = rankings[mask]
             level_gt = gt_indices[mask]
-            n_level = mask.sum()
+            n_level = int(mask.sum())
 
             for k in self.ks:
                 topk = level_rankings[:, :k]
                 hits = np.array([level_gt[i] in topk[i] for i in range(n_level)])
                 metrics[f"bloom_{name}_recall@{k}"] = float(hits.mean())
 
-            # Bloom-aligned: do retrieved passages match query's Bloom level?
-            alignments = []
-            for i in range(n_level):
-                top10_ids = level_rankings[i, :10]
-                matched = sum(1 for idx in top10_ids if idx < len(corpus) and
-                             corpus[idx]["bloom_level"] == level)
-                alignments.append(matched / 10)
-            metrics[f"bloom_{name}_alignment@10"] = float(np.mean(alignments))
+                # Bootstrap CI for R@10
+                if k == 10 and compute_bootstrap:
+                    mean, lo, hi = bootstrap_ci(hits.astype(float))
+                    metrics[f"bloom_{name}_recall@10_ci_lo"] = lo
+                    metrics[f"bloom_{name}_recall@10_ci_hi"] = hi
+                    metrics[f"bloom_{name}_n"] = n_level
 
-        # Overall Bloom alignment
-        all_aligns = []
-        for i in range(N):
-            top10_ids = rankings[i, :10]
-            qlevel = query_blooms[i]
-            matched = sum(1 for idx in top10_ids if idx < len(corpus) and
-                         corpus[idx]["bloom_level"] == qlevel)
-            all_aligns.append(matched / 10)
-        metrics["bloom_aligned_recall@10"] = float(np.mean(all_aligns))
+        # v3: NO bloom_aligned_recall@10 — documents don't have Bloom levels.
+        # A retrieved document is "good" if it's the right passage, regardless
+        # of any source-assigned cognitive label.
 
         # 8. Efficiency
         if query_masks is not None:
@@ -191,7 +204,7 @@ class FullEvaluator:
                     metrics[f"mrl_d{d}_recall@{k}"] = float(hits.mean())
 
         # Print summary
-        self._print_summary(metrics, N, query_blooms)
+        self._print_summary(metrics, N, query_blooms, compute_bootstrap)
         return metrics
 
     def _encode_texts(self, model, texts, tokenizer, device,
@@ -253,7 +266,7 @@ class FullEvaluator:
         masks = torch.cat(all_masks) if all_masks else None
         return embs, masks, latencies
 
-    def _print_summary(self, metrics, N, query_blooms):
+    def _print_summary(self, metrics, N, query_blooms, show_ci=True):
         print(f"\n  === Results (N={N}) ===")
         print(f"  R@1:    {metrics.get('recall@1', 0):.4f}")
         print(f"  R@5:    {metrics.get('recall@5', 0):.4f}")
@@ -264,14 +277,18 @@ class FullEvaluator:
         if "avg_active_dims" in metrics:
             print(f"  Active dims: {metrics['avg_active_dims']:.0f}")
 
-        print(f"\n  Bloom-Stratified R@10:")
+        print(f"\n  Bloom-Stratified R@10 (query Bloom only):")
         for level in range(1, 7):
             name = BLOOM_NAMES[level]
-            n = (query_blooms == level).sum()
+            n = int((query_blooms == level).sum())
             r10 = metrics.get(f"bloom_{name}_recall@10", 0)
-            align = metrics.get(f"bloom_{name}_alignment@10", 0)
             if n > 0:
-                print(f"    {name:12s} (n={n:4d}): R@10={r10:.4f}  Alignment={align:.4f}")
+                ci_str = ""
+                if show_ci:
+                    lo = metrics.get(f"bloom_{name}_recall@10_ci_lo", 0)
+                    hi = metrics.get(f"bloom_{name}_recall@10_ci_hi", 0)
+                    ci_str = f"  95% CI=[{lo:.3f}, {hi:.3f}]"
+                print(f"    {name:12s} (n={n:4d}): R@10={r10:.4f}{ci_str}")
 
     def save_results(self, metrics, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)

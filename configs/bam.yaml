@@ -55,8 +55,10 @@ training:
     bloom_contrastive_weight: 1.0
     bloom_mrl_weight: 0.5
     policy_weight: 0.3
-    bloom_negative_weight: 1.0    # Lambda for Bloom-distance negative weighting (curriculum ramps to this)
-    efficiency_weight: 0.1        # Reward for using fewer dims
+    bloom_cls_weight: 0.3          # Weight of per-truncation query Bloom classifiers
+    bloom_classifier_loss_weight: 0.5  # Weight of inference-time Bloom classifier training
+    efficiency_weight: 0.1         # Reward for using fewer dims
+    entropy_weight: 0.05           # Entropy bonus to prevent policy collapse
     # Legacy compat
     contrastive_weight: 1.0
     mrl_weight: 0.5

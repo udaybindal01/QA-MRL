@@ -1,24 +1,32 @@
 """
-Bloom-Aligned Matryoshka (BAM) Model.
+Bloom-Aligned Matryoshka (BAM) Model v3.
 
-The core architectural novelty:
-  1. Same MRL encoder backbone, but trained so that truncation levels
-     align with Bloom's cognitive complexity levels
-  2. Adaptive truncation policy: lightweight MLP predicts optimal
-     truncation point d* per query
-  3. At inference: truly efficient — search in d* dimensions via FAISS,
-     not 768 dims with a mask
+Key design change from v2:
+  Instead of a per-query MLP policy that predicts truncation dims (which
+  collapsed to a fixed 384 for all queries), v3 learns a GLOBAL mapping:
 
-This preserves MRL's contiguous truncation property (FAISS-friendly)
-while making truncation query-adaptive.
+    Bloom level → optimal truncation dimension
+
+  This is both more interpretable ("Remember queries need 128 dims,
+  Create queries need 512 dims") and avoids the policy collapse problem.
+
+Inference pipeline:
+  Query → Encoder → full 768-dim embedding
+       → Bloom Classifier → predicted Bloom level (1-6)
+       → Bloom-to-Dim table lookup → d*
+       → Truncate to d* → FAISS search in d* dims
+
+The Bloom classifier is a lightweight head on the encoder, trained
+jointly. At inference, no ground-truth Bloom labels are needed.
 
 Architecture:
   Query → Encoder → [768-dim embedding]
-                  → Truncation Policy → d* ∈ {64, 128, 256, 384, 512, 768}
-                  → Truncate to d* → FAISS search in d* dims
+                  → Bloom Classifier → predicted level ∈ {1..6}
+                  → Bloom-Dim Mapping → d* ∈ {64,128,256,384,512,768}
+                  → Truncate to d* → FAISS search
 
   Document → Encoder → [768-dim embedding] → Store full 768 dims
-                                            → At search time, truncate to match query's d*
+                                            → Truncate at search time
 """
 
 import torch
@@ -29,109 +37,152 @@ from typing import Dict, List, Optional, Tuple
 from models.encoder import MRLEncoder
 
 
-class TruncationPolicy(nn.Module):
+class BloomClassifier(nn.Module):
     """
-    Predicts the optimal MRL truncation dimension per query.
+    Predicts the Bloom cognitive level of a query from its embedding.
 
-    Input: query embedding [B, D]
-    Output: probability distribution over truncation points [B, K]
-            and selected truncation dimension d* per query
-
-    Key design choices:
-    - Uses Gumbel-Softmax for differentiable discrete selection during training
-    - Predicts a DISTRIBUTION over dims, not just one — allows soft mixing
-    - Reward signal comes from contrastive loss at the selected dimension
+    This runs at inference so the system doesn't need ground-truth
+    Bloom labels. Trained jointly with the encoder using the query
+    Bloom labels available in training data.
     """
 
-    TRUNCATION_DIMS = [64, 128, 256, 384, 512, 768]
-
-    def __init__(
-        self,
-        embedding_dim: int = 768,
-        hidden_dim: int = 256,
-        temperature: float = 1.0,
-        truncation_dims: Optional[List[int]] = None,
-    ):
+    def __init__(self, embedding_dim: int = 768, num_bloom_levels: int = 6,
+                 hidden_dim: int = 256):
         super().__init__()
-        self.dims = truncation_dims or self.TRUNCATION_DIMS
-        self.num_choices = len(self.dims)
-        self.temperature = temperature
-        self.embedding_dim = embedding_dim
-
-        # Policy network
-        self.policy_net = nn.Sequential(
+        self.classifier = nn.Sequential(
             nn.Linear(embedding_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.GELU(),
-            nn.Linear(hidden_dim // 2, self.num_choices),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim // 2, num_bloom_levels),
         )
 
-        # Initialize with slight bias toward higher dims (safe start)
-        with torch.no_grad():
-            bias = torch.linspace(-0.5, 0.5, self.num_choices)
-            self.policy_net[-1].bias.copy_(bias)
+    def forward(self, embedding: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            embedding: [B, D] query embedding
+        Returns:
+            logits: [B, num_bloom_levels]
+            predicted_level: [B] argmax prediction (0-indexed)
+            probs: [B, num_bloom_levels] softmax probabilities
+        """
+        logits = self.classifier(embedding)
+        probs = F.softmax(logits, dim=-1)
+        predicted = logits.argmax(dim=-1)
+        return {
+            "logits": logits,
+            "predicted_level": predicted,
+            "probs": probs,
+        }
 
-    def forward(
-        self,
-        query_embedding: torch.Tensor,  # [B, D]
-        hard: Optional[bool] = None,
-    ) -> Dict[str, torch.Tensor]:
+
+class BloomDimMapping(nn.Module):
+    """
+    Learns a global mapping: Bloom level → optimal truncation dimension.
+
+    Instead of a per-query MLP (which collapsed to fixed 384), this
+    learns ONE dimension per Bloom level. The learned mapping is
+    interpretable: simpler queries → fewer dims, complex queries → more.
+
+    Implementation: 6 learnable logit vectors (one per Bloom level),
+    each a distribution over the available truncation dims. During
+    training, Gumbel-Softmax selects differentiably. After training,
+    take argmax to get a fixed lookup table.
+    """
+
+    def __init__(self, num_bloom_levels: int = 6,
+                 truncation_dims: Optional[List[int]] = None,
+                 temperature: float = 1.0):
+        super().__init__()
+        self.dims = truncation_dims or [64, 128, 256, 384, 512, 768]
+        self.num_dims = len(self.dims)
+        self.num_blooms = num_bloom_levels
+        self.temperature = temperature
+
+        # One logit vector per Bloom level, over the available dims
+        # Initialize with bias: lower Bloom → prefer lower dims
+        self.bloom_dim_logits = nn.Parameter(torch.zeros(num_bloom_levels, self.num_dims))
+        with torch.no_grad():
+            for b in range(num_bloom_levels):
+                # Bloom 0 (Remember) biased toward lower dims
+                # Bloom 5 (Create) biased toward higher dims
+                center = b * (self.num_dims - 1) / (num_bloom_levels - 1)
+                for d in range(self.num_dims):
+                    self.bloom_dim_logits[b, d] = -0.5 * (d - center) ** 2
+
+    def forward(self, bloom_levels: torch.Tensor,
+                hard: Optional[bool] = None) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            bloom_levels: [B] integer Bloom levels (0-indexed)
+            hard: if True, use hard selection (inference). If None, auto-detect.
+        Returns:
+            selection: [B, K] soft/hard selection weights
+            selected_dim: [B] selected dimension per query
+            bloom_dim_table: [num_blooms] the learned dim per Bloom level
+        """
         if hard is None:
             hard = not self.training
 
-        logits = self.policy_net(query_embedding)  # [B, K]
+        # Gather the logit vector for each query's Bloom level
+        logits = self.bloom_dim_logits[bloom_levels]  # [B, K]
 
         if self.training:
-            # Gumbel-Softmax for differentiable selection
             selection = F.gumbel_softmax(logits, tau=self.temperature, hard=False)
         else:
             selection = F.softmax(logits, dim=-1)
 
         if hard:
-            # Hard selection: argmax with straight-through
-            hard_selection = torch.zeros_like(selection)
+            hard_sel = torch.zeros_like(selection)
             indices = selection.argmax(dim=-1)
-            hard_selection.scatter_(1, indices.unsqueeze(-1), 1.0)
-            selection = hard_selection - selection.detach() + selection
+            hard_sel.scatter_(1, indices.unsqueeze(-1), 1.0)
+            selection = hard_sel - selection.detach() + selection
 
-        # Compute selected dimension per query
-        dim_tensor = torch.tensor(self.dims, dtype=torch.float, device=query_embedding.device)
+        dim_tensor = torch.tensor(self.dims, dtype=torch.float, device=bloom_levels.device)
         selected_dim = (selection * dim_tensor).sum(dim=-1)  # [B]
 
-        # Per-query probability of each truncation level
-        probs = F.softmax(logits, dim=-1)
+        # Compute the full table (for logging)
+        with torch.no_grad():
+            full_probs = F.softmax(self.bloom_dim_logits, dim=-1)  # [num_blooms, K]
+            table_dims = (full_probs * dim_tensor.unsqueeze(0)).sum(dim=-1)  # [num_blooms]
 
-        # Statistics
-        avg_dim = selected_dim.mean()
+        probs = F.softmax(logits, dim=-1)
         entropy = -(probs * (probs + 1e-10).log()).sum(dim=-1).mean()
 
         return {
-            "selection": selection,         # [B, K] soft/hard selection weights
-            "logits": logits,               # [B, K] raw logits
-            "probs": probs,                 # [B, K] probabilities
-            "selected_dim": selected_dim,   # [B] selected dimension per query
-            "avg_dim": avg_dim,             # Scalar: mean selected dim
-            "entropy": entropy,             # Scalar: selection entropy
-            "indices": probs.argmax(dim=-1),  # [B] index of selected dim
+            "selection": selection,
+            "selected_dim": selected_dim,
+            "avg_dim": selected_dim.mean(),
+            "entropy": entropy,
+            "bloom_dim_table": table_dims,
+            "logits": logits,
+            "probs": probs,
+            "indices": probs.argmax(dim=-1),
         }
+
+    def get_dim_table(self) -> Dict[int, int]:
+        """Get the learned Bloom → dim mapping as a dict (for logging/inference)."""
+        dim_tensor = torch.tensor(self.dims, dtype=torch.float)
+        probs = F.softmax(self.bloom_dim_logits.detach(), dim=-1)
+        table = {}
+        for b in range(self.num_blooms):
+            idx = probs[b].argmax().item()
+            table[b] = self.dims[idx]
+        return table
 
 
 class BloomAlignedMRL(nn.Module):
     """
-    Bloom-Aligned Matryoshka model with adaptive truncation.
+    Bloom-Aligned Matryoshka model v3.
 
-    Key difference from QA-MRL:
-    - QA-MRL: masks arbitrary dimensions (not FAISS-friendly, fake efficiency)
-    - BAM: selects a truncation POINT (FAISS-friendly, real efficiency)
-
-    The truncation policy says "for this query, use the first d* dims"
-    where d* varies per query. This is truly efficient because:
-    - You can build FAISS indices at each d ∈ {64,128,256,384,512,768}
-    - Each query searches in the appropriate index
-    - Simpler queries search in smaller indices = real speedup
+    Key differences from v2:
+    - No per-query MLP policy (collapsed to fixed dim)
+    - Instead: learned Bloom → dim mapping (interpretable, doesn't collapse)
+    - Integrated Bloom classifier (no ground-truth needed at inference)
+    - Inference: query → classify Bloom → lookup dim → truncate → search
     """
 
     def __init__(self, config: dict):
@@ -148,12 +199,18 @@ class BloomAlignedMRL(nn.Module):
             normalize=mc["normalize_embeddings"],
         )
 
-        # Truncation policy
-        self.policy = TruncationPolicy(
+        # Bloom classifier: predicts query Bloom level from embedding
+        self.bloom_classifier = BloomClassifier(
             embedding_dim=mc["embedding_dim"],
-            hidden_dim=mc.get("policy", {}).get("hidden_dim", 256),
-            temperature=mc.get("policy", {}).get("temperature", 1.0),
+            num_bloom_levels=6,
+            hidden_dim=mc.get("bloom_classifier", {}).get("hidden_dim", 256),
+        )
+
+        # Bloom → Dim mapping: learns optimal truncation per Bloom level
+        self.bloom_dim_map = BloomDimMapping(
+            num_bloom_levels=6,
             truncation_dims=mc["mrl_dims"],
+            temperature=mc.get("policy", {}).get("temperature", 1.0),
         )
 
         self.embedding_dim = mc["embedding_dim"]
@@ -164,34 +221,40 @@ class BloomAlignedMRL(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         token_type_ids: Optional[torch.Tensor] = None,
-        learner_features: Optional[torch.Tensor] = None,  # Kept for API compat
+        bloom_labels: Optional[torch.Tensor] = None,
+        learner_features: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
-        Encode query and determine optimal truncation.
+        Encode query and determine optimal truncation via Bloom level.
 
-        Returns:
-            full_embedding: [B, D]
-            truncated: {dim: [B, d]} at each MRL point
-            adaptive_embedding: [B, D] soft mixture of truncated embeddings
-            policy_output: truncation policy decisions
+        If bloom_labels are provided (training), use them directly.
+        If not (inference), predict them with the Bloom classifier.
         """
         enc = self.encoder(input_ids, attention_mask, token_type_ids)
-        full_emb = enc["full"]         # [B, D]
-        truncated = enc["truncated"]   # {dim: [B, d]}
+        full_emb = enc["full"]
+        truncated = enc["truncated"]
 
-        # Get truncation decision
-        policy_out = self.policy(full_emb)
-        selection = policy_out["selection"]  # [B, K]
+        # Classify Bloom level
+        bloom_out = self.bloom_classifier(full_emb.detach())  # detach: classifier doesn't affect encoder
 
-        # Compute adaptive embedding: weighted mixture of truncated embeddings
-        # Each truncated embedding is padded to full dim with zeros
+        # Determine which Bloom levels to use for dim mapping
+        if bloom_labels is not None:
+            # Training: use ground-truth Bloom labels
+            bloom_for_dim = bloom_labels
+        else:
+            # Inference: use predicted Bloom labels
+            bloom_for_dim = bloom_out["predicted_level"]
+
+        # Get truncation via Bloom → dim mapping
+        dim_out = self.bloom_dim_map(bloom_for_dim)
+        selection = dim_out["selection"]  # [B, K]
+
+        # Compute adaptive embedding: weighted mixture of truncated
         B = full_emb.size(0)
-        adaptive_emb = torch.zeros_like(full_emb)  # [B, D]
+        adaptive_emb = torch.zeros_like(full_emb)
 
         for k, d in enumerate(self.mrl_dims):
-            # Weight for this truncation level
-            w = selection[:, k].unsqueeze(-1)  # [B, 1]
-            # Padded truncated embedding
+            w = selection[:, k].unsqueeze(-1)
             padded = torch.zeros_like(full_emb)
             padded[:, :d] = truncated[d]
             adaptive_emb = adaptive_emb + w * padded
@@ -202,12 +265,22 @@ class BloomAlignedMRL(nn.Module):
             "full_embedding": full_emb,
             "truncated": truncated,
             "adaptive_embedding": adaptive_emb,
-            "masked_embedding": adaptive_emb,  # Alias for eval compatibility
+            "masked_embedding": adaptive_emb,
             "mask": self._build_effective_mask(selection, B, full_emb.device),
-            "policy_output": policy_out,
-            "router_stats": {  # Compatibility with existing eval code
-                "active_dims": policy_out["avg_dim"],
-                "active_groups": policy_out["avg_dim"] / (self.embedding_dim // 8),
+            "bloom_classifier_output": bloom_out,
+            "policy_output": {  # Compatibility with trainer/eval
+                "selection": selection,
+                "selected_dim": dim_out["selected_dim"],
+                "avg_dim": dim_out["avg_dim"],
+                "entropy": dim_out["entropy"],
+                "bloom_dim_table": dim_out["bloom_dim_table"],
+                "logits": dim_out["logits"],
+                "probs": dim_out["probs"],
+                "indices": dim_out["indices"],
+            },
+            "router_stats": {
+                "active_dims": dim_out["avg_dim"],
+                "active_groups": dim_out["avg_dim"] / (self.embedding_dim // 8),
             },
         }
 
@@ -217,20 +290,16 @@ class BloomAlignedMRL(nn.Module):
         attention_mask: torch.Tensor,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Encode documents — always produce full embedding.
-        Truncation happens at search time based on query's d*.
-        """
+        """Encode documents — always produce full embedding."""
         enc = self.encoder(input_ids, attention_mask, token_type_ids)
         return {
             "full_embedding": enc["full"],
             "truncated": enc["truncated"],
-            "masked_embedding": enc["full"],  # Documents are never masked
+            "masked_embedding": enc["full"],
             "mask": torch.ones_like(enc["full"]),
         }
 
     def _build_effective_mask(self, selection, B, device):
-        """Build a soft mask for logging/analysis (not used in retrieval)."""
         mask = torch.zeros(B, self.embedding_dim, device=device)
         for k, d in enumerate(self.mrl_dims):
             w = selection[:, k].unsqueeze(-1)
@@ -245,7 +314,8 @@ class BloomAlignedMRL(nn.Module):
         learner_features=None, bloom_labels=None, subject_labels=None,
     ) -> Dict[str, torch.Tensor]:
         """Full forward for training."""
-        q = self.encode_queries(query_input_ids, query_attention_mask)
+        q = self.encode_queries(query_input_ids, query_attention_mask,
+                                bloom_labels=bloom_labels)
         p = self.encode_documents(positive_input_ids, positive_attention_mask)
 
         result = {
@@ -255,6 +325,7 @@ class BloomAlignedMRL(nn.Module):
             "query_mask": q["mask"],
             "query_truncated": q["truncated"],
             "policy_output": q["policy_output"],
+            "bloom_classifier_output": q["bloom_classifier_output"],
             "positive_embedding": p["full_embedding"],
             "positive_masked": p["full_embedding"],
             "positive_mask": p["mask"],
@@ -276,9 +347,17 @@ class BloomAlignedMRL(nn.Module):
     def get_parameter_groups(self, config):
         oc = config["training"]["optimizer"]
         return [
-            {"params": list(self.encoder.parameters()), "lr": oc["encoder_lr"]},
-            {"params": list(self.policy.parameters()), "lr": oc.get("router_lr", oc["encoder_lr"] * 5)},
+            {"params": list(self.encoder.parameters()),
+             "lr": oc["encoder_lr"]},
+            {"params": list(self.bloom_classifier.parameters()),
+             "lr": oc.get("router_lr", oc["encoder_lr"] * 5)},
+            {"params": list(self.bloom_dim_map.parameters()),
+             "lr": oc.get("router_lr", oc["encoder_lr"] * 5)},
         ]
+
+    def get_bloom_dim_table(self) -> Dict[int, int]:
+        """Get the learned Bloom → dim mapping."""
+        return self.bloom_dim_map.get_dim_table()
 
     # Compatibility methods
     def freeze_encoder(self):
@@ -286,11 +365,13 @@ class BloomAlignedMRL(nn.Module):
     def unfreeze_encoder(self):
         for p in self.encoder.parameters(): p.requires_grad = True
     def freeze_router(self):
-        for p in self.policy.parameters(): p.requires_grad = False
+        for p in self.bloom_dim_map.parameters(): p.requires_grad = False
+        for p in self.bloom_classifier.parameters(): p.requires_grad = False
     def unfreeze_router(self):
-        for p in self.policy.parameters(): p.requires_grad = True
+        for p in self.bloom_dim_map.parameters(): p.requires_grad = True
+        for p in self.bloom_classifier.parameters(): p.requires_grad = True
 
     @property
     def query_router(self):
         """Compatibility: eval scripts check hasattr(model, 'query_router')."""
-        return self.policy
+        return self.bloom_dim_map

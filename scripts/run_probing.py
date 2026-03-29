@@ -6,7 +6,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.misc import load_config, set_seed
-from models.qa_mrl import QAMRL
+from models.bam import BloomAlignedMRL
 from models.encoder import MRLEncoder
 from data.dataset import build_dataloaders
 from analysis.probing import DimensionGroupProber
@@ -15,9 +15,9 @@ from transformers import AutoTokenizer
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/default.yaml")
+    parser.add_argument("--config", default="configs/bam.yaml")
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--model_type", default="qa_mrl", choices=["qa_mrl", "mrl"])
+    parser.add_argument("--model_type", default="bam", choices=["bam", "mrl"])
     parser.add_argument("--output_dir", default="results/probing/")
     parser.add_argument("--max_samples", type=int, default=5000)
     args = parser.parse_args()
@@ -28,15 +28,15 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     mc = config["model"]
-    if args.model_type == "qa_mrl":
-        model = QAMRL(config)
+    if args.model_type == "bam":
+        model = BloomAlignedMRL(config)
     else:
         model = MRLEncoder(model_name=mc["backbone"], embedding_dim=mc["embedding_dim"],
                            mrl_dims=mc["mrl_dims"])
 
     f = os.path.join(args.checkpoint, "checkpoint.pt")
     if os.path.exists(f):
-        model.load_state_dict(torch.load(f, map_location=device)["model_state_dict"])
+        model.load_state_dict(torch.load(f, map_location=device)["model_state_dict"], strict=False)
     model.to(device)
 
     tokenizer = AutoTokenizer.from_pretrained(mc["backbone"])

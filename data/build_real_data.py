@@ -1,13 +1,14 @@
 """
-Real Educational Data Pipeline v2.
+Real Educational Data Pipeline v3.
 
-Key fix: Passages are NOT constructed from questions.
-- Corpus = real educational text (SciQ support, OBQA facts, QASC facts)
-- Queries = questions from QA datasets
-- Matched by semantic relevance, NOT lexical overlap
+v3 changes:
+- Documents NO LONGER have bloom_level. Bloom is query-only.
+  A passage is just content — its cognitive demand comes from the query.
+- Fixed OpenBookQA loading: use "fact1" field correctly, handle missing.
+- Negative mining is topic-based only (no Bloom-distance tiers on docs).
 
 Usage:
-    python data/build_real_data.py --config configs/real_data.yaml --output_dir data/real
+    python data/build_real_data.py --config configs/bam.yaml --output_dir data/real
 """
 
 import argparse
@@ -46,6 +47,7 @@ STOPWORDS = {"the", "and", "for", "are", "was", "were", "that", "this",
 
 
 def assign_bloom(question: str, source: str = "") -> int:
+    """Assign Bloom level to a QUERY based on question phrasing."""
     q = question.lower().strip()
     for level in [5, 4, 3, 2, 1]:
         for pat in BLOOM_PATTERNS[level]:
@@ -122,7 +124,12 @@ def _get_keywords(text: str) -> set:
 # ─────────────────────── Corpus Building ──────────────────────────
 
 def build_corpus() -> List[Dict]:
-    """Build passage corpus from real educational text (no question text)."""
+    """
+    Build passage corpus from real educational text.
+
+    v3: Documents have NO bloom_level. A passage is content, not a
+    cognitive task. Bloom level is determined by the query.
+    """
     corpus = []
     pid = 0
 
@@ -139,19 +146,21 @@ def build_corpus() -> List[Dict]:
                 corpus.append({
                     "id": f"p_{pid}", "text": sup,
                     "subject": subj, "topic": extract_topic(sup, subj),
-                    "bloom_level": 2, "source": "sciq_support", "difficulty": "medium",
+                    "source": "sciq_support", "difficulty": "medium",
                 })
                 pid += 1
         except Exception:
             pass
     print(f"    SciQ: {pid} passages")
 
-    # OpenBookQA facts (short factual = Bloom 1)
+    # OpenBookQA facts
+    # v3 fix: properly handle the dataset structure
     print("  Loading OpenBookQA facts...")
     n0 = len(corpus)
     try:
-        ds = load_dataset("allenai/openbookqa", "main", split="train")
+        ds = load_dataset("allenai/openbookqa", "additional", split="train")
         for row in ds:
+            # The "additional" config has "fact1" field
             fact = row.get("fact1", "").strip()
             if len(fact) < 20:
                 continue
@@ -159,14 +168,35 @@ def build_corpus() -> List[Dict]:
             corpus.append({
                 "id": f"p_{pid}", "text": fact,
                 "subject": subj, "topic": extract_topic(fact, subj),
-                "bloom_level": 1, "source": "obqa_fact", "difficulty": "easy",
+                "source": "obqa_fact", "difficulty": "easy",
             })
             pid += 1
     except Exception as e:
-        print(f"    Warning: {e}")
+        print(f"    Warning loading 'additional': {e}")
+        # Fallback: try "main" config
+        try:
+            ds = load_dataset("allenai/openbookqa", "main", split="train")
+            for row in ds:
+                # "main" config may not have fact1, check available fields
+                fact = ""
+                for field_name in ["fact1", "fact", "stem"]:
+                    fact = row.get(field_name, "").strip()
+                    if fact:
+                        break
+                if len(fact) < 20:
+                    continue
+                subj = assign_subject(fact)
+                corpus.append({
+                    "id": f"p_{pid}", "text": fact,
+                    "subject": subj, "topic": extract_topic(fact, subj),
+                    "source": "obqa_fact", "difficulty": "easy",
+                })
+                pid += 1
+        except Exception as e2:
+            print(f"    Warning loading 'main': {e2}")
     print(f"    OBQA: {len(corpus) - n0} passages")
 
-    # QASC facts (individual = Bloom 1, combined = Bloom 4)
+    # QASC facts
     print("  Loading QASC facts...")
     n0 = len(corpus)
     try:
@@ -179,7 +209,7 @@ def build_corpus() -> List[Dict]:
                     corpus.append({
                         "id": f"p_{pid}", "text": fact,
                         "subject": subj, "topic": extract_topic(fact, subj),
-                        "bloom_level": 1, "source": "qasc_fact", "difficulty": "easy",
+                        "source": "qasc_fact", "difficulty": "easy",
                     })
                     pid += 1
 
@@ -189,7 +219,7 @@ def build_corpus() -> List[Dict]:
                 corpus.append({
                     "id": f"p_{pid}", "text": combined,
                     "subject": subj, "topic": extract_topic(combined, subj),
-                    "bloom_level": 4, "source": "qasc_combined", "difficulty": "hard",
+                    "source": "qasc_combined", "difficulty": "hard",
                 })
                 pid += 1
     except Exception as e:
@@ -213,23 +243,31 @@ def _find_best_passage(query_kw: set, corpus_kw: List[set], min_overlap: int = 3
     return best_idx
 
 
-def _mine_negatives(pos_idx, corpus, by_topic, by_subject, topic, subject, bloom, num_neg):
-    """Hard negatives: same-topic-diff-bloom > same-subject > random."""
+def _mine_negatives(pos_idx, corpus, by_topic, by_subject, topic, subject, num_neg):
+    """
+    Topic-based hard negatives only (no Bloom-distance tiers).
+
+    v3: Documents don't have Bloom levels, so negatives are mined by
+    topical confusion:
+      Tier 1 (hardest): Same topic, different passage
+      Tier 2: Same subject, different topic
+      Tier 3: Random from corpus
+    """
     negs = []
 
-    # Same topic, different Bloom
-    cands = [j for j in by_topic.get(topic, []) if j != pos_idx and corpus[j]["bloom_level"] != bloom]
+    # Tier 1: Same topic, different passage (hardest — topically confusing)
+    cands = [j for j in by_topic.get(topic, []) if j != pos_idx]
     if cands:
         negs.extend(random.sample(cands, min(num_neg, len(cands))))
 
-    # Same subject, different topic
+    # Tier 2: Same subject, different topic
     if len(negs) < num_neg:
         cands = [j for j in by_subject.get(subject, [])
                  if j != pos_idx and j not in negs and corpus[j]["topic"] != topic]
         if cands:
             negs.extend(random.sample(cands, min(num_neg - len(negs), len(cands))))
 
-    # Random fill
+    # Tier 3: Random fill
     if len(negs) < num_neg:
         others = [j for j in range(len(corpus)) if j != pos_idx and j not in negs]
         if others:
@@ -266,7 +304,7 @@ def build_pairs(corpus: List[Dict], num_neg: int = 3) -> List[Dict]:
             continue
         bl = assign_bloom(q, "sciq")
         negs = _mine_negatives(idx, corpus, by_topic, by_subject,
-                                corpus[idx]["topic"], corpus[idx]["subject"], bl, num_neg)
+                                corpus[idx]["topic"], corpus[idx]["subject"], num_neg)
         pairs.append({
             "query": q, "positive_text": corpus[idx]["text"], "positive_id": corpus[idx]["id"],
             "negative_texts": [corpus[j]["text"] for j in negs],
@@ -297,7 +335,7 @@ def build_pairs(corpus: List[Dict], num_neg: int = 3) -> List[Dict]:
                 continue
             bl = min(6, max(1, assign_bloom(q, src) + boost))
             negs = _mine_negatives(idx, corpus, by_topic, by_subject,
-                                    corpus[idx]["topic"], corpus[idx]["subject"], bl, num_neg)
+                                    corpus[idx]["topic"], corpus[idx]["subject"], num_neg)
             pairs.append({
                 "query": q, "positive_text": corpus[idx]["text"], "positive_id": corpus[idx]["id"],
                 "negative_texts": [corpus[j]["text"] for j in negs],
@@ -325,7 +363,7 @@ def build_pairs(corpus: List[Dict], num_neg: int = 3) -> List[Dict]:
                 continue
             bl = assign_bloom(q, "openbookqa")
             negs = _mine_negatives(idx, corpus, by_topic, by_subject,
-                                    corpus[idx]["topic"], corpus[idx]["subject"], bl, num_neg)
+                                    corpus[idx]["topic"], corpus[idx]["subject"], num_neg)
             pairs.append({
                 "query": q, "positive_text": corpus[idx]["text"], "positive_id": corpus[idx]["id"],
                 "negative_texts": [corpus[j]["text"] for j in negs],
@@ -349,20 +387,20 @@ def build_real_dataset(config: dict, output_dir: str = "data/real"):
     num_neg = config["data"]["num_hard_negatives"]
 
     print("=" * 60)
-    print("Building REAL Educational Dataset v2")
-    print("(Decoupled queries and passages)")
+    print("Building REAL Educational Dataset v3")
+    print("(Query-only Bloom — documents have no Bloom labels)")
     print("=" * 60)
 
     print("\n[1/3] Building passage corpus...")
     corpus = build_corpus()
 
-    bloom_dist = defaultdict(int)
     subject_dist = defaultdict(int)
+    source_dist = defaultdict(int)
     for p in corpus:
-        bloom_dist[p["bloom_level"]] += 1
         subject_dist[p["subject"]] += 1
-    print(f"  Bloom: {dict(sorted(bloom_dist.items()))}")
+        source_dist[p["source"]] += 1
     print(f"  Subjects: {dict(sorted(subject_dist.items(), key=lambda x: -x[1])[:6])}")
+    print(f"  Sources: {dict(sorted(source_dist.items(), key=lambda x: -x[1]))}")
 
     with open(os.path.join(output_dir, "corpus.jsonl"), "w") as f:
         for p in corpus:
@@ -374,7 +412,7 @@ def build_real_dataset(config: dict, output_dir: str = "data/real"):
     pair_bloom = defaultdict(int)
     for p in pairs:
         pair_bloom[p["bloom_level"]] += 1
-    print(f"  Pair Bloom: {dict(sorted(pair_bloom.items()))}")
+    print(f"  Query Bloom distribution: {dict(sorted(pair_bloom.items()))}")
 
     print(f"\n[3/3] Splitting and saving...")
     random.shuffle(pairs)
@@ -388,8 +426,9 @@ def build_real_dataset(config: dict, output_dir: str = "data/real"):
 
     meta = {"num_corpus": len(corpus), "num_train": len(splits["train"]),
             "num_val": len(splits["val"]), "num_test": len(splits["test"]),
-            "corpus_bloom": dict(sorted(bloom_dist.items())),
-            "pair_bloom": dict(sorted(pair_bloom.items()))}
+            "corpus_has_bloom": False,
+            "pair_bloom": dict(sorted(pair_bloom.items())),
+            "source_dist": dict(source_dist)}
     with open(os.path.join(output_dir, "metadata.json"), "w") as f:
         json.dump(meta, f, indent=2)
 

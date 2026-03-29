@@ -30,7 +30,7 @@ def main():
                        mrl_dims=mc["mrl_dims"])
     ckpt = os.path.join(args.checkpoint, "checkpoint.pt")
     if os.path.exists(ckpt):
-        model.load_state_dict(torch.load(ckpt, map_location=device)["model_state_dict"])
+        model.load_state_dict(torch.load(ckpt, map_location=device)["model_state_dict"], strict=False)
     model.to(device)
 
     tokenizer = AutoTokenizer.from_pretrained(mc["backbone"])

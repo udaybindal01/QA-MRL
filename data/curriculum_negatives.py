@@ -1,19 +1,15 @@
 """
-Curriculum-Guided Hard Negative Mining.
+Curriculum-Guided Hard Negative Mining v3.
 
-Novel contribution: mines negatives by Bloom-level confusion,
-not just semantic similarity.
+v3 changes: Documents have no Bloom labels. Negatives are mined by
+topical confusion only (standard IR hard negative approach):
 
-Standard hard negatives: BM25/dense retrieval neighbors (topically similar)
-Curriculum negatives: same-topic, WRONG Bloom level (cognitively confusing)
-
-The mining produces three tiers of negatives per query:
-  Tier 1 (hardest): Same topic, adjacent Bloom level (e.g., Remember vs Understand)
-  Tier 2 (hard):    Same topic, distant Bloom level (e.g., Remember vs Evaluate)
+  Tier 1 (hardest): Same topic, high keyword overlap with query
+  Tier 2 (hard):    Same topic, different passages
   Tier 3 (medium):  Same subject, different topic
   Tier 4 (easy):    Random from corpus
 
-Each training batch mixes tiers based on curriculum stage.
+Curriculum progression controls the mix of easy vs hard negatives.
 """
 
 import json
@@ -22,14 +18,29 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 from tqdm import tqdm
+import re
+
+
+STOPWORDS = {"the", "and", "for", "are", "was", "were", "that", "this",
+             "with", "from", "have", "has", "had", "not", "but", "what",
+             "which", "when", "where", "how", "who", "why", "can", "will",
+             "would", "could", "should", "does", "did", "been", "being",
+             "than", "then", "them", "they", "their", "there", "these",
+             "those", "into", "about", "between", "through", "during",
+             "before", "after", "above", "below", "each", "every",
+             "some", "such", "only", "other", "also", "most", "more"}
+
+
+def _get_keywords(text: str) -> set:
+    return set(re.findall(r'\b[a-z]{3,}\b', text.lower())) - STOPWORDS
 
 
 class CurriculumNegativeMiner:
     """
-    Mines hard negatives based on Bloom-level cognitive distance.
+    Mines hard negatives based on topical confusion.
 
-    This is novel because it introduces curriculum structure into
-    the negative sampling process for contrastive retrieval training.
+    v3: No document Bloom labels. Hardness comes from topical similarity
+    (same topic = harder negative), not cognitive distance.
     """
 
     def __init__(self, corpus_path: str, seed: int = 42):
@@ -43,69 +54,64 @@ class CurriculumNegativeMiner:
                 self.corpus.append(json.loads(line.strip()))
 
         # Build indices
-        self.by_topic = defaultdict(list)       # topic -> [indices]
-        self.by_subject = defaultdict(list)     # subject -> [indices]
-        self.by_bloom = defaultdict(list)       # bloom_level -> [indices]
-        self.by_topic_bloom = defaultdict(list) # (topic, bloom) -> [indices]
+        self.by_topic = defaultdict(list)
+        self.by_subject = defaultdict(list)
 
+        # Precompute keywords for keyword-overlap based hardness
+        self.corpus_kw = []
         for i, p in enumerate(self.corpus):
             topic = p.get("topic", "general")
             subject = p.get("subject", "general")
-            bloom = p.get("bloom_level", 2)
             self.by_topic[topic].append(i)
             self.by_subject[subject].append(i)
-            self.by_bloom[bloom].append(i)
-            self.by_topic_bloom[(topic, bloom)].append(i)
+            self.corpus_kw.append(_get_keywords(p["text"]))
 
-        print(f"  CurriculumNegativeMiner: {len(self.corpus)} passages, "
-              f"{len(self.by_topic)} topics, {len(self.by_bloom)} Bloom levels")
+        print(f"  CurriculumNegativeMiner v3: {len(self.corpus)} passages, "
+              f"{len(self.by_topic)} topics (topic-based mining, no doc Bloom)")
 
     def mine_tiered_negatives(
         self,
+        query_text: str,
         query_topic: str,
         query_subject: str,
-        query_bloom: int,
         positive_idx: int,
         num_per_tier: int = 1,
     ) -> Dict[str, List[int]]:
         """
         Mine negatives in tiers of difficulty.
 
-        Returns dict mapping tier name to list of corpus indices.
+        Tier 1 (hardest): Same topic, high keyword overlap with query
+        Tier 2 (hard):    Same topic, any passage
+        Tier 3 (medium):  Same subject, different topic
+        Tier 4 (easy):    Random
         """
         result = {
-            "bloom_adjacent": [],   # Tier 1: same topic, Bloom ±1
-            "bloom_distant": [],    # Tier 2: same topic, Bloom ±2+
-            "cross_topic": [],      # Tier 3: same subject, different topic
+            "topic_overlap": [],    # Tier 1: same topic + keyword overlap
+            "topic_any": [],        # Tier 2: same topic, any
+            "cross_topic": [],      # Tier 3: same subject, diff topic
             "random": [],           # Tier 4: random
         }
         used = {positive_idx}
+        query_kw = _get_keywords(query_text)
 
-        # Tier 1: Same topic, adjacent Bloom (hardest)
-        for delta in [1, -1]:
-            adj_bloom = query_bloom + delta
-            candidates = [
-                j for j in self.by_topic_bloom.get((query_topic, adj_bloom), [])
-                if j not in used
-            ]
-            if candidates:
-                selected = random.sample(candidates, min(num_per_tier, len(candidates)))
-                result["bloom_adjacent"].extend(selected)
-                used.update(selected)
+        # Tier 1: Same topic, ranked by keyword overlap with query
+        topic_cands = [j for j in self.by_topic.get(query_topic, []) if j not in used]
+        if topic_cands and query_kw:
+            # Sort by keyword overlap (descending) — most confusing first
+            scored = [(j, len(query_kw & self.corpus_kw[j])) for j in topic_cands]
+            scored.sort(key=lambda x: -x[1])
+            # Top overlap = tier 1
+            for j, score in scored[:num_per_tier]:
+                if score > 0:
+                    result["topic_overlap"].append(j)
+                    used.add(j)
 
-        # Tier 2: Same topic, distant Bloom
-        for delta in [2, -2, 3, -3, 4, -4]:
-            dist_bloom = query_bloom + delta
-            if dist_bloom < 1 or dist_bloom > 6:
-                continue
-            candidates = [
-                j for j in self.by_topic_bloom.get((query_topic, dist_bloom), [])
-                if j not in used
-            ]
-            if candidates:
-                selected = random.sample(candidates, min(num_per_tier, len(candidates)))
-                result["bloom_distant"].extend(selected)
-                used.update(selected)
+        # Tier 2: Same topic, remaining passages
+        topic_remaining = [j for j in self.by_topic.get(query_topic, []) if j not in used]
+        if topic_remaining:
+            selected = random.sample(topic_remaining, min(num_per_tier, len(topic_remaining)))
+            result["topic_any"].extend(selected)
+            used.update(selected)
 
         # Tier 3: Same subject, different topic
         candidates = [
@@ -127,49 +133,44 @@ class CurriculumNegativeMiner:
 
     def mine_curriculum_batch(
         self,
+        query_text: str,
         query_topic: str,
         query_subject: str,
-        query_bloom: int,
         positive_idx: int,
         num_negatives: int = 3,
-        curriculum_stage: float = 0.0,  # 0.0 = early (easy negs), 1.0 = late (hard negs)
-    ) -> Tuple[List[int], List[int]]:
+        curriculum_stage: float = 0.0,
+    ) -> List[int]:
         """
         Mine negatives with curriculum-aware tier mixing.
 
-        Early training (stage~0): mostly random/cross-topic negatives (easy)
-        Late training (stage~1): mostly Bloom-adjacent negatives (hard)
+        Early training (stage~0): mostly random/cross-topic (easy)
+        Late training (stage~1): mostly same-topic overlap (hard)
 
         Returns:
             negative_indices: list of corpus indices
-            negative_bloom_levels: list of Bloom levels for each negative
         """
         tiered = self.mine_tiered_negatives(
-            query_topic, query_subject, query_bloom, positive_idx,
+            query_text, query_topic, query_subject, positive_idx,
             num_per_tier=max(1, num_negatives),
         )
 
         # Tier selection probabilities based on curriculum stage
-        # Early: [0.1, 0.1, 0.3, 0.5] (easy)
-        # Late:  [0.5, 0.3, 0.1, 0.1] (hard)
-        tier_names = ["bloom_adjacent", "bloom_distant", "cross_topic", "random"]
-        easy_probs = [0.1, 0.1, 0.3, 0.5]
-        hard_probs = [0.5, 0.3, 0.1, 0.1]
+        tier_names = ["topic_overlap", "topic_any", "cross_topic", "random"]
+        easy_probs = [0.05, 0.15, 0.30, 0.50]
+        hard_probs = [0.40, 0.30, 0.20, 0.10]
         probs = [
             easy_probs[i] * (1 - curriculum_stage) + hard_probs[i] * curriculum_stage
             for i in range(4)
         ]
 
-        # Collect all available negatives with their tier
         all_negs = []
         for tier_name in tier_names:
             for idx in tiered[tier_name]:
                 all_negs.append((idx, tier_name))
 
         if not all_negs:
-            # Fallback: random
             fallback = random.sample(range(len(self.corpus)), min(num_negatives, len(self.corpus)))
-            return fallback, [self.corpus[j].get("bloom_level", 2) for j in fallback]
+            return fallback
 
         # Sample with tier-weighted probabilities
         selected = []
@@ -185,12 +186,10 @@ class CurriculumNegativeMiner:
             selected.append(all_negs[idx][0])
             all_negs.pop(idx)
 
-        # Pad if needed
         while len(selected) < num_negatives:
             selected.append(random.choice(range(len(self.corpus))))
 
-        bloom_levels = [self.corpus[j].get("bloom_level", 2) for j in selected]
-        return selected, bloom_levels
+        return selected
 
 
 def rebuild_pairs_with_curriculum_negatives(
@@ -204,12 +203,7 @@ def rebuild_pairs_with_curriculum_negatives(
     """
     Rebuild training pairs with curriculum-guided negatives.
 
-    Usage:
-        rebuild_pairs_with_curriculum_negatives(
-            "data/real/train.jsonl", "data/real/corpus.jsonl",
-            "data/real/train_curriculum.jsonl",
-            curriculum_stage=0.7,  # Mostly hard negatives
-        )
+    v3: No document Bloom labels used in mining.
     """
     miner = CurriculumNegativeMiner(corpus_path, seed)
     corpus_id_to_idx = {p["id"]: i for i, p in enumerate(miner.corpus)}
@@ -219,7 +213,7 @@ def rebuild_pairs_with_curriculum_negatives(
         for line in f:
             pairs.append(json.loads(line.strip()))
 
-    print(f"  Rebuilding {len(pairs)} pairs with curriculum negatives (stage={curriculum_stage})...")
+    print(f"  Rebuilding {len(pairs)} pairs with curriculum negatives v3 (stage={curriculum_stage})...")
 
     new_pairs = []
     for pair in tqdm(pairs, desc="  mining"):
@@ -231,18 +225,19 @@ def rebuild_pairs_with_curriculum_negatives(
 
         topic = pair.get("topic", "general")
         subject = pair.get("subject", "general")
-        bloom = pair.get("bloom_level", 2)
+        query_text = pair.get("query", "")
 
-        neg_indices, neg_blooms = miner.mine_curriculum_batch(
-            topic, subject, bloom, pos_idx,
+        neg_indices = miner.mine_curriculum_batch(
+            query_text, topic, subject, pos_idx,
             num_negatives=num_negatives,
             curriculum_stage=curriculum_stage,
         )
 
         pair["negative_ids"] = [miner.corpus[j]["id"] for j in neg_indices]
         pair["negative_texts"] = [miner.corpus[j]["text"] for j in neg_indices]
-        pair["negative_blooms"] = neg_blooms
-        pair["neg_tier_info"] = "curriculum"
+        # v3: no negative_blooms field — docs don't have Bloom labels
+        pair.pop("negative_blooms", None)
+        pair["neg_tier_info"] = "curriculum_v3"
         new_pairs.append(pair)
 
     with open(output_path, "w") as f:

@@ -1,25 +1,30 @@
 """
-BAM Training Losses v2.
+BAM Training Losses v3 — Query-Only Bloom.
 
-Novel components:
-  1. BloomConditionedContrastiveLoss: negatives weighted by Bloom distance
-  2. BloomAlignedMRLLoss with D/sqrt(d_k) reweighting per truncation slice
-  3. CurriculumScheduledLoss: progressive hard negative difficulty
-  4. TruncationPolicyLoss: reward signal for adaptive truncation
+Key conceptual fix from v2:
+  Bloom level is a property of the QUERY's cognitive intent, not the
+  document's content. A passage about photosynthesis has no inherent Bloom
+  level — the same passage can answer "What is photosynthesis?" (Remember)
+  and "Design an experiment to test photosynthesis rate" (Create).
+
+  v2 weighted negatives by |bloom(query) - bloom(doc)|, which is wrong:
+  it punishes the model for retrieving topically-correct documents whose
+  *source-assigned* Bloom label differs from the query's.
+
+  v3 removes all document Bloom labels from the loss. The Bloom signal
+  enters ONLY through per-truncation query Bloom classifiers, which force
+  the encoder to organize embedding dimensions by cognitive complexity.
+
+Components:
+  1. Standard contrastive loss (no Bloom weighting on negatives)
+  2. BloomAlignedMRLLoss with D/sqrt(d_k) reweighting + per-truncation
+     query Bloom classifiers
+  3. CurriculumScheduledLoss: temperature annealing over training
+  4. TruncationPolicyLoss: contrastive + efficiency + entropy bonus
 
 The D/sqrt(d_k) reweighting:
   Standard MRL weights all truncation equally: w_k = 1/K
-  Our reweighting: w_k = D / sqrt(d_k) / Σ(D / sqrt(d_j))
-
-  This gives HIGHER weight to smaller truncation dims, forcing the
-  model to pack discriminative information into lower dimensions.
-  For D=768:
-    d=64:  w = 768/8   = 96    (highest weight)
-    d=128: w = 768/11.3 = 67.9
-    d=256: w = 768/16  = 48
-    d=384: w = 768/19.6 = 39.2
-    d=512: w = 768/22.6 = 34.0
-    d=768: w = 768/27.7 = 27.7  (lowest weight)
+  Our reweighting: w_k = D / sqrt(d_k) / Sigma(D / sqrt(d_j))
 """
 
 import math
@@ -29,23 +34,23 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 
 
-class BloomConditionedContrastiveLoss(nn.Module):
+class ContrastiveLoss(nn.Module):
     """
-    Negatives weighted by Bloom-level distance from query.
+    Standard InfoNCE contrastive loss — no Bloom weighting on negatives.
 
-    w_i = 1 + lambda * |bloom(query) - bloom(neg_i)|
-
-    Same-topic-wrong-Bloom negatives get penalized more heavily,
-    forcing the encoder to distinguish cognitive complexity.
+    Bloom is a query property, not a document property. Negatives are
+    penalized only by their semantic similarity, not by a spurious
+    document-level Bloom label.
     """
 
-    def __init__(self, temperature: float = 0.05, bloom_weight: float = 0.5):
+    def __init__(self, temperature: float = 0.05):
         super().__init__()
         self.temperature = temperature
-        self.bloom_weight = bloom_weight
 
-    def forward(self, query_emb, positive_emb, query_bloom=None,
-                negative_embs=None, negative_blooms=None):
+    def forward(self, query_emb, positive_emb,
+                negative_embs=None, **kwargs):
+        # kwargs accepts and ignores legacy fields like query_bloom,
+        # negative_blooms for backward compatibility
 
         pos_sim = (query_emb * positive_emb).sum(dim=-1) / self.temperature
 
@@ -54,41 +59,40 @@ class BloomConditionedContrastiveLoss(nn.Module):
                 negative_embs, query_emb.unsqueeze(-1)
             ).squeeze(-1) / self.temperature
 
-            if negative_blooms is not None and query_bloom is not None and self.bloom_weight > 0:
-                bloom_dist = (query_bloom.unsqueeze(-1).float() -
-                             negative_blooms.float()).abs()
-                weights = 1.0 + self.bloom_weight * bloom_dist
-                weighted_neg = weights * neg_sim.exp()
-                denom = pos_sim.exp() + weighted_neg.sum(dim=-1)
-            else:
-                denom = pos_sim.exp() + neg_sim.exp().sum(dim=-1)
-
+            denom = pos_sim.exp() + neg_sim.exp().sum(dim=-1)
             loss = (-pos_sim + denom.log()).mean()
         else:
             sim = torch.mm(query_emb, positive_emb.t()) / self.temperature
             labels = torch.arange(sim.size(0), device=sim.device)
             loss = F.cross_entropy(sim, labels)
 
-        return loss, {"bloom_contrastive": loss.item()}
+        return loss, {"contrastive": loss.item()}
 
 
 class BloomAlignedMRLLoss(nn.Module):
     """
-    MRL loss with two novel components:
+    MRL loss with two components:
 
     1. D/sqrt(d_k) reweighting: higher weight on smaller truncations
        forces discriminative info into lower dimensions
 
-    2. Per-level Bloom classifiers: each truncation trained to capture
-       specific cognitive levels (lower dims -> simpler concepts)
+    2. Per-truncation query Bloom classifiers: each truncation level
+       trained to predict the QUERY's Bloom level from the truncated
+       query embedding. This forces the encoder to organize dimensions
+       so cognitive complexity is decodable at every truncation level.
+
+       Lower truncation dims capture simpler Bloom levels;
+       full dims capture all levels.
     """
 
     def __init__(self, mrl_dims: List[int], embedding_dim: int = 768,
-                 num_bloom_levels: int = 6, temperature: float = 0.05):
+                 num_bloom_levels: int = 6, temperature: float = 0.05,
+                 bloom_cls_weight: float = 0.3):
         super().__init__()
         self.mrl_dims = mrl_dims
         self.D = embedding_dim
         self.temperature = temperature
+        self.bloom_cls_weight = bloom_cls_weight
 
         # D/sqrt(d_k) weights
         raw_weights = [embedding_dim / math.sqrt(d) for d in mrl_dims]
@@ -99,18 +103,17 @@ class BloomAlignedMRLLoss(nn.Module):
         for d, w in zip(mrl_dims, self.dim_weights):
             print(f"    d={d:3d}: weight={w:.4f} (raw={embedding_dim/math.sqrt(d):.1f})")
 
-        # Per-truncation Bloom classifiers
+        # Per-truncation QUERY Bloom classifiers
         self.bloom_classifiers = nn.ModuleDict()
         for d in mrl_dims:
             self.bloom_classifiers[str(d)] = nn.Sequential(
                 nn.Linear(d, min(128, d)),
                 nn.GELU(),
+                nn.Dropout(0.1),
                 nn.Linear(min(128, d), num_bloom_levels),
             )
 
-        # Bloom level target per truncation:
-        # d=64  -> should capture levels 0-1 (Remember/Understand)
-        # d=768 -> should capture all levels
+        # Which Bloom levels each truncation is expected to handle
         self.bloom_targets = {}
         for i, d in enumerate(mrl_dims):
             max_level = min(num_bloom_levels,
@@ -118,6 +121,12 @@ class BloomAlignedMRLLoss(nn.Module):
             self.bloom_targets[d] = max_level
 
     def forward(self, query_truncated, positive_truncated, bloom_labels=None):
+        """
+        Args:
+            query_truncated: {dim: [B, d]} truncated query embeddings
+            positive_truncated: {dim: [B, d]} truncated positive doc embeddings
+            bloom_labels: [B] query Bloom levels (0-indexed). Query-only.
+        """
         total_loss = 0.0
         stats = {}
 
@@ -130,19 +139,18 @@ class BloomAlignedMRLLoss(nn.Module):
             labels = torch.arange(sim.size(0), device=sim.device)
             contrastive = F.cross_entropy(sim, labels)
 
-            # Bloom classification
+            # Query Bloom classification at this truncation
             bloom_loss = torch.tensor(0.0, device=q.device)
             bloom_acc = 0.0
             if bloom_labels is not None:
-                logits = self.bloom_classifiers[str(d)](q)
+                logits = self.bloom_classifiers[str(d)](q)  # Query only!
                 max_level = self.bloom_targets[d]
                 mask = bloom_labels < max_level
                 if mask.sum() > 0:
                     bloom_loss = F.cross_entropy(logits[mask], bloom_labels[mask])
                     bloom_acc = (logits[mask].argmax(-1) == bloom_labels[mask]).float().mean().item()
 
-            # Weighted loss for this truncation
-            total_loss += w * (contrastive + 0.3 * bloom_loss)
+            total_loss += w * (contrastive + self.bloom_cls_weight * bloom_loss)
 
             stats[f"mrl_d{d}_loss"] = contrastive.item()
             stats[f"mrl_d{d}_bloom_acc"] = bloom_acc
@@ -154,55 +162,56 @@ class BloomAlignedMRLLoss(nn.Module):
 
 class CurriculumScheduledLoss(nn.Module):
     """
-    Wraps the Bloom-conditioned contrastive loss with curriculum scheduling.
+    Wraps contrastive loss with curriculum temperature annealing.
 
-    The bloom_weight parameter increases over training:
-    - Early: bloom_weight ≈ 0 (standard contrastive, easy negatives)
-    - Late:  bloom_weight = max_weight (heavy Bloom penalty, hard negatives)
-
-    This curriculum prevents the model from being overwhelmed by hard
-    negatives early in training when representations are still forming.
+    v3 change: no longer ramps Bloom-distance weight on negatives.
+    Instead, temperature annealing: warm start -> target temperature.
     """
 
-    def __init__(self, temperature: float = 0.05, max_bloom_weight: float = 1.0):
+    def __init__(self, temperature: float = 0.05, max_temperature: float = 0.1):
         super().__init__()
-        self.temperature = temperature
-        self.max_bloom_weight = max_bloom_weight
-        self.base_loss = BloomConditionedContrastiveLoss(temperature, bloom_weight=0.0)
+        self.target_temperature = temperature
+        self.max_temperature = max_temperature
+        self.base_loss = ContrastiveLoss(temperature=temperature)
 
-    def forward(self, query_emb, positive_emb, query_bloom=None,
-                negative_embs=None, negative_blooms=None,
-                curriculum_progress: float = 0.0):
-        """
-        curriculum_progress: 0.0 (start) to 1.0 (end of training)
-        """
-        # Ramp bloom weight with curriculum
-        current_weight = self.max_bloom_weight * curriculum_progress
-        self.base_loss.bloom_weight = current_weight
+    def forward(self, query_emb, positive_emb,
+                negative_embs=None,
+                curriculum_progress: float = 0.0,
+                **kwargs):
+        current_temp = self.max_temperature - (self.max_temperature - self.target_temperature) * curriculum_progress
+        self.base_loss.temperature = current_temp
 
         loss, stats = self.base_loss(
-            query_emb, positive_emb, query_bloom,
-            negative_embs, negative_blooms,
+            query_emb, positive_emb,
+            negative_embs,
         )
-        stats["curriculum_bloom_weight"] = current_weight
+        stats["curriculum_temperature"] = current_temp
         stats["curriculum_progress"] = curriculum_progress
         return loss, stats
 
 
 class TruncationPolicyLoss(nn.Module):
-    """Reward signal for adaptive truncation policy."""
+    """
+    Reward signal for adaptive truncation policy.
+
+    v3 changes:
+    - Removed bloom_align term that used doc Bloom labels
+    - Added entropy bonus to prevent policy collapse to single dim
+    """
 
     def __init__(self, mrl_dims: List[int], temperature: float = 0.05,
-                 efficiency_weight: float = 0.1):
+                 efficiency_weight: float = 0.1, entropy_weight: float = 0.05):
         super().__init__()
         self.mrl_dims = mrl_dims
         self.temperature = temperature
         self.efficiency_weight = efficiency_weight
+        self.entropy_weight = entropy_weight
         self.max_dim = max(mrl_dims)
 
     def forward(self, query_adaptive, positive_emb, policy_output,
-                bloom_labels=None, negative_embs=None):
+                negative_embs=None, **kwargs):
         selected_dim = policy_output["selected_dim"]
+        entropy = policy_output["entropy"]
 
         # Contrastive with adaptive embedding
         if negative_embs is not None:
@@ -219,31 +228,32 @@ class TruncationPolicyLoss(nn.Module):
         # Efficiency: prefer fewer dims
         efficiency = (selected_dim / self.max_dim).mean()
 
-        # Bloom alignment: complex queries should use more dims
-        bloom_align = torch.tensor(0.0, device=query_adaptive.device)
-        if bloom_labels is not None:
-            bloom_norm = bloom_labels.float() / 5.0
-            dim_norm = selected_dim / self.max_dim
-            bloom_align = F.mse_loss(dim_norm, bloom_norm)
+        # Entropy bonus: prevent policy collapse to a single dim
+        # Negative sign because we want to MAXIMIZE entropy
+        entropy_bonus = -entropy
 
-        total = contrastive + self.efficiency_weight * efficiency + 0.2 * bloom_align
+        total = (contrastive
+                 + self.efficiency_weight * efficiency
+                 + self.entropy_weight * entropy_bonus)
 
         return total, {
             "policy_contrastive": contrastive.item(),
             "policy_efficiency": efficiency.item(),
-            "policy_bloom_align": bloom_align.item(),
+            "policy_entropy": entropy.item(),
             "policy_avg_dim": selected_dim.mean().item(),
-            "policy_entropy": policy_output["entropy"].item(),
         }
 
 
 class BAMCombinedLoss(nn.Module):
     """
-    Full BAM loss combining all novel components.
+    Full BAM loss v3.
 
-    L = w1 * L_curriculum_contrastive  (Bloom-weighted, curriculum-scheduled)
-      + w2 * L_bloom_aligned_mrl       (D/sqrt(d) reweighted, per-level classifiers)
-      + w3 * L_truncation_policy       (adaptive truncation reward)
+    L = w1 * L_contrastive          (standard, no Bloom weighting)
+      + w2 * L_bloom_aligned_mrl     (D/sqrt(d) + query Bloom classifiers)
+      + w3 * L_truncation_policy     (contrastive + efficiency + entropy)
+      + w4 * L_bloom_classifier      (query Bloom level prediction)
+
+    The Bloom classifier loss trains the inference-time Bloom predictor.
     """
 
     def __init__(self, config: dict):
@@ -255,39 +265,49 @@ class BAMCombinedLoss(nn.Module):
             "contrastive": lc.get("bloom_contrastive_weight", 1.0),
             "mrl": lc.get("bloom_mrl_weight", 0.5),
             "policy": lc.get("policy_weight", 0.3),
+            "bloom_cls": lc.get("bloom_classifier_loss_weight", 0.5),
         }
 
         self.curriculum_contrastive = CurriculumScheduledLoss(
             temperature=0.05,
-            max_bloom_weight=lc.get("bloom_negative_weight", 1.0),
+            max_temperature=0.1,
         )
         self.bloom_mrl = BloomAlignedMRLLoss(
             mrl_dims=mc["mrl_dims"],
             embedding_dim=mc["embedding_dim"],
+            bloom_cls_weight=lc.get("bloom_cls_weight", 0.3),
         )
         self.policy_loss = TruncationPolicyLoss(
             mrl_dims=mc["mrl_dims"],
             efficiency_weight=lc.get("efficiency_weight", 0.1),
+            entropy_weight=lc.get("entropy_weight", 0.05),
         )
 
     def forward(self, query_emb, positive_emb, query_adaptive,
                 query_truncated, positive_truncated, policy_output,
-                bloom_labels=None, negative_embs=None, negative_blooms=None,
-                phase="joint", curriculum_progress=0.0):
-
+                bloom_labels=None, negative_embs=None,
+                bloom_classifier_output=None,
+                phase="joint", curriculum_progress=0.0,
+                **kwargs):
+        """
+        Args:
+            bloom_labels: query Bloom levels only (0-indexed).
+            bloom_classifier_output: output of BloomClassifier (logits, probs).
+            kwargs: accepts and ignores legacy fields (negative_blooms, etc.)
+        """
         losses = {}
         total = torch.tensor(0.0, device=query_emb.device, requires_grad=True)
 
-        # 1. Curriculum-scheduled Bloom contrastive
+        # 1. Curriculum-scheduled contrastive (no Bloom weighting)
         l_cc, cc_stats = self.curriculum_contrastive(
-            query_adaptive, positive_emb, bloom_labels,
-            negative_embs, negative_blooms,
+            query_adaptive, positive_emb,
+            negative_embs=negative_embs,
             curriculum_progress=curriculum_progress,
         )
         losses.update(cc_stats)
         total = total + self.weights["contrastive"] * l_cc
 
-        # 2. Bloom-aligned MRL with D/sqrt(d) reweighting
+        # 2. Bloom-aligned MRL with D/sqrt(d) + query Bloom classifiers
         if bloom_labels is not None:
             l_mrl, mrl_stats = self.bloom_mrl(
                 query_truncated, positive_truncated, bloom_labels,
@@ -295,14 +315,32 @@ class BAMCombinedLoss(nn.Module):
             losses.update(mrl_stats)
             total = total + self.weights["mrl"] * l_mrl
 
-        # 3. Truncation policy
+        # 3. Truncation policy (Bloom → dim mapping)
         if phase != "mrl_warmup":
             l_pol, pol_stats = self.policy_loss(
                 query_adaptive, positive_emb, policy_output,
-                bloom_labels, negative_embs,
+                negative_embs=negative_embs,
             )
             losses.update(pol_stats)
             total = total + self.weights["policy"] * l_pol
+
+        # 4. Bloom classifier loss (trains the inference-time predictor)
+        if bloom_labels is not None and bloom_classifier_output is not None:
+            bloom_cls_loss = F.cross_entropy(
+                bloom_classifier_output["logits"], bloom_labels
+            )
+            bloom_cls_acc = (bloom_classifier_output["predicted_level"] == bloom_labels).float().mean()
+            losses["bloom_cls_loss"] = bloom_cls_loss.item()
+            losses["bloom_cls_acc"] = bloom_cls_acc.item()
+            total = total + self.weights["bloom_cls"] * bloom_cls_loss
+
+        # Log the learned Bloom → dim table
+        if "bloom_dim_table" in policy_output:
+            table = policy_output["bloom_dim_table"]
+            bloom_names = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
+            for i, name in enumerate(bloom_names):
+                if i < len(table):
+                    losses[f"dim_{name}"] = table[i].item()
 
         losses["total"] = total.item()
         return total, losses

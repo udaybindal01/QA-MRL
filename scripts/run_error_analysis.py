@@ -27,7 +27,7 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.misc import load_config, set_seed
-from models.qa_mrl import QAMRL
+from models.bam import BloomAlignedMRL
 from models.encoder import MRLEncoder
 from transformers import AutoTokenizer
 
@@ -276,12 +276,12 @@ def main():
     test_path = config["data"]["test_path"]
     corpus_path = config["data"]["corpus_path"]
 
-    # Load QA-MRL
-    print("Loading QA-MRL...")
-    qa_model = QAMRL(config)
+    # Load BAM
+    print("Loading BAM...")
+    qa_model = BloomAlignedMRL(config)
     ckpt = os.path.join(args.checkpoint, "checkpoint.pt")
     if os.path.exists(ckpt):
-        qa_model.load_state_dict(torch.load(ckpt, map_location=device)["model_state_dict"])
+        qa_model.load_state_dict(torch.load(ckpt, map_location=device)["model_state_dict"], strict=False)
     qa_model.to(device)
 
     # Load baseline
@@ -291,7 +291,7 @@ def main():
                           mrl_dims=mc["mrl_dims"])
     ckpt = os.path.join(args.baseline, "checkpoint.pt")
     if os.path.exists(ckpt):
-        bl_model.load_state_dict(torch.load(ckpt, map_location=device)["model_state_dict"])
+        bl_model.load_state_dict(torch.load(ckpt, map_location=device)["model_state_dict"], strict=False)
     bl_model.to(device)
 
     # Get results
