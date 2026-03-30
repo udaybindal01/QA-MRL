@@ -11,7 +11,7 @@ MRL_CKPT="/tmp/mrl-ckpts"
 LOG_DIR="$REPO_DIR/logs"
 RESULTS_DIR="$REPO_DIR/results"
 
-mkdir -p "$LOG_DIR" "$RESULTS_DIR"
+mkdir -p "$LOG_DIR" "$RESULTS_DIR" && echo "Directories ready."
 cd "$REPO_DIR"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }

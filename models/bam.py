@@ -178,7 +178,11 @@ class BloomAlignedMRL(nn.Module):
         If not (inference), predict them with the Bloom classifier.
         """
         if bloom_labels is None:
-            raise ValueError("bloom_labels must be provided from the dataset.")
+            if learner_features is not None:
+                # learner_features is one-hot [B, 6]; convert to 0-indexed integer labels
+                bloom_labels = learner_features.argmax(dim=-1)
+            else:
+                raise ValueError("bloom_labels or learner_features must be provided.")
         enc = self.encoder(input_ids, attention_mask, token_type_ids)
         full_emb = enc["full"]
         truncated = enc["truncated"]

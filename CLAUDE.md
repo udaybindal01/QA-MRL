@@ -105,3 +105,5 @@ Data paths (configurable in YAML):
 
 - `.github/workflows/claude.yml` — Claude Code integration triggered by `@claude` mentions in issues/PRs
 - `.github/workflows/claude-code-review.yml` — Automated code review
+
+- Only look at the files that you want to update. Dont take all the files as context for every prompt.
