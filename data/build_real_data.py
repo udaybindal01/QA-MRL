@@ -6,6 +6,8 @@ v3 changes:
   A passage is just content — its cognitive demand comes from the query.
 - Fixed OpenBookQA loading: use "fact1" field correctly, handle missing.
 - Negative mining is topic-based only (no Bloom-distance tiers on docs).
+- Bloom classification uses cip29/bert-blooms-taxonomy-classifier (HuggingFace),
+  not regex patterns.
 
 Usage:
     python data/build_real_data.py --config configs/bam.yaml --output_dir data/real
@@ -15,26 +17,16 @@ import argparse
 import json
 import os
 import random
-import re
+import sys
 from typing import Dict, List, Optional
 from collections import defaultdict
 from datasets import load_dataset
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from data.bloom_classifier import classify_bloom_batch
+
 
 # ─────────────────────── Annotation helpers ───────────────────────
-
-BLOOM_PATTERNS = {
-    1: [r"\bwhat is\b", r"\bdefine\b", r"\bname\b", r"\blist\b",
-        r"\bidentify\b", r"\bwhich of the following\b", r"\bwhat are\b"],
-    2: [r"\bwhy\b", r"\bexplain\b", r"\bdescribe\b", r"\bhow does\b",
-        r"\bwhat happens when\b", r"\bwhat causes\b"],
-    3: [r"\bwhat would happen\b", r"\bpredict\b", r"\bcalculate\b",
-        r"\bif .+ then\b", r"\bhow would\b", r"\bhow can\b"],
-    4: [r"\bcompare\b", r"\bcontrast\b", r"\bdifference between\b",
-        r"\brelationship between\b", r"\banalyze\b"],
-    5: [r"\bevaluate\b", r"\bjudge\b", r"\bjustify\b",
-        r"\bwhich .+ best\b", r"\bmost likely\b", r"\bevidence\b"],
-}
 
 STOPWORDS = {"the", "and", "for", "are", "was", "were", "that", "this",
              "with", "from", "have", "has", "had", "not", "but", "what",
@@ -44,17 +36,6 @@ STOPWORDS = {"the", "and", "for", "are", "was", "were", "that", "this",
              "those", "into", "about", "between", "through", "during",
              "before", "after", "above", "below", "each", "every",
              "some", "such", "only", "other", "also", "most", "more"}
-
-
-def assign_bloom(question: str, source: str = "") -> int:
-    """Assign Bloom level to a QUERY based on question phrasing."""
-    q = question.lower().strip()
-    for level in [5, 4, 3, 2, 1]:
-        for pat in BLOOM_PATTERNS[level]:
-            if re.search(pat, q):
-                return level
-    return {"sciq": 2, "arc_easy": 1, "arc_challenge": 3,
-            "openbookqa": 3, "qasc": 4}.get(source, 2)
 
 
 def assign_subject(text: str) -> str:
@@ -118,7 +99,9 @@ def _query_type(question: str, bloom: int) -> str:
 
 
 def _get_keywords(text: str) -> set:
-    return set(re.findall(r'\b[a-z]{3,}\b', text.lower())) - STOPWORDS
+    words = text.lower().split()
+    return {w.strip(".,!?;:\"'()[]{}") for w in words
+            if len(w) >= 3 and w.strip(".,!?;:\"'()[]{}").isalpha()} - STOPWORDS
 
 
 # ─────────────────────── Corpus Building ──────────────────────────
@@ -277,7 +260,8 @@ def _mine_negatives(pos_idx, corpus, by_topic, by_subject, topic, subject, num_n
 
 
 def build_pairs(corpus: List[Dict], num_neg: int = 3) -> List[Dict]:
-    """Match questions from QA datasets to corpus passages by keyword overlap."""
+    """Match questions from QA datasets to corpus passages by keyword overlap,
+    then batch-classify all query Bloom levels with the HuggingFace model."""
 
     # Precompute keyword index
     corpus_kw = [_get_keywords(p["text"]) for p in corpus]
@@ -287,11 +271,13 @@ def build_pairs(corpus: List[Dict], num_neg: int = 3) -> List[Dict]:
         by_topic[p["topic"]].append(i)
         by_subject[p["subject"]].append(i)
 
-    pairs = []
+    # ── Collect (query, corpus_idx, bloom_boost) for all sources ──
+
+    raw_matches = []  # (query, corpus_idx, bloom_boost)
 
     # SciQ questions
-    print("  Matching SciQ questions...")
-    n0 = len(pairs)
+    print("  Collecting SciQ questions...")
+    n0 = len(raw_matches)
     ds = load_dataset("allenai/sciq", split="train")
     for row in ds:
         q = row["question"]
@@ -302,22 +288,13 @@ def build_pairs(corpus: List[Dict], num_neg: int = 3) -> List[Dict]:
         idx = _find_best_passage(qkw, corpus_kw)
         if idx is None:
             continue
-        bl = assign_bloom(q, "sciq")
-        negs = _mine_negatives(idx, corpus, by_topic, by_subject,
-                                corpus[idx]["topic"], corpus[idx]["subject"], num_neg)
-        pairs.append({
-            "query": q, "positive_text": corpus[idx]["text"], "positive_id": corpus[idx]["id"],
-            "negative_texts": [corpus[j]["text"] for j in negs],
-            "negative_ids": [corpus[j]["id"] for j in negs],
-            "bloom_level": bl, "subject": corpus[idx]["subject"],
-            "topic": corpus[idx]["topic"], "query_type": _query_type(q, bl),
-        })
-    print(f"    SciQ: {len(pairs) - n0} pairs")
+        raw_matches.append((q, idx, 0))
+    print(f"    SciQ: {len(raw_matches) - n0} candidates")
 
     # ARC questions
-    print("  Matching ARC questions...")
-    n0 = len(pairs)
-    for split_name, src, boost in [("ARC-Easy", "arc_easy", 0), ("ARC-Challenge", "arc_challenge", 2)]:
+    print("  Collecting ARC questions...")
+    n0 = len(raw_matches)
+    for split_name, boost in [("ARC-Easy", 0), ("ARC-Challenge", 2)]:
         try:
             ds = load_dataset("allenai/ai2_arc", split_name, split="train")
         except Exception:
@@ -333,21 +310,12 @@ def build_pairs(corpus: List[Dict], num_neg: int = 3) -> List[Dict]:
             idx = _find_best_passage(qkw, corpus_kw, min_overlap=2)
             if idx is None:
                 continue
-            bl = min(6, max(1, assign_bloom(q, src) + boost))
-            negs = _mine_negatives(idx, corpus, by_topic, by_subject,
-                                    corpus[idx]["topic"], corpus[idx]["subject"], num_neg)
-            pairs.append({
-                "query": q, "positive_text": corpus[idx]["text"], "positive_id": corpus[idx]["id"],
-                "negative_texts": [corpus[j]["text"] for j in negs],
-                "negative_ids": [corpus[j]["id"] for j in negs],
-                "bloom_level": bl, "subject": corpus[idx]["subject"],
-                "topic": corpus[idx]["topic"], "query_type": _query_type(q, bl),
-            })
-    print(f"    ARC: {len(pairs) - n0} pairs")
+            raw_matches.append((q, idx, boost))
+    print(f"    ARC: {len(raw_matches) - n0} candidates")
 
     # OpenBookQA questions
-    print("  Matching OpenBookQA questions...")
-    n0 = len(pairs)
+    print("  Collecting OpenBookQA questions...")
+    n0 = len(raw_matches)
     try:
         ds = load_dataset("allenai/openbookqa", "main", split="train")
         for row in ds:
@@ -361,19 +329,28 @@ def build_pairs(corpus: List[Dict], num_neg: int = 3) -> List[Dict]:
             idx = _find_best_passage(qkw, corpus_kw, min_overlap=2)
             if idx is None:
                 continue
-            bl = assign_bloom(q, "openbookqa")
-            negs = _mine_negatives(idx, corpus, by_topic, by_subject,
-                                    corpus[idx]["topic"], corpus[idx]["subject"], num_neg)
-            pairs.append({
-                "query": q, "positive_text": corpus[idx]["text"], "positive_id": corpus[idx]["id"],
-                "negative_texts": [corpus[j]["text"] for j in negs],
-                "negative_ids": [corpus[j]["id"] for j in negs],
-                "bloom_level": bl, "subject": corpus[idx]["subject"],
-                "topic": corpus[idx]["topic"], "query_type": _query_type(q, bl),
-            })
+            raw_matches.append((q, idx, 0))
     except Exception:
         pass
-    print(f"    OBQA: {len(pairs) - n0} pairs")
+    print(f"    OBQA: {len(raw_matches) - n0} candidates")
+
+    # ── Batch classify all queries at once ──
+    print(f"  Classifying {len(raw_matches)} queries with HuggingFace Bloom model...")
+    bloom_levels = classify_bloom_batch([q for q, _, _ in raw_matches])
+
+    # ── Build final pairs ──
+    pairs = []
+    for (q, idx, boost), bl in zip(raw_matches, bloom_levels):
+        bl = min(6, max(1, bl + boost))
+        negs = _mine_negatives(idx, corpus, by_topic, by_subject,
+                               corpus[idx]["topic"], corpus[idx]["subject"], num_neg)
+        pairs.append({
+            "query": q, "positive_text": corpus[idx]["text"], "positive_id": corpus[idx]["id"],
+            "negative_texts": [corpus[j]["text"] for j in negs],
+            "negative_ids": [corpus[j]["id"] for j in negs],
+            "bloom_level": bl, "subject": corpus[idx]["subject"],
+            "topic": corpus[idx]["topic"], "query_type": _query_type(q, bl),
+        })
 
     print(f"  Total: {len(pairs)} pairs")
     return pairs
@@ -441,7 +418,5 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", default="data/real")
     args = parser.parse_args()
 
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from utils.misc import load_config
     build_real_dataset(load_config(args.config), args.output_dir)

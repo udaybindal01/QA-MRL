@@ -7,6 +7,8 @@ Adds:
   - ARC with challenge reasoning
 
 These provide more Bloom level diversity and larger evaluation sets.
+Bloom classification uses cip29/bert-blooms-taxonomy-classifier (HuggingFace),
+not regex patterns.
 
 Usage:
     python data/build_extended_edu.py --output_dir /tmp/data/edu_extended
@@ -16,47 +18,13 @@ import argparse
 import json
 import os
 import random
-import re
 import sys
 from typing import Dict, List
 from collections import defaultdict
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-BLOOM_PATTERNS = {
-    1: [r"\bwhat is\b", r"\bdefine\b", r"\bname\b", r"\blist\b", r"\bidentify\b",
-        r"\bwhich of the following\b"],
-    2: [r"\bwhy\b", r"\bexplain\b", r"\bdescribe\b", r"\bhow does\b",
-        r"\bwhat happens when\b", r"\bwhat causes\b"],
-    3: [r"\bwhat would happen\b", r"\bpredict\b", r"\bcalculate\b",
-        r"\bif .+ then\b", r"\bhow would\b"],
-    4: [r"\bcompare\b", r"\bcontrast\b", r"\bdifference between\b",
-        r"\brelationship between\b", r"\banalyze\b"],
-    5: [r"\bevaluate\b", r"\bjudge\b", r"\bjustify\b",
-        r"\bwhich .+ best\b", r"\bmost likely\b", r"\bevidence\b"],
-}
-
-
-def assign_bloom(question, source="", grade=None):
-    q = question.lower().strip()
-    for level in [5, 4, 3, 2, 1]:
-        for pat in BLOOM_PATTERNS[level]:
-            if re.search(pat, q):
-                return level
-    # Grade-based fallback
-    if grade is not None:
-        if grade <= 5:
-            return 1
-        elif grade <= 8:
-            return 2
-        elif grade <= 10:
-            return 3
-        else:
-            return 4
-    return {"sciq": 2, "arc_easy": 1, "arc_challenge": 3,
-            "scienceqa": 2, "race_middle": 2, "race_high": 3}.get(source, 2)
+from data.bloom_classifier import classify_bloom_batch
 
 
 def load_scienceqa(max_samples=5000):
@@ -76,32 +44,31 @@ def load_scienceqa(max_samples=5000):
             print(f"    Failed: {e}")
             return [], []
 
-    corpus = []
-    pairs = []
-    pid = 0
-
-    for i, row in enumerate(ds):
-        if len(pairs) >= max_samples:
+    raw = []
+    for row in ds:
+        if len(raw) >= max_samples:
             break
-
         question = row.get("question", "")
         hint = row.get("hint", "")
         solution = row.get("solution", "")
+        passage = f"{hint} {solution}".strip()
+        if len(passage) < 30:
+            continue
         topic = row.get("topic", "general")
         grade = row.get("grade", None)
         subject = row.get("subject", "science")
         choices = row.get("choices", [])
         answer_idx = row.get("answer", 0)
+        raw.append((question, passage, topic, grade, subject, choices, answer_idx))
 
-        # Build passage from hint + solution (NOT the question)
-        passage = f"{hint} {solution}".strip()
-        if len(passage) < 30:
-            continue
+    print(f"    Classifying {len(raw)} ScienceQA queries...")
+    bloom_levels = classify_bloom_batch([r[0] for r in raw])
 
+    corpus = []
+    pairs = []
+    for pid, (question, passage, topic, grade, subject, choices, answer_idx), bloom in \
+            zip(range(len(raw)), raw, bloom_levels):
         answer = choices[answer_idx] if answer_idx < len(choices) else ""
-        bloom = assign_bloom(question, "scienceqa", grade)
-
-        # Add passage to corpus
         p_id = f"sciqa_{pid}"
         corpus.append({
             "id": p_id, "text": passage,
@@ -110,8 +77,6 @@ def load_scienceqa(max_samples=5000):
             "bloom_level": bloom, "source": "scienceqa",
             "difficulty": "easy" if (grade and grade <= 5) else "medium",
         })
-        pid += 1
-
         pairs.append({
             "query": question,
             "positive_text": passage,
@@ -136,10 +101,7 @@ def load_race(max_samples=3000):
     from datasets import load_dataset
     print("  Loading RACE...")
 
-    corpus = []
-    pairs = []
-    pid = 0
-
+    raw = []  # (question, article, level, bloom_base)
     for level, bloom_base in [("middle", 2), ("high", 3)]:
         try:
             ds = load_dataset("ehovy/race", level, split="train", trust_remote_code=True)
@@ -148,41 +110,41 @@ def load_race(max_samples=3000):
             continue
 
         for row in ds:
-            if len(pairs) >= max_samples:
+            if len(raw) >= max_samples:
                 break
-
             article = row.get("article", "")
             question = row.get("question", "")
-            options = row.get("options", [])
-            answer_key = row.get("answer", "")
-
             if len(article) < 50 or not question:
                 continue
+            raw.append((question, article[:500], level, bloom_base))
 
-            bloom = assign_bloom(question, f"race_{level}")
-            bloom = max(bloom, bloom_base)
+    print(f"    Classifying {len(raw)} RACE queries...")
+    bloom_levels = classify_bloom_batch([r[0] for r in raw])
 
-            p_id = f"race_{pid}"
-            corpus.append({
-                "id": p_id, "text": article[:500],  # Truncate long articles
-                "subject": "reading_comprehension",
-                "topic": "general",
-                "bloom_level": bloom, "source": f"race_{level}",
-                "difficulty": level,
-            })
-            pid += 1
-
-            pairs.append({
-                "query": question,
-                "positive_text": article[:500],
-                "positive_id": p_id,
-                "negative_texts": [],
-                "negative_ids": [],
-                "bloom_level": bloom,
-                "subject": "reading_comprehension",
-                "topic": "general",
-                "query_type": "conceptual" if bloom >= 3 else "factual",
-            })
+    corpus = []
+    pairs = []
+    for pid, (question, article, level, bloom_base), bloom in \
+            zip(range(len(raw)), raw, bloom_levels):
+        bloom = max(bloom, bloom_base)
+        p_id = f"race_{pid}"
+        corpus.append({
+            "id": p_id, "text": article,
+            "subject": "reading_comprehension",
+            "topic": "general",
+            "bloom_level": bloom, "source": f"race_{level}",
+            "difficulty": level,
+        })
+        pairs.append({
+            "query": question,
+            "positive_text": article,
+            "positive_id": p_id,
+            "negative_texts": [],
+            "negative_ids": [],
+            "bloom_level": bloom,
+            "subject": "reading_comprehension",
+            "topic": "general",
+            "query_type": "conceptual" if bloom >= 3 else "factual",
+        })
 
     print(f"    Loaded {len(corpus)} passages, {len(pairs)} pairs from RACE")
     return corpus, pairs

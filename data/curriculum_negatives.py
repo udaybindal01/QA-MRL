@@ -18,7 +18,6 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 from tqdm import tqdm
-import re
 
 
 STOPWORDS = {"the", "and", "for", "are", "was", "were", "that", "this",
@@ -32,7 +31,9 @@ STOPWORDS = {"the", "and", "for", "are", "was", "were", "that", "this",
 
 
 def _get_keywords(text: str) -> set:
-    return set(re.findall(r'\b[a-z]{3,}\b', text.lower())) - STOPWORDS
+    words = text.lower().split()
+    return {w.strip(".,!?;:\"'()[]{}") for w in words
+            if len(w) >= 3 and w.strip(".,!?;:\"'()[]{}").isalpha()} - STOPWORDS
 
 
 class CurriculumNegativeMiner:

@@ -46,9 +46,10 @@ class BloomDimMapping(nn.Module):
     interpretable: simpler queries → fewer dims, complex queries → more.
 
     Implementation: 6 learnable logit vectors (one per Bloom level),
-    each a distribution over the available truncation dims. During
-    training, Gumbel-Softmax selects differentiably. After training,
-    take argmax to get a fixed lookup table.
+    each a distribution over the available truncation dims. Initialized
+    uniformly — training signal alone determines which dim each Bloom
+    level converges to. During training, Gumbel-Softmax selects
+    differentiably. After training, take argmax to get a fixed lookup table.
     """
 
     def __init__(self, num_bloom_levels: int = 6,
@@ -60,16 +61,10 @@ class BloomDimMapping(nn.Module):
         self.num_blooms = num_bloom_levels
         self.temperature = temperature
 
-        # One logit vector per Bloom level, over the available dims
-        # Initialize with bias: lower Bloom → prefer lower dims
+        # One logit vector per Bloom level, over the available dims.
+        # Initialized uniformly (zeros → uniform softmax) so training determines
+        # which dimension each Bloom level converges to, with no prior assumption.
         self.bloom_dim_logits = nn.Parameter(torch.zeros(num_bloom_levels, self.num_dims))
-        with torch.no_grad():
-            for b in range(num_bloom_levels):
-                # Bloom 0 (Remember) biased toward lower dims
-                # Bloom 5 (Create) biased toward higher dims
-                center = b * (self.num_dims - 1) / (num_bloom_levels - 1)
-                for d in range(self.num_dims):
-                    self.bloom_dim_logits[b, d] = -0.5 * (d - center) ** 2
 
     def forward(self, bloom_levels: torch.Tensor,
                 hard: Optional[bool] = None) -> Dict[str, torch.Tensor]:
