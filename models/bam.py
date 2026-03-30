@@ -37,48 +37,6 @@ from typing import Dict, List, Optional, Tuple
 from models.encoder import MRLEncoder
 
 
-class BloomClassifier(nn.Module):
-    """
-    Predicts the Bloom cognitive level of a query from its embedding.
-
-    This runs at inference so the system doesn't need ground-truth
-    Bloom labels. Trained jointly with the encoder using the query
-    Bloom labels available in training data.
-    """
-
-    def __init__(self, embedding_dim: int = 768, num_bloom_levels: int = 6,
-                 hidden_dim: int = 256):
-        super().__init__()
-        self.classifier = nn.Sequential(
-            nn.Linear(embedding_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim // 2, num_bloom_levels),
-        )
-
-    def forward(self, embedding: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        Args:
-            embedding: [B, D] query embedding
-        Returns:
-            logits: [B, num_bloom_levels]
-            predicted_level: [B] argmax prediction (0-indexed)
-            probs: [B, num_bloom_levels] softmax probabilities
-        """
-        logits = self.classifier(embedding)
-        probs = F.softmax(logits, dim=-1)
-        predicted = logits.argmax(dim=-1)
-        return {
-            "logits": logits,
-            "predicted_level": predicted,
-            "probs": probs,
-        }
-
-
 class BloomDimMapping(nn.Module):
     """
     Learns a global mapping: Bloom level → optimal truncation dimension.
@@ -199,12 +157,6 @@ class BloomAlignedMRL(nn.Module):
             normalize=mc["normalize_embeddings"],
         )
 
-        # Bloom classifier: predicts query Bloom level from embedding
-        self.bloom_classifier = BloomClassifier(
-            embedding_dim=mc["embedding_dim"],
-            num_bloom_levels=6,
-            hidden_dim=mc.get("bloom_classifier", {}).get("hidden_dim", 256),
-        )
 
         # Bloom → Dim mapping: learns optimal truncation per Bloom level
         self.bloom_dim_map = BloomDimMapping(
@@ -230,6 +182,8 @@ class BloomAlignedMRL(nn.Module):
         If bloom_labels are provided (training), use them directly.
         If not (inference), predict them with the Bloom classifier.
         """
+        if bloom_labels is None:
+            raise ValueError("bloom_labels must be provided from the dataset.")
         enc = self.encoder(input_ids, attention_mask, token_type_ids)
         full_emb = enc["full"]
         truncated = enc["truncated"]
@@ -238,18 +192,7 @@ class BloomAlignedMRL(nn.Module):
         # detach: Bloom classifier trains on a frozen copy of the embedding,
         # so its gradients don't alter the encoder's representation space.
         # The classifier IS still trained (via bloom_cls_loss), just independently.
-        bloom_out = self.bloom_classifier(full_emb.detach())
-
-        # Determine which Bloom levels to use for dim mapping
-        if bloom_labels is not None:
-            # Training: use ground-truth Bloom labels
-            bloom_for_dim = bloom_labels
-        else:
-            # Inference: use predicted Bloom labels
-            bloom_for_dim = bloom_out["predicted_level"]
-
-        # Get truncation via Bloom → dim mapping
-        dim_out = self.bloom_dim_map(bloom_for_dim)
+        dim_out = self.bloom_dim_map(bloom_labels)
         selection = dim_out["selection"]  # [B, K]
 
         # Compute adaptive embedding: weighted mixture of truncated
@@ -270,8 +213,7 @@ class BloomAlignedMRL(nn.Module):
             "adaptive_embedding": adaptive_emb,
             "masked_embedding": adaptive_emb,
             "mask": self._build_effective_mask(selection, B, full_emb.device),
-            "bloom_classifier_output": bloom_out,
-            "policy_output": {  # Compatibility with trainer/eval
+            "policy_output": { 
                 "selection": selection,
                 "selected_dim": dim_out["selected_dim"],
                 "avg_dim": dim_out["avg_dim"],
@@ -333,7 +275,6 @@ class BloomAlignedMRL(nn.Module):
             "query_mask": q["mask"],
             "query_truncated": q["truncated"],
             "policy_output": q["policy_output"],
-            "bloom_classifier_output": q["bloom_classifier_output"],
             "positive_embedding": p["full_embedding"],
             "positive_masked": p["full_embedding"],
             "positive_mask": p["mask"],
@@ -357,8 +298,6 @@ class BloomAlignedMRL(nn.Module):
         return [
             {"params": list(self.encoder.parameters()),
              "lr": oc["encoder_lr"]},
-            {"params": list(self.bloom_classifier.parameters()),
-             "lr": oc.get("router_lr", oc["encoder_lr"] * 5)},
             {"params": list(self.bloom_dim_map.parameters()),
              "lr": oc.get("router_lr", oc["encoder_lr"] * 5)},
         ]
@@ -374,10 +313,8 @@ class BloomAlignedMRL(nn.Module):
         for p in self.encoder.parameters(): p.requires_grad = True
     def freeze_router(self):
         for p in self.bloom_dim_map.parameters(): p.requires_grad = False
-        for p in self.bloom_classifier.parameters(): p.requires_grad = False
     def unfreeze_router(self):
         for p in self.bloom_dim_map.parameters(): p.requires_grad = True
-        for p in self.bloom_classifier.parameters(): p.requires_grad = True
 
     @property
     def query_router(self):

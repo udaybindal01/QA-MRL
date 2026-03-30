@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer
-
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 # ─────────────────────────── Data structures ──────────────────────────────
 
@@ -200,12 +200,8 @@ class EducationalCorpusBuilder:
             )
 
             # Positive: matching Bloom level
-            positives = [p for p in passages if p.bloom_level == bloom]
-            if not positives:
-                positives = [p for p in passages if abs(p.bloom_level - bloom) <= 1]
-            if not positives:
-                continue
-            positive = random.choice(positives)
+            positives = random.choice(passages)
+
 
             # Hard negatives: same topic different Bloom + cross-topic
             hard_negs = [p for p in passages if p.bloom_level != bloom]
@@ -268,6 +264,44 @@ class EducationalRetrievalDataset(Dataset):
             for line in f:
                 self.samples.append(json.loads(line.strip()))
 
+        # --- PRETRAINED BLOOM CLASSIFIER INFERENCE ---
+        print(f"Loading pretrained Bloom classifier to score {len(self.samples)} queries...")
+        model_name = "cip29/bert-blooms-taxonomy-classifier"
+        b_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        b_model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        b_model.to(device)
+        b_model.eval()
+
+        batch_size = 128
+        queries = [s["query"] for s in self.samples]
+        predicted_blooms = []
+
+        # Map string outputs to 0-5 indices
+        bloom_map = {"remember": 0, "understand": 1, "apply": 2, "analyze": 3, "evaluate": 4, "create": 5}
+
+        with torch.no_grad():
+            for i in range(0, len(queries), batch_size):
+                batch_queries = queries[i:i+batch_size]
+                inputs = b_tokenizer(batch_queries, padding=True, truncation=True, return_tensors="pt").to(device)
+                outputs = b_model(**inputs)
+                preds = outputs.logits.argmax(dim=-1).cpu().tolist()
+
+                for p in preds:
+                    label_str = b_model.config.id2label.get(p, str(p)).lower()
+                    mapped_idx = next((v for k, v in bloom_map.items() if k in label_str), p)
+                    mapped_idx = max(0, min(mapped_idx, 5))
+                    predicted_blooms.append(mapped_idx)
+
+        # Inject the predicted scores back into the samples
+        for s, b in zip(self.samples, predicted_blooms):
+            s["predicted_bloom_level"] = b
+
+        # Free up VRAM so main training isn't affected
+        del b_model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def __len__(self):
         return len(self.samples)
 
@@ -285,8 +319,9 @@ class EducationalRetrievalDataset(Dataset):
         n_enc = self.tokenizer(neg_texts, max_length=self.max_p,
                                padding="max_length", truncation=True, return_tensors="pt")
 
-        bloom = s["bloom_level"] - 1  # Query Bloom level (0-indexed)
-        subject = SUBJECT_TO_IDX.get(s["subject"], 0)
+        # Read the bloom level predicted during __init__
+        bloom = s["predicted_bloom_level"]
+        subject = SUBJECT_TO_IDX.get(s.get("subject", ""), 0)
         lf = torch.zeros(6)
         lf[bloom] = 1.0
 
@@ -297,10 +332,9 @@ class EducationalRetrievalDataset(Dataset):
             "positive_attention_mask": p_enc["attention_mask"].squeeze(0),
             "negative_input_ids": n_enc["input_ids"],
             "negative_attention_mask": n_enc["attention_mask"],
-            "bloom_label": torch.tensor(bloom, dtype=torch.long),  # Query-only
+            "bloom_label": torch.tensor(bloom, dtype=torch.long),
             "subject_label": torch.tensor(subject, dtype=torch.long),
             "learner_features": lf,
-            # v3: No negative_blooms — docs have no Bloom labels
         }
 
 

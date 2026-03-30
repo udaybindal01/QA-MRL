@@ -118,7 +118,6 @@ class BAMTrainer:
                 policy_output=outputs["policy_output"],
                 bloom_labels=batch.get("bloom_label"),
                 negative_embs=outputs.get("negative_embeddings"),
-                bloom_classifier_output=outputs.get("bloom_classifier_output"),
                 phase=phase,
                 curriculum_progress=curriculum_progress,
             )
@@ -142,7 +141,7 @@ class BAMTrainer:
         meters = {k: AverageMeter() for k in [
             "total", "contrastive", "policy_contrastive",
             "policy_avg_dim", "policy_entropy", "alpha", "curriculum",
-            "curriculum_temperature", "bloom_cls_acc",
+            "curriculum_temperature",
         ]}
 
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch} [{phase_name}]")
@@ -184,12 +183,11 @@ class BAMTrainer:
 
             dim_str = f"{meters['policy_avg_dim'].avg:.0f}" if meters['policy_avg_dim'].count else "N/A"
             ent_str = f"{meters['policy_entropy'].avg:.2f}" if meters['policy_entropy'].count else "N/A"
-            bacc_str = f"{meters['bloom_cls_acc'].avg:.2f}" if meters['bloom_cls_acc'].count else "N/A"
+            # bacc_str = f"{meters['bloom_cls_acc'].avg:.2f}" if meters['bloom_cls_acc'].count else "N/A"
             pbar.set_postfix(
                 loss=f"{meters['total'].avg:.4f}",
                 alpha=f"{alpha:.2f}",
                 dim=dim_str,
-                bloom_acc=bacc_str,
                 cur=f"{curriculum:.2f}",
             )
 
