@@ -88,6 +88,7 @@ class BAMTrainer:
 
     def train_step(self, batch, alpha, curriculum_progress):
         batch = move_to_device(batch, self.device)
+        self.model.bloom_dim_map.set_temperature(curriculum_progress)
 
         with autocast(enabled=self.use_fp16):
             outputs = self.model(

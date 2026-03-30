@@ -200,18 +200,16 @@ class TruncationPolicyLoss(nn.Module):
     """
 
     def __init__(self, mrl_dims: List[int], temperature: float = 0.05,
-                 efficiency_weight: float = 0.1, entropy_weight: float = 0.05):
+                 efficiency_weight: float = 0.3):
         super().__init__()
         self.mrl_dims = mrl_dims
         self.temperature = temperature
         self.efficiency_weight = efficiency_weight
-        self.entropy_weight = entropy_weight
         self.max_dim = max(mrl_dims)
 
     def forward(self, query_adaptive, positive_emb, policy_output,
-                negative_embs=None, **kwargs):
+                negative_embs=None, bloom_labels=None, **kwargs):
         selected_dim = policy_output["selected_dim"]
-        entropy = policy_output["entropy"]
 
         # Contrastive with adaptive embedding
         if negative_embs is not None:
@@ -225,21 +223,19 @@ class TruncationPolicyLoss(nn.Module):
             labels = torch.arange(sim.size(0), device=sim.device)
             contrastive = F.cross_entropy(sim, labels)
 
-        # Efficiency: prefer fewer dims
-        efficiency = (selected_dim / self.max_dim).mean()
+        # Per-Bloom efficiency: lower Bloom levels get stronger pressure to use fewer dims
+        # Bloom 1 (Remember) → scale 0.8, Bloom 6 (Create) → scale 0.0
+        if bloom_labels is not None:
+            bloom_scale = 1.0 - (bloom_labels.float() / 5.0)
+            efficiency = (bloom_scale * selected_dim / self.max_dim).mean()
+        else:
+            efficiency = (selected_dim / self.max_dim).mean()
 
-        # Entropy bonus: prevent policy collapse to a single dim
-        # Negative sign because we want to MAXIMIZE entropy
-        entropy_bonus = -entropy
-
-        total = (contrastive
-                 + self.efficiency_weight * efficiency
-                 + self.entropy_weight * entropy_bonus)
+        total = contrastive + self.efficiency_weight * efficiency
 
         return total, {
             "policy_contrastive": contrastive.item(),
             "policy_efficiency": efficiency.item(),
-            "policy_entropy": entropy.item(),
             "policy_avg_dim": selected_dim.mean().item(),
         }
 
@@ -265,7 +261,6 @@ class BAMCombinedLoss(nn.Module):
             "contrastive": lc.get("bloom_contrastive_weight", 1.0),
             "mrl": lc.get("bloom_mrl_weight", 0.5),
             "policy": lc.get("policy_weight", 0.3),
-            "bloom_cls": lc.get("bloom_classifier_loss_weight", 0.5),
         }
 
         self.curriculum_contrastive = CurriculumScheduledLoss(
@@ -279,14 +274,12 @@ class BAMCombinedLoss(nn.Module):
         )
         self.policy_loss = TruncationPolicyLoss(
             mrl_dims=mc["mrl_dims"],
-            efficiency_weight=lc.get("efficiency_weight", 0.1),
-            entropy_weight=lc.get("entropy_weight", 0.05),
+            efficiency_weight=lc.get("efficiency_weight", 0.3),
         )
 
     def forward(self, query_emb, positive_emb, query_adaptive,
                 query_truncated, positive_truncated, policy_output,
                 bloom_labels=None, negative_embs=None,
-                bloom_classifier_output=None,
                 phase="joint", curriculum_progress=0.0,
                 **kwargs):
         """
@@ -320,19 +313,10 @@ class BAMCombinedLoss(nn.Module):
             l_pol, pol_stats = self.policy_loss(
                 query_adaptive, positive_emb, policy_output,
                 negative_embs=negative_embs,
+                bloom_labels=bloom_labels,
             )
             losses.update(pol_stats)
             total = total + self.weights["policy"] * l_pol
-
-        # 4. Bloom classifier loss (trains the inference-time predictor)
-        if bloom_labels is not None and bloom_classifier_output is not None:
-            bloom_cls_loss = F.cross_entropy(
-                bloom_classifier_output["logits"], bloom_labels
-            )
-            bloom_cls_acc = (bloom_classifier_output["predicted_level"] == bloom_labels).float().mean()
-            losses["bloom_cls_loss"] = bloom_cls_loss.item()
-            losses["bloom_cls_acc"] = bloom_cls_acc.item()
-            total = total + self.weights["bloom_cls"] * bloom_cls_loss
 
         # Log the learned Bloom → dim table
         if "bloom_dim_table" in policy_output:

@@ -61,10 +61,17 @@ class BloomDimMapping(nn.Module):
         self.num_blooms = num_bloom_levels
         self.temperature = temperature
 
+        self.initial_temperature = temperature
+
         # One logit vector per Bloom level, over the available dims.
-        # Initialized uniformly (zeros → uniform softmax) so training determines
-        # which dimension each Bloom level converges to, with no prior assumption.
+        # Initialized with Gaussian bias (strength -1.0): lower Bloom → lower dims,
+        # higher Bloom → higher dims. Stronger than -0.5 so training starts differentiated.
         self.bloom_dim_logits = nn.Parameter(torch.zeros(num_bloom_levels, self.num_dims))
+        with torch.no_grad():
+            for b in range(num_bloom_levels):
+                center = b * (self.num_dims - 1) / (num_bloom_levels - 1)
+                for d in range(self.num_dims):
+                    self.bloom_dim_logits[b, d] = -1.0 * (d - center) ** 2
 
     def forward(self, bloom_levels: torch.Tensor,
                 hard: Optional[bool] = None) -> Dict[str, torch.Tensor]:
@@ -84,7 +91,7 @@ class BloomDimMapping(nn.Module):
         logits = self.bloom_dim_logits[bloom_levels]  # [B, K]
 
         if self.training:
-            selection = F.gumbel_softmax(logits, tau=self.temperature, hard=False)
+            selection = F.gumbel_softmax(logits, tau=self.temperature, hard=True)
         else:
             selection = F.softmax(logits, dim=-1)
 
@@ -115,6 +122,10 @@ class BloomDimMapping(nn.Module):
             "probs": probs,
             "indices": probs.argmax(dim=-1),
         }
+
+    def set_temperature(self, progress: float):
+        """Anneal temperature from initial_temperature → 0.1 over training (progress 0→1)."""
+        self.temperature = self.initial_temperature + (0.1 - self.initial_temperature) * progress
 
     def get_dim_table(self) -> Dict[int, int]:
         """Get the learned Bloom → dim mapping as a dict (for logging/inference)."""
@@ -187,10 +198,7 @@ class BloomAlignedMRL(nn.Module):
         full_emb = enc["full"]
         truncated = enc["truncated"]
 
-        # Classify Bloom level
-        # detach: Bloom classifier trains on a frozen copy of the embedding,
-        # so its gradients don't alter the encoder's representation space.
-        # The classifier IS still trained (via bloom_cls_loss), just independently.
+        # Map Bloom level → truncation dimension
         dim_out = self.bloom_dim_map(bloom_labels)
         selection = dim_out["selection"]  # [B, K]
 
@@ -298,7 +306,7 @@ class BloomAlignedMRL(nn.Module):
             {"params": list(self.encoder.parameters()),
              "lr": oc["encoder_lr"]},
             {"params": list(self.bloom_dim_map.parameters()),
-             "lr": oc.get("router_lr", oc["encoder_lr"] * 5)},
+             "lr": oc.get("router_lr", oc["encoder_lr"] * 50)},
         ]
 
     def get_bloom_dim_table(self) -> Dict[int, int]:
