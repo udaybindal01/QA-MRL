@@ -226,37 +226,23 @@ def _find_best_passage(query_kw: set, corpus_kw: List[set], min_overlap: int = 3
     return best_idx
 
 
-def _mine_negatives(pos_idx, corpus, by_topic, by_subject, topic, subject, num_neg):
+def _mine_negatives(pos_idx, corpus_kw, query_kw, num_neg):
     """
-    Topic-based hard negatives only (no Bloom-distance tiers).
+    BM25-style hard negatives: rank all passages by keyword overlap with query.
 
-    v3: Documents don't have Bloom levels, so negatives are mined by
-    topical confusion:
-      Tier 1 (hardest): Same topic, different passage
-      Tier 2: Same subject, different topic
-      Tier 3: Random from corpus
+    v4: No subject/topic labels used. The most lexically similar passages
+    (highest keyword overlap with the query) are the hardest negatives.
     """
-    negs = []
+    scored = []
+    for j, ckw in enumerate(corpus_kw):
+        if j == pos_idx:
+            continue
+        overlap = len(query_kw & ckw) if query_kw else 0
+        scored.append((j, overlap))
 
-    # Tier 1: Same topic, different passage (hardest — topically confusing)
-    cands = [j for j in by_topic.get(topic, []) if j != pos_idx]
-    if cands:
-        negs.extend(random.sample(cands, min(num_neg, len(cands))))
-
-    # Tier 2: Same subject, different topic
-    if len(negs) < num_neg:
-        cands = [j for j in by_subject.get(subject, [])
-                 if j != pos_idx and j not in negs and corpus[j]["topic"] != topic]
-        if cands:
-            negs.extend(random.sample(cands, min(num_neg - len(negs), len(cands))))
-
-    # Tier 3: Random fill
-    if len(negs) < num_neg:
-        others = [j for j in range(len(corpus)) if j != pos_idx and j not in negs]
-        if others:
-            negs.extend(random.sample(others, min(num_neg - len(negs), len(others))))
-
-    return negs[:num_neg]
+    # Sort descending — highest overlap = most confusing negative
+    scored.sort(key=lambda x: -x[1])
+    return [j for j, _ in scored[:num_neg]]
 
 
 def build_pairs(corpus: List[Dict], num_neg: int = 3) -> List[Dict]:
@@ -265,11 +251,6 @@ def build_pairs(corpus: List[Dict], num_neg: int = 3) -> List[Dict]:
 
     # Precompute keyword index
     corpus_kw = [_get_keywords(p["text"]) for p in corpus]
-    by_topic = defaultdict(list)
-    by_subject = defaultdict(list)
-    for i, p in enumerate(corpus):
-        by_topic[p["topic"]].append(i)
-        by_subject[p["subject"]].append(i)
 
     # ── Collect (query, corpus_idx, bloom_boost) for all sources ──
 
@@ -342,8 +323,8 @@ def build_pairs(corpus: List[Dict], num_neg: int = 3) -> List[Dict]:
     pairs = []
     for (q, idx, boost), bl in zip(raw_matches, bloom_levels):
         bl = min(6, max(1, bl + boost))
-        negs = _mine_negatives(idx, corpus, by_topic, by_subject,
-                               corpus[idx]["topic"], corpus[idx]["subject"], num_neg)
+        qkw = _get_keywords(q)
+        negs = _mine_negatives(idx, corpus_kw, qkw, num_neg)
         pairs.append({
             "query": q, "positive_text": corpus[idx]["text"], "positive_id": corpus[idx]["id"],
             "negative_texts": [corpus[j]["text"] for j in negs],
