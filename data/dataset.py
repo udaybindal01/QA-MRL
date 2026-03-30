@@ -23,9 +23,12 @@ class Passage:
     text: str
     subject: str
     topic: str
-    bloom_level: int
     source: str
     difficulty: str
+    # v3: bloom_level is a QUERY property, not a document property.
+    # Retained as optional for backward compat with synthetic corpus builder,
+    # but should NOT be used in training or evaluation.
+    bloom_level: Optional[int] = None
     metadata: Dict = field(default_factory=dict)
 
 @dataclass
@@ -150,9 +153,9 @@ class EducationalCorpusBuilder:
                             text=text,
                             subject=subject,
                             topic=topic,
-                            bloom_level=bloom,
                             source=src_map[bloom],
                             difficulty=diff_map[bloom],
+                            bloom_level=bloom,  # synthetic only; not used in training/eval
                             metadata={"variant": i},
                         )
                         self.corpus.append(p)

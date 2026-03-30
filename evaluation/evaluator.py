@@ -248,7 +248,11 @@ class FullEvaluator:
                 blooms = learner_blooms[i:i+len(batch)]
                 lf = torch.zeros(len(batch), 6)
                 for j, bl in enumerate(blooms):
-                    lf[j, min(bl - 1, 5)] = 1.0
+                    assert 1 <= bl <= 6, (
+                        f"Bloom level must be 1-6 (1-indexed), got {bl}. "
+                        f"If your data is 0-indexed, add 1 before passing to evaluator."
+                    )
+                    lf[j, bl - 1] = 1.0
                 lf = lf.to(device)
 
             t0 = time.time()

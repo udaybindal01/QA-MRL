@@ -235,7 +235,10 @@ class BloomAlignedMRL(nn.Module):
         truncated = enc["truncated"]
 
         # Classify Bloom level
-        bloom_out = self.bloom_classifier(full_emb.detach())  # detach: classifier doesn't affect encoder
+        # detach: Bloom classifier trains on a frozen copy of the embedding,
+        # so its gradients don't alter the encoder's representation space.
+        # The classifier IS still trained (via bloom_cls_loss), just independently.
+        bloom_out = self.bloom_classifier(full_emb.detach())
 
         # Determine which Bloom levels to use for dim mapping
         if bloom_labels is not None:
@@ -300,9 +303,14 @@ class BloomAlignedMRL(nn.Module):
         }
 
     def _build_effective_mask(self, selection, B, device):
+        """Build a [B, D] mask from truncation selection weights.
+
+        Each MRL dim d gets weight selection[:, k] applied uniformly
+        across its first d dimensions.
+        """
         mask = torch.zeros(B, self.embedding_dim, device=device)
         for k, d in enumerate(self.mrl_dims):
-            w = selection[:, k].unsqueeze(-1)
+            w = selection[:, k].unsqueeze(-1).expand(-1, d)  # [B, d]
             mask[:, :d] = mask[:, :d] + w
         return mask.clamp(0, 1)
 
