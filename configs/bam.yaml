@@ -57,6 +57,7 @@ training:
     policy_weight: 0.3
     bloom_cls_weight: 0.3          # Weight of per-truncation query Bloom classifiers
     efficiency_weight: 0.3         # Reward for using fewer dims (stronger, per-Bloom weighted)
+    dim_packing_weight: 0.1        # Force early dims to reconstruct full embedding
     # Legacy compat
     contrastive_weight: 1.0
     mrl_weight: 0.5

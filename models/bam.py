@@ -171,6 +171,13 @@ class BloomAlignedMRL(nn.Module):
             temperature=mc.get("policy", {}).get("temperature", 1.0),
         )
 
+        # Bloom FiLM conditioning: modulates encoder output before truncation
+        # so the representation itself is shaped by cognitive complexity.
+        # bloom_film_embed: Bloom level → hidden vector
+        # bloom_film_linear: hidden vector → (scale, shift) pair, each [D]
+        self.bloom_film_embed = nn.Embedding(6, mc["embedding_dim"])
+        self.bloom_film_linear = nn.Linear(mc["embedding_dim"], 2 * mc["embedding_dim"])
+
         self.embedding_dim = mc["embedding_dim"]
         self.mrl_dims = mc["mrl_dims"]
 
@@ -195,8 +202,15 @@ class BloomAlignedMRL(nn.Module):
             else:
                 raise ValueError("bloom_labels or learner_features must be provided.")
         enc = self.encoder(input_ids, attention_mask, token_type_ids)
-        full_emb = enc["full"]
-        truncated = enc["truncated"]
+        full_emb = enc["full"]  # [B, D] normalized
+
+        # Bloom FiLM conditioning: modulate the full embedding by Bloom level
+        # so the representation is shaped before truncation, not just after.
+        film_params = self.bloom_film_linear(self.bloom_film_embed(bloom_labels))  # [B, 2D]
+        scale, shift = film_params.chunk(2, dim=-1)  # [B, D] each
+        full_emb = F.normalize(full_emb * (1 + scale) + shift, p=2, dim=-1)
+        # Re-derive truncated from conditioned full embedding (consistent with MRL)
+        truncated = {d: F.normalize(full_emb[:, :d], p=2, dim=-1) for d in self.mrl_dims}
 
         # Map Bloom level → truncation dimension
         dim_out = self.bloom_dim_map(bloom_labels)
@@ -302,11 +316,14 @@ class BloomAlignedMRL(nn.Module):
 
     def get_parameter_groups(self, config):
         oc = config["training"]["optimizer"]
+        fast_lr = oc.get("router_lr", oc["encoder_lr"] * 50)
         return [
             {"params": list(self.encoder.parameters()),
              "lr": oc["encoder_lr"]},
-            {"params": list(self.bloom_dim_map.parameters()),
-             "lr": oc.get("router_lr", oc["encoder_lr"] * 50)},
+            {"params": (list(self.bloom_dim_map.parameters()) +
+                        list(self.bloom_film_embed.parameters()) +
+                        list(self.bloom_film_linear.parameters())),
+             "lr": fast_lr},
         ]
 
     def get_bloom_dim_table(self) -> Dict[int, int]:

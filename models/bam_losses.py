@@ -190,6 +190,49 @@ class CurriculumScheduledLoss(nn.Module):
         return loss, stats
 
 
+class DimPackingLoss(nn.Module):
+    """
+    Forces early dimensions to be maximally informative by reconstructing
+    the full embedding from each truncation level.
+
+    For each truncation dim d, a linear projection d→D is trained jointly.
+    Loss = mean over truncations of (1 - cosine_sim(proj(trunc_d), full_emb)).
+
+    No Bloom labels used — this is purely about packing retrieval-relevant
+    information into the fewest possible dimensions.
+    """
+
+    def __init__(self, mrl_dims: List[int], embedding_dim: int = 768):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        # Exclude the full dim — no need to reconstruct 768 from 768
+        self.pack_dims = [d for d in mrl_dims if d < embedding_dim]
+        self.projections = nn.ModuleDict({
+            str(d): nn.Linear(d, embedding_dim, bias=False)
+            for d in self.pack_dims
+        })
+
+    def forward(self, truncated: Dict, full_emb: torch.Tensor):
+        """
+        truncated: {dim: [B, d]} truncated query embeddings (post-FiLM)
+        full_emb:  [B, D] full conditioned embedding — detached as reconstruction target
+        """
+        target = F.normalize(full_emb.detach(), p=2, dim=-1)
+        total = torch.tensor(0.0, device=target.device)
+        stats = {}
+
+        for d in self.pack_dims:
+            recon = F.normalize(self.projections[str(d)](truncated[d]), p=2, dim=-1)
+            cos_sim = (recon * target).sum(dim=-1).mean()
+            loss = 1.0 - cos_sim
+            total = total + loss
+            stats[f"dim_pack_{d}"] = loss.item()
+
+        total = total / len(self.pack_dims)
+        stats["dim_packing"] = total.item()
+        return total, stats
+
+
 class TruncationPolicyLoss(nn.Module):
     """
     Reward signal for adaptive truncation policy.
@@ -261,7 +304,13 @@ class BAMCombinedLoss(nn.Module):
             "contrastive": lc.get("bloom_contrastive_weight", 1.0),
             "mrl": lc.get("bloom_mrl_weight", 0.5),
             "policy": lc.get("policy_weight", 0.3),
+            "dim_packing": lc.get("dim_packing_weight", 0.1),
         }
+
+        self.dim_packing = DimPackingLoss(
+            mrl_dims=mc["mrl_dims"],
+            embedding_dim=mc["embedding_dim"],
+        )
 
         self.curriculum_contrastive = CurriculumScheduledLoss(
             temperature=0.05,
@@ -317,6 +366,11 @@ class BAMCombinedLoss(nn.Module):
             )
             losses.update(pol_stats)
             total = total + self.weights["policy"] * l_pol
+
+        # 4. Dimension packing: force early dims to reconstruct full embedding
+        l_pack, pack_stats = self.dim_packing(query_truncated, query_emb)
+        losses.update(pack_stats)
+        total = total + self.weights["dim_packing"] * l_pack
 
         # Log the learned Bloom → dim table
         if "bloom_dim_table" in policy_output:
