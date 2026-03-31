@@ -133,12 +133,15 @@ def main():
             hi = bam_metrics[ci_hi_key]
             print(f"    {'':41s}  (n={n}, 95% CI=[{lo:.3f}, {hi:.3f}])")
 
-    # BAM per-Bloom dims
-    print(f"\n{'BAM Avg Dims per Bloom Level':45s}")
+    # BAM per-Bloom dims (from BloomDimRouter)
+    print(f"\n{'BAM Dims per Bloom Level':45s}")
     for level in range(1, 7):
         name = BLOOM_NAMES[level]
-        # Would need to track this in eval — for now use avg
-        print(f"  {name:43s}{bam_metrics.get('avg_active_dims', 384):>12.0f}")
+        key = f"bloom_{name}_avg_dim"
+        if key in bam_metrics:
+            print(f"  {name:43s}{bam_metrics[key]:>12.0f}")
+        elif "avg_active_dims" in bam_metrics:
+            print(f"  {name:43s}{bam_metrics['avg_active_dims']:>12.0f}")
 
     # MRL truncation comparison
     if args.baseline and "MRL Baseline" in all_results:

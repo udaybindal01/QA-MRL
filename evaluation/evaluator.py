@@ -97,7 +97,7 @@ class FullEvaluator:
         # 3. Encode queries
         print("  Encoding queries...")
         query_texts = [s["query"] for s in valid_samples]
-        query_embs, query_masks, latencies = self._encode_queries(
+        query_embs, query_masks, latencies, query_dims = self._encode_queries(
             model, query_texts, tokenizer, device,
             learner_blooms=[s["bloom_level"] for s in valid_samples],
         )
@@ -177,8 +177,15 @@ class FullEvaluator:
         # A retrieved document is "good" if it's the right passage, regardless
         # of any source-assigned cognitive label.
 
-        # 8. Efficiency
-        if query_masks is not None:
+        # 8. Efficiency — per-query dims and per-Bloom averages
+        if query_dims is not None:
+            metrics["avg_active_dims"] = float(query_dims.float().mean().item())
+            for level in range(1, 7):
+                mask = query_blooms == level
+                if mask.sum() > 0:
+                    name = BLOOM_NAMES[level]
+                    metrics[f"bloom_{name}_avg_dim"] = float(query_dims[mask].float().mean().item())
+        elif query_masks is not None:
             metrics["avg_active_dims"] = float((query_masks > 0.5).float().sum(dim=-1).mean().item())
         if latencies:
             metrics["avg_latency_ms"] = float(np.mean(latencies))
@@ -231,8 +238,15 @@ class FullEvaluator:
 
     def _encode_queries(self, model, query_texts, tokenizer, device,
                          learner_blooms=None):
-        """Encode queries with optional learner features."""
-        all_embs, all_masks = [], []
+        """Encode queries with optional learner features.
+
+        Returns:
+            embs: [N, D] query embeddings (masked if BAM)
+            masks: [N, D] binary masks or None
+            latencies: list of per-query latency in ms
+            discrete_dims: [N] active dim count per query or None
+        """
+        all_embs, all_masks, all_dims = [], [], []
         latencies = []
         batch_size = 64
 
@@ -242,15 +256,14 @@ class FullEvaluator:
                            max_length=128, return_tensors="pt")
             enc = {k: v.to(device) for k, v in enc.items()}
 
-            # Build learner features
+            # Build learner features (one-hot [B, 6]) for BAM
             lf = None
             if learner_blooms and hasattr(model, "query_router"):
                 blooms = learner_blooms[i:i+len(batch)]
                 lf = torch.zeros(len(batch), 6)
                 for j, bl in enumerate(blooms):
                     assert 1 <= bl <= 6, (
-                        f"Bloom level must be 1-6 (1-indexed), got {bl}. "
-                        f"If your data is 0-indexed, add 1 before passing to evaluator."
+                        f"Bloom level must be 1-6 (1-indexed), got {bl}."
                     )
                     lf[j, bl - 1] = 1.0
                 lf = lf.to(device)
@@ -261,6 +274,12 @@ class FullEvaluator:
                                            learner_features=lf)
                 all_embs.append(out["masked_embedding"].cpu())
                 all_masks.append(out["mask"].cpu())
+                # discrete_dim: number of active dims per query
+                if "discrete_dim" in out:
+                    all_dims.append(out["discrete_dim"].detach().cpu())
+                elif "mask" in out:
+                    # Fallback: count active dims from mask
+                    all_dims.append(out["mask"].sum(dim=-1).cpu())
             else:
                 out = model(enc["input_ids"], enc["attention_mask"])
                 all_embs.append(out["full"].cpu())
@@ -268,7 +287,8 @@ class FullEvaluator:
 
         embs = torch.cat(all_embs)
         masks = torch.cat(all_masks) if all_masks else None
-        return embs, masks, latencies
+        discrete_dims = torch.cat(all_dims) if all_dims else None
+        return embs, masks, latencies, discrete_dims
 
     def _print_summary(self, metrics, N, query_blooms, show_ci=True):
         print(f"\n  === Results (N={N}) ===")

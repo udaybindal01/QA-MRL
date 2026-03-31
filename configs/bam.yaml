@@ -47,27 +47,13 @@ training:
     lr: 2.0e-5
     weight_decay: 0.01
     encoder_lr: 2.0e-5
-    router_lr: 5.0e-5           # Policy LR
+    router_lr: 1.0e-3           # BloomDimRouter has only 6 params — needs high LR
   scheduler:
     type: "cosine"
     warmup_ratio: 0.1
   loss:
-    bloom_contrastive_weight: 1.0
-    bloom_mrl_weight: 0.5
-    policy_weight: 0.3
-    bloom_cls_weight: 0.3          # Weight of per-truncation query Bloom classifiers
-    efficiency_weight: 0.3         # Reward for using fewer dims (stronger, per-Bloom weighted)
-    dim_packing_weight: 0.1        # Force early dims to reconstruct full embedding
-    # Legacy compat
     contrastive_weight: 1.0
-    mrl_weight: 0.5
-    specialization_weight: 0.0
-    sparsity_weight: 0.0
-    bloom_classification_weight: 0.0
-  phases:
-    mrl_warmup_epochs: 3
-    router_warmup_epochs: 0
-    joint_epochs: 12
+    efficiency_weight: 0.3
   checkpoint_dir: "/tmp/bam-ckpts/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
