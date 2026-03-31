@@ -1,0 +1,20 @@
+/home2/uday.bindal/QA-MRL/training/mrl_trainer.py:48: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  self.scaler = GradScaler(enabled=self.use_fp16)
+[03/31/26 18:49:17] INFO     Parameters: {'total': 109482240, 'trainable':
+                             109482240, 'frozen': 0}
+                    INFO     Starting MRL baseline training...
+Epoch 0:   0%|          | 0/928 [00:00<?, ?it/s]/home2/uday.bindal/QA-MRL/training/mrl_trainer.py:65: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with autocast(enabled=self.use_fp16):
+Epoch 0: 100%|██████████| 928/928 [02:14<00:00,  6.91it/s, loss=1.0265]
+[03/31/26 18:51:45] INFO     Epoch 0: {'recall_1': 0.4811422526836395,
+                             'recall_5': 0.6433189511299133, 'recall_10':
+                             0.696659505367279, 'ndcg_10': 0.5905559802877491,
+                             'recall_10_d64': 0.618534505367279,
+                             'recall_10_d128': 0.6573275923728943,
+                             'recall_10_d256': 0.6842672228813171,
+                             'recall_10_d384': 0.6880387663841248,
+                             'recall_10_d512': 0.6971982717514038,
+                             'recall_10_d768': 0.696659505367279}
+[03/31/26 18:51:48] INFO     Saved to
+                             /tmp/qa-mrl-ckpts-neurips/mrl_baseline_best
+Epoch 1:  65%|██████▌   | 607/928 [01:26<00:45,  7.07it/s, loss=0.7997]

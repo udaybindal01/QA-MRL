@@ -1,0 +1,32 @@
+2026-03-30 22:23:28,994 INFO    MainThread:45009 [wandb_setup.py:_flush():79] Current SDK version is 0.18.3
+2026-03-30 22:23:28,994 INFO    MainThread:45009 [wandb_setup.py:_flush():79] Configure stats pid to 45009
+2026-03-30 22:23:28,994 INFO    MainThread:45009 [wandb_setup.py:_flush():79] Loading settings from /home2/uday.bindal/.config/wandb/settings
+2026-03-30 22:23:28,995 INFO    MainThread:45009 [wandb_setup.py:_flush():79] Loading settings from /home2/uday.bindal/QA-MRL/wandb/settings
+2026-03-30 22:23:28,995 INFO    MainThread:45009 [wandb_setup.py:_flush():79] Loading settings from environment variables: {}
+2026-03-30 22:23:28,995 INFO    MainThread:45009 [wandb_setup.py:_flush():79] Applying setup settings: {'mode': None, '_disable_service': None}
+2026-03-30 22:23:28,995 INFO    MainThread:45009 [wandb_setup.py:_flush():79] Inferring run settings from compute environment: {'program_relpath': 'scripts/train_bam.py', 'program_abspath': '/home2/uday.bindal/QA-MRL/scripts/train_bam.py', 'program': '/home2/uday.bindal/QA-MRL/scripts/train_bam.py'}
+2026-03-30 22:23:28,995 INFO    MainThread:45009 [wandb_setup.py:_flush():79] Applying login settings: {}
+2026-03-30 22:23:28,995 INFO    MainThread:45009 [wandb_init.py:_log_setup():532] Logging user logs to /home2/uday.bindal/QA-MRL/wandb/run-20260330_222328-36ro3qyb/logs/debug.log
+2026-03-30 22:23:28,995 INFO    MainThread:45009 [wandb_init.py:_log_setup():533] Logging internal logs to /home2/uday.bindal/QA-MRL/wandb/run-20260330_222328-36ro3qyb/logs/debug-internal.log
+2026-03-30 22:23:28,995 INFO    MainThread:45009 [wandb_init.py:init():617] calling init triggers
+2026-03-30 22:23:28,995 INFO    MainThread:45009 [wandb_init.py:init():624] wandb.init called with sweep_config: {}
+config: {'model': {'backbone': 'BAAI/bge-base-en-v1.5', 'embedding_dim': 768, 'pooling': 'cls', 'normalize_embeddings': True, 'mrl_dims': [64, 128, 256, 384, 512, 768], 'policy': {'hidden_dim': 256, 'temperature': 1.0}, 'router': {'type': 'group', 'num_groups': 8, 'group_size': 96, 'hidden_dim': 256, 'temperature': 1.0, 'min_active_groups': 2, 'max_active_groups': 6, 'use_learner_features': False, 'learner_feature_dim': 32}, 'asymmetric': {'enabled': False, 'doc_router_hidden_dim': 128}}, 'data': {'train_path': '/tmp/data/real/train.jsonl', 'val_path': '/tmp/data/real/val.jsonl', 'test_path': '/tmp/data/real/test.jsonl', 'corpus_path': '/tmp/data/real/corpus.jsonl', 'bloom_levels': {1: 'Remember', 2: 'Understand', 3: 'Apply', 4: 'Analyze', 5: 'Evaluate', 6: 'Create'}, 'subjects': ['biology', 'chemistry', 'physics', 'earth_science', 'general_science'], 'max_query_length': 128, 'max_passage_length': 256, 'num_hard_negatives': 3}, 'training': {'seed': 42, 'num_epochs': 15, 'batch_size': 16, 'gradient_accumulation_steps': 8, 'fp16': True, 'max_grad_norm': 1.0, 'optimizer': {'type': 'adamw', 'lr': 2e-05, 'weight_decay': 0.01, 'encoder_lr': 2e-05, 'router_lr': 5e-05}, 'scheduler': {'type': 'cosine', 'warmup_ratio': 0.1}, 'loss': {'bloom_contrastive_weight': 1.0, 'bloom_mrl_weight': 0.5, 'policy_weight': 0.3, 'bloom_cls_weight': 0.3, 'bloom_classifier_loss_weight': 0.5, 'efficiency_weight': 0.1, 'entropy_weight': 0.05, 'contrastive_weight': 1.0, 'mrl_weight': 0.5, 'specialization_weight': 0.0, 'sparsity_weight': 0.0, 'bloom_classification_weight': 0.0}, 'phases': {'mrl_warmup_epochs': 3, 'router_warmup_epochs': 0, 'joint_epochs': 12}, 'checkpoint_dir': '/tmp/bam-ckpts/', 'save_every_n_steps': 1000, 'eval_every_n_steps': 500}, 'evaluation': {'retrieval_ks': [1, 5, 10, 20, 50, 100], 'bloom_stratified': True, 'tail_topic_threshold': 20, 'measure_latency': True}, 'diagnostics': {'gradient_attribution': True, 'num_diagnostic_queries': 1000, 'probing': {'probe_type': 'linear', 'probe_tasks': ['bloom_level', 'subject_area'], 'num_dimension_groups': 8}}, 'logging': {'use_wandb': True, 'wandb_project': 'bam-emnlp', 'wandb_entity': None, 'log_every_n_steps': 10}}
+2026-03-30 22:23:28,996 INFO    MainThread:45009 [wandb_init.py:init():667] starting backend
+2026-03-30 22:23:28,996 INFO    MainThread:45009 [wandb_init.py:init():671] sending inform_init request
+2026-03-30 22:23:28,998 INFO    MainThread:45009 [backend.py:_multiprocessing_setup():104] multiprocessing start_methods=fork,spawn,forkserver, using: spawn
+2026-03-30 22:23:28,998 INFO    MainThread:45009 [wandb_init.py:init():684] backend started and connected
+2026-03-30 22:23:29,004 INFO    MainThread:45009 [wandb_init.py:init():779] updated telemetry
+2026-03-30 22:23:29,024 INFO    MainThread:45009 [wandb_init.py:init():812] communicating run to backend with 90.0 second timeout
+2026-03-30 22:23:29,896 INFO    MainThread:45009 [wandb_init.py:init():863] starting run threads in backend
+2026-03-30 22:23:30,624 INFO    MainThread:45009 [wandb_run.py:_console_start():2465] atexit reg
+2026-03-30 22:23:30,624 INFO    MainThread:45009 [wandb_run.py:_redirect():2313] redirect: wrap_raw
+2026-03-30 22:23:30,625 INFO    MainThread:45009 [wandb_run.py:_redirect():2378] Wrapping output streams.
+2026-03-30 22:23:30,625 INFO    MainThread:45009 [wandb_run.py:_redirect():2403] Redirects installed.
+2026-03-30 22:23:30,629 INFO    MainThread:45009 [wandb_init.py:init():907] run started, returning control to user process
+2026-03-31 00:17:08,840 INFO    MainThread:45009 [wandb_run.py:_finish():2164] finishing run udaybindal18-iiit-hyderabad/bam-emnlp/36ro3qyb
+2026-03-31 00:17:08,841 INFO    MainThread:45009 [wandb_run.py:_atexit_cleanup():2428] got exitcode: 0
+2026-03-31 00:17:08,842 INFO    MainThread:45009 [wandb_run.py:_restore():2410] restore
+2026-03-31 00:17:08,842 INFO    MainThread:45009 [wandb_run.py:_restore():2416] restore done
+2026-03-31 00:17:18,137 INFO    MainThread:45009 [wandb_run.py:_footer_history_summary_info():4049] rendering history
+2026-03-31 00:17:18,138 INFO    MainThread:45009 [wandb_run.py:_footer_history_summary_info():4081] rendering summary
+2026-03-31 00:17:18,156 INFO    MainThread:45009 [wandb_run.py:_footer_sync_info():4008] logging synced files

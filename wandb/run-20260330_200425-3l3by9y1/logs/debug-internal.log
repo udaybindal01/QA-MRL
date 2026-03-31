@@ -1,0 +1,19 @@
+{"time":"2026-03-30T20:04:25.808917425+05:30","level":"INFO","msg":"using version","core version":"0.18.3"}
+{"time":"2026-03-30T20:04:25.813500833+05:30","level":"INFO","msg":"created symlink","path":"/home2/uday.bindal/QA-MRL/wandb/run-20260330_200425-3l3by9y1/logs/debug-core.log"}
+{"time":"2026-03-30T20:04:25.828153025+05:30","level":"ERROR","msg":"dialing: google: could not find default credentials. See https://cloud.google.com/docs/authentication/external/set-up-adc for more information"}
+{"time":"2026-03-30T20:04:25.914863101+05:30","level":"INFO","msg":"created new stream","id":"3l3by9y1"}
+{"time":"2026-03-30T20:04:25.914927706+05:30","level":"INFO","msg":"stream: started","id":"3l3by9y1"}
+{"time":"2026-03-30T20:04:25.914952547+05:30","level":"INFO","msg":"writer: Do: started","stream_id":{"value":"3l3by9y1"}}
+{"time":"2026-03-30T20:04:25.914969753+05:30","level":"INFO","msg":"sender: started","stream_id":{"value":"3l3by9y1"}}
+{"time":"2026-03-30T20:04:25.91499258+05:30","level":"INFO","msg":"handler: started","stream_id":{"value":"3l3by9y1"}}
+{"time":"2026-03-30T20:04:27.130567633+05:30","level":"INFO","msg":"wandb-core","!BADKEY":null}
+{"time":"2026-03-30T20:04:27.133380882+05:30","level":"INFO","msg":"Starting system monitor"}
+{"time":"2026-03-30T20:47:50.103181212+05:30","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2026-03-30T20:47:50.108541552+05:30","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2026-03-30T20:47:55.10673767+05:30","level":"ERROR","msg":"monitor: gpu: timeout waiting for process to exit"}
+{"time":"2026-03-30T20:47:58.228014355+05:30","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2026-03-30T20:48:00.624150772+05:30","level":"INFO","msg":"stream: closing","id":"3l3by9y1"}
+{"time":"2026-03-30T20:48:00.624178709+05:30","level":"INFO","msg":"handler: closed","stream_id":{"value":"3l3by9y1"}}
+{"time":"2026-03-30T20:48:00.624218586+05:30","level":"INFO","msg":"writer: Close: closed","stream_id":{"value":"3l3by9y1"}}
+{"time":"2026-03-30T20:48:00.624238192+05:30","level":"INFO","msg":"sender: closed","stream_id":{"value":"3l3by9y1"}}
+{"time":"2026-03-30T20:48:00.625018254+05:30","level":"INFO","msg":"stream: closed","id":"3l3by9y1"}

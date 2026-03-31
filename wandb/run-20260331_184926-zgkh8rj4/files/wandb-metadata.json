@@ -1,0 +1,56 @@
+{
+  "os":  "Linux-5.15.0-173-generic-x86_64-with-glibc2.35",
+  "python":  "3.12.4",
+  "startedAt":  "2026-03-31T13:19:26.961505Z",
+  "args":  [
+    "--config",
+    "configs/bam.yaml"
+  ],
+  "program":  "/home2/uday.bindal/QA-MRL/scripts/train_bam.py",
+  "codePath":  "scripts/train_bam.py",
+  "git":  {
+    "remote":  "https://github.com/udaybindal01/QA-MRL.git",
+    "commit":  "3c7748f74aef853d74315756e5a89e8b01f8ed11"
+  },
+  "email":  "udaybindal18@gmail.com",
+  "root":  "/home2/uday.bindal/QA-MRL",
+  "host":  "gnode086",
+  "username":  "uday.bindal",
+  "executable":  "/home2/uday.bindal/miniconda3/bin/python",
+  "codePathLocal":  "scripts/train_bam.py",
+  "cpu_count":  20,
+  "cpu_count_logical":  40,
+  "gpu":  "[NVIDIA GeForce RTX 2080 Ti, NVIDIA GeForce RTX 2080 Ti]",
+  "gpu_count":  2,
+  "disk":  {
+    "/":  {
+      "total":  "234039422976",
+      "used":  "88776503296"
+    }
+  },
+  "memory":  {
+    "total":  "135025569792"
+  },
+  "cpu":  {
+    "count":  20,
+    "countLogical":  40
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA GeForce RTX 2080 Ti",
+      "memoryTotal":  "11811160064",
+      "cudaCores":  4352,
+      "architecture":  "Turing"
+    },
+    {
+      "name":  "NVIDIA GeForce RTX 2080 Ti",
+      "memoryTotal":  "11811160064",
+      "cudaCores":  4352,
+      "architecture":  "Turing"
+    }
+  ],
+  "slurm":  {
+    "job_id":  "2599624"
+  },
+  "cudaVersion":  "12.8"
+}

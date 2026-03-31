@@ -1,0 +1,10 @@
+{"time":"2026-03-30T22:21:55.44019408+05:30","level":"INFO","msg":"using version","core version":"0.18.3"}
+{"time":"2026-03-30T22:21:55.44022962+05:30","level":"INFO","msg":"created symlink","path":"/home2/uday.bindal/QA-MRL/wandb/run-20260330_222155-lt96lknx/logs/debug-core.log"}
+{"time":"2026-03-30T22:21:55.458571347+05:30","level":"ERROR","msg":"dialing: google: could not find default credentials. See https://cloud.google.com/docs/authentication/external/set-up-adc for more information"}
+{"time":"2026-03-30T22:21:55.46944306+05:30","level":"INFO","msg":"created new stream","id":"lt96lknx"}
+{"time":"2026-03-30T22:21:55.469483597+05:30","level":"INFO","msg":"stream: started","id":"lt96lknx"}
+{"time":"2026-03-30T22:21:55.469533984+05:30","level":"INFO","msg":"sender: started","stream_id":{"value":"lt96lknx"}}
+{"time":"2026-03-30T22:21:55.469554589+05:30","level":"INFO","msg":"writer: Do: started","stream_id":{"value":"lt96lknx"}}
+{"time":"2026-03-30T22:21:55.469556175+05:30","level":"INFO","msg":"handler: started","stream_id":{"value":"lt96lknx"}}
+{"time":"2026-03-30T22:21:56.195786009+05:30","level":"INFO","msg":"wandb-core","!BADKEY":null}
+{"time":"2026-03-30T22:21:56.198237337+05:30","level":"INFO","msg":"Starting system monitor"}

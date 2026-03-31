@@ -1,0 +1,102 @@
+  MRL dim weights (D/sqrt(d_k) normalized):
+    d= 64: weight=0.3070 (raw=96.0)
+    d=128: weight=0.2171 (raw=67.9)
+    d=256: weight=0.1535 (raw=48.0)
+    d=384: weight=0.1253 (raw=39.2)
+    d=512: weight=0.1085 (raw=33.9)
+    d=768: weight=0.0886 (raw=27.7)
+/home2/uday.bindal/QA-MRL/training/bam_trainer.py:65: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  self.scaler = GradScaler(enabled=self.use_fp16)
+[03/31/26 02:43:43] INFO     BAM Parameters: {'total': 109482276, 'trainable':
+                             109482276, 'frozen': 0}
+                    INFO     Strategy: 3 warmup + 12 full, curriculum-scheduled
+                             losses
+                    INFO     Training all 15 epochs (no early stopping). Saving
+                             every epoch for post-hoc eval.
+                    INFO     Starting BAM v3 training (query-only Bloom, no
+                             early stopping)...
+Epoch 0 [warmup]:   0%|          | 0/928 [00:00<?, ?it/s]/home2/uday.bindal/QA-MRL/training/bam_trainer.py:92: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with autocast(enabled=self.use_fp16):
+Epoch 0 [warmup]: 100%|██████████| 928/928 [05:45<00:00,  2.68it/s, alpha=0.33, cur=0.07, dim=N/A, loss=1.0688]
+[03/31/26 02:49:38] INFO     Bloom→Dim table: Remember→768, Understand→512,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+Epoch 1 [warmup]: 100%|██████████| 928/928 [05:46<00:00,  2.68it/s, alpha=0.67, cur=0.13, dim=353, loss=0.8591]
+[03/31/26 02:49:52] INFO     Val: R@1=0.4601 R@10=0.6853 NDCG@10=0.5744
+                    INFO     Epoch 0: val_ndcg=0.5744 (best=0.0000 @ epoch 0)
+[03/31/26 02:55:47] INFO     Bloom→Dim table: Remember→768, Understand→512,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+Epoch 2 [warmup]: 100%|██████████| 928/928 [05:48<00:00,  2.66it/s, alpha=1.00, cur=0.20, dim=355, loss=0.7659]
+[03/31/26 02:56:01] INFO     Val: R@1=0.4553 R@10=0.6880 NDCG@10=0.5725
+                    INFO     Epoch 1: val_ndcg=0.5725 (best=0.0000 @ epoch 0)
+[03/31/26 03:01:57] INFO     Bloom→Dim table: Remember→768, Understand→512,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+Epoch 3 [full]: 100%|██████████| 928/928 [05:48<00:00,  2.66it/s, alpha=1.00, cur=0.27, dim=355, loss=0.6695]
+[03/31/26 03:02:11] INFO     Val: R@1=0.4580 R@10=0.6918 NDCG@10=0.5742
+                    INFO     Epoch 2: val_ndcg=0.5742 (best=0.0000 @ epoch 0)
+[03/31/26 03:08:09] INFO     Bloom→Dim table: Remember→768, Understand→512,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+Epoch 4 [full]: 100%|██████████| 928/928 [06:09<00:00,  2.51it/s, alpha=1.00, cur=0.33, dim=354, loss=0.5796]  
+[03/31/26 03:08:23] INFO     Val: R@1=0.4494 R@10=0.6897 NDCG@10=0.5668
+                    INFO     Epoch 3: val_ndcg=0.5668 (best=0.0000 @ epoch 0)
+Epoch 5 [full]: 100%|██████████| 928/928 [05:47<00:00,  2.67it/s, alpha=1.00, cur=0.40, dim=357, loss=0.5091]
+[03/31/26 03:10:24] INFO     Val: R@1=0.4472 R@10=0.6848 NDCG@10=0.5640
+[03/31/26 03:14:41] INFO     Bloom→Dim table: Remember→768, Understand→512,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+[03/31/26 03:14:55] INFO     Val: R@1=0.4472 R@10=0.6864 NDCG@10=0.5670
+                    INFO     Epoch 4: val_ndcg=0.5670 (best=0.5640 @ epoch 4)
+[03/31/26 03:20:51] INFO     Bloom→Dim table: Remember→768, Understand→512,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+Epoch 6 [full]: 100%|██████████| 928/928 [05:47<00:00,  2.67it/s, alpha=1.00, cur=0.47, dim=358, loss=0.4556]
+[03/31/26 03:21:05] INFO     Val: R@1=0.4483 R@10=0.6950 NDCG@10=0.5666
+                    INFO     Epoch 5: val_ndcg=0.5666 (best=0.5640 @ epoch 4)
+[03/31/26 03:27:01] INFO     Bloom→Dim table: Remember→768, Understand→768,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+Epoch 7 [full]: 100%|██████████| 928/928 [05:47<00:00,  2.67it/s, alpha=1.00, cur=0.53, dim=358, loss=0.4188]
+[03/31/26 03:27:15] INFO     Val: R@1=0.4461 R@10=0.6907 NDCG@10=0.5668
+                    INFO     Epoch 6: val_ndcg=0.5668 (best=0.5640 @ epoch 4)
+[03/31/26 03:33:11] INFO     Bloom→Dim table: Remember→768, Understand→768,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+Epoch 8 [full]: 100%|██████████| 928/928 [06:09<00:00,  2.51it/s, alpha=1.00, cur=0.60, dim=359, loss=0.3899]
+[03/31/26 03:33:25] INFO     Val: R@1=0.4380 R@10=0.6923 NDCG@10=0.5631
+                    INFO     Epoch 7: val_ndcg=0.5631 (best=0.5640 @ epoch 4)
+Epoch 9 [full]: 100%|██████████| 928/928 [05:47<00:00,  2.67it/s, alpha=1.00, cur=0.67, dim=359, loss=0.3688]
+[03/31/26 03:37:14] INFO     Val: R@1=0.4364 R@10=0.6913 NDCG@10=0.5598
+[03/31/26 03:39:43] INFO     Bloom→Dim table: Remember→768, Understand→768,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+[03/31/26 03:39:57] INFO     Val: R@1=0.4380 R@10=0.6886 NDCG@10=0.5631
+                    INFO     Epoch 8: val_ndcg=0.5631 (best=0.5640 @ epoch 4)
+[03/31/26 03:45:53] INFO     Bloom→Dim table: Remember→768, Understand→768,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+Epoch 10 [full]: 100%|██████████| 928/928 [05:47<00:00,  2.67it/s, alpha=1.00, cur=0.73, dim=358, loss=0.3540]
+[03/31/26 03:46:07] INFO     Val: R@1=0.4375 R@10=0.6848 NDCG@10=0.5598
+                    INFO     Epoch 9: val_ndcg=0.5598 (best=0.5640 @ epoch 4)
+[03/31/26 03:52:04] INFO     Bloom→Dim table: Remember→768, Understand→768,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+Epoch 11 [full]: 100%|██████████| 928/928 [05:47<00:00,  2.67it/s, alpha=1.00, cur=0.80, dim=358, loss=0.3415]
+[03/31/26 03:52:18] INFO     Val: R@1=0.4402 R@10=0.6886 NDCG@10=0.5610
+                    INFO     Epoch 10: val_ndcg=0.5610 (best=0.5640 @ epoch 4)
+[03/31/26 03:58:14] INFO     Bloom→Dim table: Remember→768, Understand→768,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+Epoch 12 [full]: 100%|██████████| 928/928 [06:01<00:00,  2.56it/s, alpha=1.00, cur=0.87, dim=359, loss=0.3361]
+[03/31/26 03:58:28] INFO     Val: R@1=0.4380 R@10=0.6848 NDCG@10=0.5579
+                    INFO     Epoch 11: val_ndcg=0.5579 (best=0.5640 @ epoch 4)
+Epoch 13 [full]: 100%|██████████| 928/928 [05:47<00:00,  2.67it/s, alpha=1.00, cur=0.93, dim=357, loss=0.3312]
+[03/31/26 04:04:06] INFO     Val: R@1=0.4380 R@10=0.6875 NDCG@10=0.5590
+[03/31/26 04:04:40] INFO     Bloom→Dim table: Remember→768, Understand→768,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+[03/31/26 04:04:53] INFO     Val: R@1=0.4380 R@10=0.6875 NDCG@10=0.5600
+                    INFO     Epoch 12: val_ndcg=0.5600 (best=0.5640 @ epoch 4)
+[03/31/26 04:10:50] INFO     Bloom→Dim table: Remember→768, Understand→768,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+Epoch 14 [full]: 100%|██████████| 928/928 [05:47<00:00,  2.67it/s, alpha=1.00, cur=1.00, dim=359, loss=0.3281]
+[03/31/26 04:11:04] INFO     Val: R@1=0.4370 R@10=0.6907 NDCG@10=0.5594
+                    INFO     Epoch 13: val_ndcg=0.5594 (best=0.5640 @ epoch 4)
+[03/31/26 04:17:00] INFO     Bloom→Dim table: Remember→768, Understand→768,
+                             Apply→768, Analyze→768, Evaluate→768, Create→768
+                                                      
+[03/31/26 04:17:14] INFO     Val: R@1=0.4375 R@10=0.6907 NDCG@10=0.5601
+                    INFO     Epoch 14: val_ndcg=0.5601 (best=0.5640 @ epoch 4)
+[03/31/26 04:17:24] INFO     Done. Best val NDCG@10=0.5640 @ epoch 4
+                    INFO     NOTE: Val metric is in-batch only. Run eval_bam.py
+                             on each epoch checkpoint for true corpus-level
+                             metrics.

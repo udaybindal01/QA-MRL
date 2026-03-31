@@ -1,0 +1,5 @@
+/home2/uday.bindal/miniconda3/lib/python3.12/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+usage: eval_bam.py [-h] [--config CONFIG] --checkpoint CHECKPOINT
+                   [--baseline BASELINE] [--output_dir OUTPUT_DIR]
+eval_bam.py: error: the following arguments are required: --checkpoint

@@ -1,0 +1,10 @@
+{"time":"2026-03-30T20:48:50.692347077+05:30","level":"INFO","msg":"using version","core version":"0.18.3"}
+{"time":"2026-03-30T20:48:50.692384244+05:30","level":"INFO","msg":"created symlink","path":"/home2/uday.bindal/QA-MRL/wandb/run-20260330_204850-2i7a4hia/logs/debug-core.log"}
+{"time":"2026-03-30T20:48:50.725646452+05:30","level":"ERROR","msg":"dialing: google: could not find default credentials. See https://cloud.google.com/docs/authentication/external/set-up-adc for more information"}
+{"time":"2026-03-30T20:48:50.73933725+05:30","level":"INFO","msg":"created new stream","id":"2i7a4hia"}
+{"time":"2026-03-30T20:48:50.739402625+05:30","level":"INFO","msg":"stream: started","id":"2i7a4hia"}
+{"time":"2026-03-30T20:48:50.739432041+05:30","level":"INFO","msg":"handler: started","stream_id":{"value":"2i7a4hia"}}
+{"time":"2026-03-30T20:48:50.739452248+05:30","level":"INFO","msg":"sender: started","stream_id":{"value":"2i7a4hia"}}
+{"time":"2026-03-30T20:48:50.739470163+05:30","level":"INFO","msg":"writer: Do: started","stream_id":{"value":"2i7a4hia"}}
+{"time":"2026-03-30T20:48:52.374061788+05:30","level":"INFO","msg":"wandb-core","!BADKEY":null}
+{"time":"2026-03-30T20:48:52.37690251+05:30","level":"INFO","msg":"Starting system monitor"}

@@ -1,0 +1,153 @@
+_wandb:
+    value:
+        cli_version: 0.18.3
+        m: []
+        python_version: 3.12.4
+        t:
+            "1":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 55
+                - 71
+            "2":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 55
+                - 71
+            "3":
+                - 2
+                - 16
+                - 23
+                - 55
+                - 61
+            "4": 3.12.4
+            "5": 0.18.3
+            "6": 4.57.1
+            "8":
+                - 5
+            "12": 0.18.3
+            "13": linux-x86_64
+data:
+    value:
+        bloom_levels:
+            "1": Remember
+            "2": Understand
+            "3": Apply
+            "4": Analyze
+            "5": Evaluate
+            "6": Create
+        corpus_path: /tmp/data/real/corpus.jsonl
+        max_passage_length: 256
+        max_query_length: 128
+        num_hard_negatives: 3
+        subjects:
+            - biology
+            - chemistry
+            - physics
+            - earth_science
+            - general_science
+        test_path: /tmp/data/real/test.jsonl
+        train_path: /tmp/data/real/train.jsonl
+        val_path: /tmp/data/real/val.jsonl
+diagnostics:
+    value:
+        gradient_attribution: true
+        num_diagnostic_queries: 1000
+        probing:
+            num_dimension_groups: 8
+            probe_tasks:
+                - bloom_level
+                - subject_area
+            probe_type: linear
+evaluation:
+    value:
+        bloom_stratified: true
+        measure_latency: true
+        retrieval_ks:
+            - 1
+            - 5
+            - 10
+            - 20
+            - 50
+            - 100
+        tail_topic_threshold: 20
+logging:
+    value:
+        log_every_n_steps: 10
+        use_wandb: true
+        wandb_entity: null
+        wandb_project: bam-emnlp
+model:
+    value:
+        asymmetric:
+            doc_router_hidden_dim: 128
+            enabled: false
+        backbone: BAAI/bge-base-en-v1.5
+        embedding_dim: 768
+        mrl_dims:
+            - 64
+            - 128
+            - 256
+            - 384
+            - 512
+            - 768
+        normalize_embeddings: true
+        policy:
+            hidden_dim: 256
+            temperature: 1
+        pooling: cls
+        router:
+            group_size: 96
+            hidden_dim: 256
+            learner_feature_dim: 32
+            max_active_groups: 6
+            min_active_groups: 2
+            num_groups: 8
+            temperature: 1
+            type: group
+            use_learner_features: false
+training:
+    value:
+        batch_size: 16
+        checkpoint_dir: /tmp/bam-ckpts/
+        eval_every_n_steps: 500
+        fp16: true
+        gradient_accumulation_steps: 8
+        loss:
+            bloom_classification_weight: 0
+            bloom_classifier_loss_weight: 0.5
+            bloom_cls_weight: 0.3
+            bloom_contrastive_weight: 1
+            bloom_mrl_weight: 0.5
+            contrastive_weight: 1
+            efficiency_weight: 0.1
+            entropy_weight: 0.05
+            mrl_weight: 0.5
+            policy_weight: 0.3
+            sparsity_weight: 0
+            specialization_weight: 0
+        max_grad_norm: 1
+        num_epochs: 15
+        optimizer:
+            encoder_lr: 2e-05
+            lr: 2e-05
+            router_lr: 5e-05
+            type: adamw
+            weight_decay: 0.01
+        phases:
+            joint_epochs: 12
+            mrl_warmup_epochs: 3
+            router_warmup_epochs: 0
+        save_every_n_steps: 1000
+        scheduler:
+            type: cosine
+            warmup_ratio: 0.1
+        seed: 42
