@@ -1,0 +1,20 @@
+  MRL dim weights (D/sqrt(d_k) normalized):
+    d= 64: weight=0.3070 (raw=96.0)
+    d=128: weight=0.2171 (raw=67.9)
+    d=256: weight=0.1535 (raw=48.0)
+    d=384: weight=0.1253 (raw=39.2)
+    d=512: weight=0.1085 (raw=33.9)
+    d=768: weight=0.0886 (raw=27.7)
+/home2/uday.bindal/QA-MRL/training/bam_trainer.py:65: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  self.scaler = GradScaler(enabled=self.use_fp16)
+[03/31/26 18:53:30] INFO     BAM Parameters: {'total': 110668068, 'trainable':
+                             110668068, 'frozen': 0}
+                    INFO     Strategy: 3 warmup + 12 full, curriculum-scheduled
+                             losses
+                    INFO     Training all 15 epochs (no early stopping). Saving
+                             every epoch for post-hoc eval.
+                    INFO     Starting BAM v3 training (query-only Bloom, no
+                             early stopping)...
+Epoch 0 [warmup]:   0%|          | 0/928 [00:00<?, ?it/s]/home2/uday.bindal/QA-MRL/training/bam_trainer.py:93: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with autocast(enabled=self.use_fp16):
+Epoch 0 [warmup]:  12%|█▎        | 116/928 [00:44<05:04,  2.66it/s, alpha=0.04, cur=0.01, dim=N/A, loss=3.2036]
