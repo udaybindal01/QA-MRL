@@ -75,25 +75,41 @@ class BloomDimRouter(nn.Module):
         logit = self.dim_head(emb).squeeze(-1)          # [6]
         return torch.sigmoid(logit) * self._span + self.MIN_DIM  # [6] in [128, 768]
 
+    # Sigmoid temperature for the soft mask used in STE.
+    # Higher = sharper boundary, gradients concentrated in ±~50 dims around boundary.
+    # Lower = diffuse gradients across all dims (poor signal).
+    # 10.0 is a good default: gradient is meaningful within ±46 dims of the boundary.
+    MASK_TEMPERATURE = 10.0
+
     def forward(self, bloom_levels: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Args:
             bloom_levels: [B] integer Bloom levels (0-indexed, 0=Remember, 5=Create)
 
         Returns:
-            mask: [B, 768] binary mask (1 for active dims, 0 elsewhere)
+            mask: [B, 768] mask with STE — hard binary in forward, soft sigmoid in backward
             continuous_dim: [B] float dim before rounding (used by efficiency loss)
-            discrete_dim: [B] float, rounded value with STE for gradient flow
+            discrete_dim: [B] float, rounded value with STE
         """
         all_dims = self._all_dims()              # [6]
         continuous_dim = all_dims[bloom_levels]  # [B]
 
-        # Straight-through estimator: round in forward, gradient flows as identity
-        rounded = continuous_dim.round()
-        discrete_dim = continuous_dim + (rounded - continuous_dim).detach()
-
         arange = torch.arange(self.EMBEDDING_DIM, device=bloom_levels.device).float()
-        mask = (arange.unsqueeze(0) < rounded.unsqueeze(-1)).float()  # [B, 768]
+
+        # Soft mask: differentiable sigmoid centered at continuous_dim boundary.
+        # Gradient flows: contrastive loss → soft_mask → continuous_dim → MLP → bloom_emb
+        soft_mask = torch.sigmoid(
+            self.MASK_TEMPERATURE * (continuous_dim.unsqueeze(-1) - arange.unsqueeze(0))
+        )  # [B, 768]
+
+        # Hard mask: exact binary prefix used in forward pass for retrieval
+        rounded = continuous_dim.round()
+        hard_mask = (arange.unsqueeze(0) < rounded.unsqueeze(-1)).float()  # [B, 768]
+
+        # STE on the mask: forward uses hard_mask, backward uses soft_mask
+        mask = hard_mask + (soft_mask - soft_mask.detach())
+
+        discrete_dim = continuous_dim + (rounded - continuous_dim).detach()
 
         return {
             "mask": mask,

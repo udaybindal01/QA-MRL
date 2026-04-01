@@ -56,6 +56,9 @@ def main():
     parser.add_argument("--freeze_encoder", action="store_true",
                         help="Freeze encoder weights — only train the BloomDimRouter. "
                              "Use this to isolate routing contribution from extra training.")
+    parser.add_argument("--encoder_warmup_epochs", type=int, default=None,
+                        help="Override encoder_warmup_epochs in loss config. "
+                             "Set to 0 for frozen encoder runs (no warmup needed).")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -68,6 +71,11 @@ def main():
         config["training"]["checkpoint_dir"] = args.checkpoint_dir
     if args.num_epochs is not None:
         config["training"]["num_epochs"] = args.num_epochs
+    if args.encoder_warmup_epochs is not None:
+        config["training"]["loss"]["encoder_warmup_epochs"] = args.encoder_warmup_epochs
+    elif args.freeze_encoder:
+        # Frozen encoder: no warmup needed — efficiency starts from epoch 0
+        config["training"]["loss"]["encoder_warmup_epochs"] = 0
 
     print("=" * 60)
     print("Training BAM: Bloom-Aligned Matryoshka")

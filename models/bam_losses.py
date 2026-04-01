@@ -78,12 +78,20 @@ class BloomMaskedContrastiveLoss(nn.Module):
             labels = torch.arange(sim.size(0), device=sim.device)
             per_sample_loss = F.cross_entropy(sim, labels, reduction="none")
 
+        # Difficulty weighting: harder samples (higher loss) get more weight.
+        # This signals to the router which Bloom levels need more dims —
+        # levels with consistently high per-sample loss need more capacity.
+        # Detach so difficulty weights don't create a second-order gradient loop.
+        difficulty_w = (per_sample_loss.detach() + 1e-6)
+        difficulty_w = difficulty_w / difficulty_w.mean()  # normalize to mean=1
+
         if bloom_labels is not None:
-            w = self.class_weights.to(bloom_labels.device)[bloom_labels]
-            w = w * (w.size(0) / w.sum())  # renormalize batch weights
+            class_w = self.class_weights.to(bloom_labels.device)[bloom_labels]
+            class_w = class_w * (class_w.size(0) / class_w.sum())
+            w = class_w * difficulty_w
             loss = (per_sample_loss * w).mean()
         else:
-            loss = per_sample_loss.mean()
+            loss = (per_sample_loss * difficulty_w).mean()
 
         return loss, {"contrastive": loss.item(), "temperature": self.temperature}
 
@@ -141,6 +149,30 @@ class BloomTwoFactorEfficiencyLoss(nn.Module):
         stats = {"efficiency": loss.item(), "avg_dim": continuous_dim.mean().item()}
         stats.update({f"dim_b{b}": d for b, d in per_class_dims.items()})
         return loss, stats
+
+
+class RouterDiversityLoss(nn.Module):
+    """
+    Penalizes all 6 Bloom levels converging to the same dimension.
+
+    Without this, the router can satisfy both efficiency (push all down) and
+    contrastive (push all up) losses by assigning the same dim to every level —
+    the path of least resistance. This loss rewards differentiation.
+
+    L_diversity = -Var(dim_0, ..., dim_5)
+
+    Normalized by span² so the scale is invariant to [MIN_DIM, MAX_DIM].
+    """
+
+    EMBEDDING_DIM = 768.0
+    MIN_DIM = 128.0
+
+    def forward(self, all_dims: torch.Tensor) -> torch.Tensor:
+        """all_dims: [6] continuous dims for all Bloom levels."""
+        span = self.EMBEDDING_DIM - self.MIN_DIM
+        normalized = (all_dims - self.MIN_DIM) / span   # [6] in [0, 1]
+        var = normalized.var()
+        return -var  # maximize variance = minimize negative variance
 
 
 class MRLAnchorRegularizationLoss(nn.Module):
@@ -214,6 +246,8 @@ class BAMCombinedLoss(nn.Module):
         # encoder builds quality before routing compression turns on.
         self.encoder_warmup_epochs = lc.get("encoder_warmup_epochs", 0)
 
+        self.diversity_weight = lc.get("diversity_weight", 0.05)
+
         self.contrastive = BloomMaskedContrastiveLoss(
             temperature=self.temp_start,
             class_weights=cw,
@@ -223,6 +257,7 @@ class BAMCombinedLoss(nn.Module):
             mrl_dims=mc["mrl_dims"],
             temperature=self.temp_start,
         )
+        self.diversity = RouterDiversityLoss()
 
     def set_epoch(self, epoch: int, total_epochs: int):
         """
@@ -250,6 +285,7 @@ class BAMCombinedLoss(nn.Module):
         continuous_dim: torch.Tensor,
         bloom_labels: torch.Tensor,
         negative_embs: Optional[torch.Tensor] = None,
+        all_bloom_dims: Optional[torch.Tensor] = None,  # [6] from router._all_dims()
     ):
         l_c, c_stats = self.contrastive(
             query_emb, positive_emb, query_mask, negative_embs, bloom_labels
@@ -263,10 +299,19 @@ class BAMCombinedLoss(nn.Module):
                  + self.mrl_anchor_weight * l_a)
         e_stats["efficiency_weight_active"] = eff_w
 
+        # Diversity loss: penalize all Bloom levels collapsing to same dim
+        d_stats = {}
+        if all_bloom_dims is not None:
+            l_d = self.diversity(all_bloom_dims)
+            total = total + self.diversity_weight * l_d
+            d_stats["diversity"] = l_d.item()
+            d_stats["dim_variance"] = float(all_bloom_dims.var().item())
+
         stats = {}
         stats.update(c_stats)
         stats.update(e_stats)
         stats.update(a_stats)
+        stats.update(d_stats)
         stats["total"] = total.item()
 
         bloom_names = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]

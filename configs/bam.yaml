@@ -38,7 +38,9 @@ training:
     contrastive_weight: 1.0
     efficiency_weight: 0.1      # Active only after encoder_warmup_epochs
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
-    encoder_warmup_epochs: 5    # First 5 epochs: efficiency_weight=0, build encoder quality
+    diversity_weight: 0.05      # Penalize all Bloom levels collapsing to same dim
+    encoder_warmup_epochs: 5    # Full model: first 5 epochs efficiency=0, build encoder quality
+                                # Frozen encoder: override to 0 via --encoder_warmup_epochs 0
     temperature_schedule:
       start: 0.1                # Warm start — smooth gradients while encoder is learning
       end: 0.02                 # Cold end — sharp distribution that specifically improves R@1

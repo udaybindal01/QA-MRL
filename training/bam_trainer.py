@@ -86,6 +86,7 @@ class BAMTrainer:
                 continuous_dim=outputs["continuous_dim"],
                 bloom_labels=batch.get("bloom_label"),
                 negative_embs=outputs.get("negative_embeddings"),
+                all_bloom_dims=self.model.bloom_router._all_dims(),
             )
             loss = loss / self.grad_accum
 
