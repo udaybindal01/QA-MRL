@@ -51,6 +51,8 @@ def main():
     parser.add_argument("--config", default="configs/bam.yaml")
     parser.add_argument("--checkpoint", required=True, help="BAM checkpoint dir")
     parser.add_argument("--baseline", default=None, help="MRL baseline checkpoint dir")
+    parser.add_argument("--mrl_continued", default=None,
+                        help="MRL-continued checkpoint dir (same training budget as BAM, fair comparison)")
     parser.add_argument("--output_dir", default="results/bam_eval/")
     args = parser.parse_args()
 
@@ -79,6 +81,20 @@ def main():
     print(f"  {bam_model.__class__.__name__}: corpus={len(open(corpus_path).readlines())}, "
           f"queries from {test_path}")
 
+    # BAM encoder truncated (no routing) — isolates routing gain from encoder quality gain.
+    # Uses the same BAM encoder but ignores the Bloom router; truncates at fixed dims.
+    # If BAM full > BAM encoder truncated at equal dims → routing genuinely helps.
+    print("\n" + "=" * 60)
+    print("BAM Encoder Truncated (no routing, fair encoder quality baseline)")
+    print("=" * 60)
+    bam_encoder_model = load_mrl(config, args.checkpoint, device)
+    bam_enc_metrics = evaluator.evaluate_model(
+        bam_encoder_model, test_path, corpus_path, tokenizer, device,
+        mrl_truncation_dims=config["model"]["mrl_dims"],
+        compute_bootstrap=True,
+    )
+    all_results["BAM Encoder (no routing)"] = bam_enc_metrics
+
     # Evaluate MRL Baseline
     if args.baseline:
         print("\n" + "=" * 60)
@@ -87,10 +103,23 @@ def main():
         bl_model = load_mrl(config, args.baseline, device)
         bl_metrics = evaluator.evaluate_model(
             bl_model, test_path, corpus_path, tokenizer, device,
-            mrl_truncation_dims=[64, 128, 256, 384, 512],
+            mrl_truncation_dims=config["model"]["mrl_dims"],
             compute_bootstrap=True,
         )
         all_results["MRL Baseline"] = bl_metrics
+
+    # MRL-continued baseline (fair: same total training steps as BAM)
+    if args.mrl_continued:
+        print("\n" + "=" * 60)
+        print("MRL-Continued Baseline (same total training as BAM)")
+        print("=" * 60)
+        mc_model = load_mrl(config, args.mrl_continued, device)
+        mc_metrics = evaluator.evaluate_model(
+            mc_model, test_path, corpus_path, tokenizer, device,
+            mrl_truncation_dims=config["model"]["mrl_dims"],
+            compute_bootstrap=True,
+        )
+        all_results["MRL Continued"] = mc_metrics
 
     # Print comparison
     print("\n" + "=" * 70)
@@ -143,18 +172,20 @@ def main():
         elif "avg_active_dims" in bam_metrics:
             print(f"  {name:43s}{bam_metrics['avg_active_dims']:>12.0f}")
 
-    # MRL truncation comparison
-    if args.baseline and "MRL Baseline" in all_results:
-        bl = all_results["MRL Baseline"]
-        print(f"\n{'MRL Truncation vs BAM':45s}")
-        print("-" * 50)
-        for d in [64, 128, 256, 384, 512]:
-            key = f"mrl_d{d}_recall@10"
-            if key in bl:
-                print(f"  MRL d={d:3d}: R@10={bl[key]:.4f}")
-        print(f"  MRL d=768: R@10={bl.get('recall@10', 0):.4f}")
-        dims = bam_metrics.get('avg_active_dims', 384)
-        print(f"  BAM (~{dims:.0f} dims): R@10={bam_metrics.get('recall@10', 0):.4f}")
+    # Truncation comparison across all models
+    dims_list = config["model"]["mrl_dims"]
+    print(f"\n{'Truncation R@10 comparison':45s}")
+    print("-" * 50)
+    print(f"  {'Dims':>6}  {'MRL':>8}  {'MRL-cont':>10}  {'BAM-enc':>9}  {'BAM (routed)':>13}")
+    for d in dims_list:
+        key = f"mrl_d{d}_recall@10"
+        mrl_r10 = all_results.get("MRL Baseline", {}).get(key, "-")
+        mrl_c_r10 = all_results.get("MRL Continued", {}).get(key, "-")
+        bam_enc_r10 = all_results.get("BAM Encoder (no routing)", {}).get(key, "-")
+        fmt = lambda v: f"{v:.4f}" if isinstance(v, float) else f"{'':>8}"
+        print(f"  {d:>6}  {fmt(mrl_r10):>8}  {fmt(mrl_c_r10):>10}  {fmt(bam_enc_r10):>9}")
+    avg_dim = bam_metrics.get("avg_active_dims", 0)
+    print(f"  {'~'+str(int(avg_dim)):>6}  {'':>8}  {'':>10}  {'':>9}  {bam_metrics.get('recall@10', 0):>13.4f}  ← BAM routed")
 
     # Save
     out_path = os.path.join(args.output_dir, "results.json")
