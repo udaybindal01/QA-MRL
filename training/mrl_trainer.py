@@ -83,6 +83,9 @@ class MRLBaselineTrainer:
 
                 pbar.set_postfix(loss=f"{meter.avg:.4f}")
 
+            # Save every epoch for post-hoc best selection via find_best_epoch.py
+            self.save_checkpoint(f"epoch_{epoch}")
+
             if self.val_loader:
                 vm = self.validate()
                 self.logger.info(f"Epoch {epoch}: {vm}")
@@ -130,7 +133,7 @@ class MRLBaselineTrainer:
         return metrics
 
     def save_checkpoint(self, name):
-        d = os.path.join(self.config["training"]["checkpoint_dir"], f"mrl_baseline_{name}")
+        d = os.path.join(self.config["training"]["checkpoint_dir"], name)
         os.makedirs(d, exist_ok=True)
         torch.save({"model_state_dict": self.model.state_dict(), "config": self.config},
                    os.path.join(d, "checkpoint.pt"))

@@ -6,23 +6,6 @@ model:
   pooling: "cls"
   normalize_embeddings: true
   mrl_dims: [64, 128, 256, 384, 512, 768]
-  policy:
-    hidden_dim: 256
-    temperature: 1.0
-  # Legacy compat fields (not used by BAM but needed by data loader)
-  router:
-    type: "group"
-    num_groups: 8
-    group_size: 96
-    hidden_dim: 256
-    temperature: 1.0
-    min_active_groups: 2
-    max_active_groups: 6
-    use_learner_features: false
-    learner_feature_dim: 32
-  asymmetric:
-    enabled: false
-    doc_router_hidden_dim: 128
 
 data:
   train_path: "/tmp/data/real/train.jsonl"
@@ -54,18 +37,8 @@ training:
   loss:
     contrastive_weight: 1.0
     efficiency_weight: 0.3
-    mrl_anchor_weight: 0.2   # Keep encoder sharp at MRL anchor dims [64,128,256,384,512,768]
-
-    # Bilateral target dims per Bloom level (as ratio of 768).
-    # Model is pulled toward these targets from both directions.
-    # Remember→154, Understand→230, Apply→323, Analyze→430, Evaluate→538, Create→653
-    bloom_target_ratios: [0.20, 0.30, 0.42, 0.56, 0.70, 0.85]
-
-    # Inverse-sqrt class weights for imbalanced Bloom distribution.
-    # Computed from dataset: Remember 64%, Apply 16%, Create 9%, Analyze 6%, Evaluate 4%, Understand 2%
-    # Remember raised to 0.50 (from 0.30) so it retains enough gradient to beat MRL baseline.
-    # All weights normalized so mean=1 (total loss scale unchanged).
-    class_weights: [0.50, 1.90, 0.60, 1.00, 1.20, 0.80]
+    mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
+    # bloom_frequencies injected at runtime by train_bam.py from training data
   checkpoint_dir: "/tmp/bam-ckpts/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500

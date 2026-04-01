@@ -97,7 +97,7 @@ class FullEvaluator:
         # 3. Encode queries
         print("  Encoding queries...")
         query_texts = [s["query"] for s in valid_samples]
-        query_embs, query_masks, latencies, query_dims = self._encode_queries(
+        query_embs, query_masks, latencies, query_dims, query_full_embs = self._encode_queries(
             model, query_texts, tokenizer, device,
             learner_blooms=[s["bloom_level"] for s in valid_samples],
         )
@@ -105,27 +105,45 @@ class FullEvaluator:
         # 4. Get ground truth indices
         gt_indices = np.array([corpus_id_to_idx[s["positive_id"]] for s in valid_samples])
         query_blooms = np.array([s["bloom_level"] for s in valid_samples])
-        query_subjects = [s.get("subject", "") for s in valid_samples]
-        query_topics = [s.get("topic", "") for s in valid_samples]
 
         # 5. Compute similarity and retrieve
         print("  Computing similarities...")
-        all_rankings = []
+        N = len(valid_samples)
         chunk_size = 256
-        for i in range(0, len(query_embs), chunk_size):
-            q_chunk = query_embs[i:i+chunk_size].to(device)
-            c_embs = corpus_embs.to(device)
-            sim = torch.mm(q_chunk, c_embs.t())
-            topk_indices = sim.topk(max(self.ks), dim=-1).indices.cpu().numpy()
-            all_rankings.append(topk_indices)
-            del sim
-            torch.cuda.empty_cache() if device.type == "cuda" else None
+        rankings = np.zeros((N, max(self.ks)), dtype=np.int64)
 
-        rankings = np.concatenate(all_rankings, axis=0)
+        if query_dims is not None and query_full_embs is not None:
+            # Grouped sliced similarity: normalize(q[:k]) · normalize(d[:k])
+            # Fixes training-eval mismatch — matches masked contrastive training objective.
+            # At most 6 unique k values (one per Bloom level) → efficient.
+            k_values = query_dims.round().long()
+            for k_val in k_values.unique():
+                k = int(k_val.item())
+                k = max(1, min(k, corpus_embs.size(1)))   # clamp to valid range
+                group_idx = (k_values == k_val).nonzero(as_tuple=True)[0]
+                c_k = F.normalize(corpus_embs[:, :k], p=2, dim=-1).to(device)
+                for i in range(0, len(group_idx), chunk_size):
+                    chunk = group_idx[i:i + chunk_size]
+                    q_k = F.normalize(query_full_embs[chunk, :k], p=2, dim=-1).to(device)
+                    sim = torch.mm(q_k, c_k.t())
+                    topk = sim.topk(max(self.ks), dim=-1).indices.cpu().numpy()
+                    rankings[chunk.numpy()] = topk
+                del c_k
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+        else:
+            # Full-dim similarity for MRL baseline
+            for i in range(0, N, chunk_size):
+                q_chunk = query_embs[i:i + chunk_size].to(device)
+                sim = torch.mm(q_chunk, corpus_embs.to(device).t())
+                topk = sim.topk(max(self.ks), dim=-1).indices.cpu().numpy()
+                rankings[i:i + chunk_size] = topk
+                del sim
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
 
         # 6. Compute metrics
         metrics = {}
-        N = len(valid_samples)
 
         # Standard metrics
         for k in self.ks:
@@ -241,30 +259,29 @@ class FullEvaluator:
         """Encode queries with optional learner features.
 
         Returns:
-            embs: [N, D] query embeddings (masked if BAM)
-            masks: [N, D] binary masks or None
-            latencies: list of per-query latency in ms
-            discrete_dims: [N] active dim count per query or None
+            embs:          [N, D] masked embeddings (BAM) or full embeddings (MRL)
+            masks:         [N, D] binary masks or None
+            latencies:     list of per-query latency in ms
+            discrete_dims: [N] routed dim per query or None
+            full_embs:     [N, D] unmasked encoder outputs or None (for sliced similarity)
         """
-        all_embs, all_masks, all_dims = [], [], []
+        all_embs, all_masks, all_dims, all_full_embs = [], [], [], []
         latencies = []
         batch_size = 64
 
         for i in range(0, len(query_texts), batch_size):
-            batch = query_texts[i:i+batch_size]
+            batch = query_texts[i:i + batch_size]
             enc = tokenizer(batch, padding=True, truncation=True,
-                           max_length=128, return_tensors="pt")
+                            max_length=128, return_tensors="pt")
             enc = {k: v.to(device) for k, v in enc.items()}
 
-            # Build learner features (one-hot [B, 6]) for BAM
+            # Build one-hot learner features for BAM
             lf = None
             if learner_blooms and hasattr(model, "query_router"):
-                blooms = learner_blooms[i:i+len(batch)]
+                blooms = learner_blooms[i:i + len(batch)]
                 lf = torch.zeros(len(batch), 6)
                 for j, bl in enumerate(blooms):
-                    assert 1 <= bl <= 6, (
-                        f"Bloom level must be 1-6 (1-indexed), got {bl}."
-                    )
+                    assert 1 <= bl <= 6, f"Bloom level must be 1-6 (1-indexed), got {bl}."
                     lf[j, bl - 1] = 1.0
                 lf = lf.to(device)
 
@@ -274,12 +291,10 @@ class FullEvaluator:
                                            learner_features=lf)
                 all_embs.append(out["masked_embedding"].cpu())
                 all_masks.append(out["mask"].cpu())
-                # discrete_dim: number of active dims per query
+                if "full_embedding" in out:
+                    all_full_embs.append(out["full_embedding"].detach().cpu())
                 if "discrete_dim" in out:
                     all_dims.append(out["discrete_dim"].detach().cpu())
-                elif "mask" in out:
-                    # Fallback: count active dims from mask
-                    all_dims.append(out["mask"].sum(dim=-1).cpu())
             else:
                 out = model(enc["input_ids"], enc["attention_mask"])
                 all_embs.append(out["full"].cpu())
@@ -288,7 +303,8 @@ class FullEvaluator:
         embs = torch.cat(all_embs)
         masks = torch.cat(all_masks) if all_masks else None
         discrete_dims = torch.cat(all_dims) if all_dims else None
-        return embs, masks, latencies, discrete_dims
+        full_embs = torch.cat(all_full_embs) if all_full_embs else None
+        return embs, masks, latencies, discrete_dims, full_embs
 
     def _print_summary(self, metrics, N, query_blooms, show_ci=True):
         print(f"\n  === Results (N={N}) ===")
