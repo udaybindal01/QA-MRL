@@ -94,7 +94,7 @@ class BAMTrainer:
 
     def train_epoch(self, epoch):
         self.model.train()
-        meters = {k: AverageMeter() for k in ["total", "contrastive", "efficiency", "avg_dim"]}
+        meters = {k: AverageMeter() for k in ["total", "contrastive", "efficiency", "mrl_anchor", "avg_dim"]}
 
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}")
         for step, batch in enumerate(pbar):

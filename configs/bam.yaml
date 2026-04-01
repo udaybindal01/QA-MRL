@@ -54,6 +54,7 @@ training:
   loss:
     contrastive_weight: 1.0
     efficiency_weight: 0.3
+    mrl_anchor_weight: 0.2   # Keep encoder sharp at MRL anchor dims [64,128,256,384,512,768]
 
     # Bilateral target dims per Bloom level (as ratio of 768).
     # Model is pulled toward these targets from both directions.

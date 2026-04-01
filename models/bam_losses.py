@@ -18,10 +18,11 @@ Two improvements over v4:
    Sqrt smoothing (not full inverse) avoids 40x weight explosion for Understand.
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
+from typing import List, Optional
 
 
 class BloomMaskedContrastiveLoss(nn.Module):
@@ -134,19 +135,68 @@ class BloomTargetEfficiencyLoss(nn.Module):
         }
 
 
+class MRLAnchorRegularizationLoss(nn.Module):
+    """
+    Keeps the encoder sharp at MRL anchor dims during BAM fine-tuning.
+
+    The MRL baseline was trained at exactly [64, 128, 256, 384, 512, 768].
+    BAM routes queries to arbitrary dims like 152 or 318 — dimensions the
+    encoder was never explicitly trained on. This loss adds contrastive
+    regularization at the anchor dims so the encoder maintains strong
+    representations at the known-good truncation points.
+
+    Applied to the FULL (unmasked) query and positive embeddings.
+    Weighted by D/sqrt(d) so smaller truncations get more emphasis
+    (they carry disproportionately less information).
+    """
+
+    def __init__(self, mrl_dims: List[int], temperature: float = 0.05):
+        super().__init__()
+        self.mrl_dims = mrl_dims
+        self.temperature = temperature
+        # D/sqrt(d_k) weights, normalized to sum=1
+        D = max(mrl_dims)
+        raw = [D / math.sqrt(d) for d in mrl_dims]
+        total = sum(raw)
+        self.dim_weights = [w / total for w in raw]
+
+    def forward(
+        self,
+        query_full_emb: torch.Tensor,     # [B, 768] unmasked encoder output
+        positive_full_emb: torch.Tensor,  # [B, 768] unmasked encoder output
+    ):
+        total = torch.tensor(0.0, device=query_full_emb.device)
+        stats = {}
+
+        for d, w in zip(self.mrl_dims, self.dim_weights):
+            q = F.normalize(query_full_emb[:, :d], p=2, dim=-1)
+            p = F.normalize(positive_full_emb[:, :d], p=2, dim=-1)
+            sim = torch.mm(q, p.t()) / self.temperature
+            labels = torch.arange(sim.size(0), device=sim.device)
+            loss = F.cross_entropy(sim, labels)
+            total = total + w * loss
+            stats[f"mrl_anchor_d{d}"] = loss.item()
+
+        stats["mrl_anchor"] = total.item()
+        return total, stats
+
+
 class BAMCombinedLoss(nn.Module):
     """
     BAM v5 combined loss.
 
-    total = contrastive_weight * L_contrastive  (class-weighted InfoNCE)
-          + efficiency_weight  * L_efficiency   (bilateral target loss)
+    total = contrastive_weight * L_contrastive   (class-weighted masked InfoNCE)
+          + efficiency_weight  * L_efficiency    (bilateral target loss)
+          + mrl_anchor_weight  * L_mrl_anchor    (keep encoder sharp at anchor dims)
     """
 
     def __init__(self, config: dict):
         super().__init__()
+        mc = config["model"]
         lc = config["training"]["loss"]
         self.contrastive_weight = lc.get("contrastive_weight", 1.0)
         self.efficiency_weight = lc.get("efficiency_weight", 0.3)
+        self.mrl_anchor_weight = lc.get("mrl_anchor_weight", 0.2)
 
         self.contrastive = BloomMaskedContrastiveLoss(
             temperature=0.05,
@@ -155,26 +205,34 @@ class BAMCombinedLoss(nn.Module):
         self.efficiency = BloomTargetEfficiencyLoss(
             bloom_target_ratios=lc.get("bloom_target_ratios", None),
         )
+        self.mrl_anchor = MRLAnchorRegularizationLoss(
+            mrl_dims=mc["mrl_dims"],
+            temperature=0.05,
+        )
 
     def forward(
         self,
-        query_emb: torch.Tensor,
-        positive_emb: torch.Tensor,
-        query_mask: torch.Tensor,
-        continuous_dim: torch.Tensor,
-        bloom_labels: torch.Tensor,
-        negative_embs: Optional[torch.Tensor] = None,
+        query_emb: torch.Tensor,          # [B, 768] full encoder output
+        positive_emb: torch.Tensor,       # [B, 768] full encoder output
+        query_mask: torch.Tensor,         # [B, 768] binary router mask
+        continuous_dim: torch.Tensor,     # [B] float from router
+        bloom_labels: torch.Tensor,       # [B] int 0-indexed
+        negative_embs: Optional[torch.Tensor] = None,  # [B, N, 768]
     ):
         l_c, c_stats = self.contrastive(
             query_emb, positive_emb, query_mask, negative_embs, bloom_labels
         )
         l_e, e_stats = self.efficiency(continuous_dim, bloom_labels)
+        l_a, a_stats = self.mrl_anchor(query_emb, positive_emb)
 
-        total = self.contrastive_weight * l_c + self.efficiency_weight * l_e
+        total = (self.contrastive_weight * l_c
+                 + self.efficiency_weight * l_e
+                 + self.mrl_anchor_weight * l_a)
 
         stats = {}
         stats.update(c_stats)
         stats.update(e_stats)
+        stats.update(a_stats)
         stats["total"] = total.item()
 
         # Per-Bloom avg dims for logging
