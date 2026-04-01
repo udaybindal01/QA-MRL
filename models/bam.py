@@ -59,12 +59,18 @@ class BloomDimRouter(nn.Module):
             nn.Linear(16, 1),
         )
 
-        # Zero-initialize → sigmoid(0)=0.5 → all levels start at ~448 dims (midpoint)
-        # No ordinal bias. The optimizer discovers the optimal per-class allocation.
+        # Initialization strategy:
+        # - bloom_emb: small random → different per level (breaks symmetry)
+        # - dim_head[0] (hidden layer): Kaiming default → nonzero weights so
+        #   gradients flow through the network from step 2 onwards.
+        #   Zero-initializing this layer is a fatal bug: h = emb @ 0 = 0,
+        #   ReLU(0)=0, and the final layer receives 0 input → only the final
+        #   bias gets gradient → all 6 levels move together as one parameter.
+        # - dim_head[2] (output layer): zero weights + zero bias → logit=0 →
+        #   sigmoid(0)=0.5 → all levels start at ~448 dims (midpoint). ✓
         with torch.no_grad():
             nn.init.normal_(self.bloom_emb.weight, mean=0.0, std=0.02)
-            nn.init.zeros_(self.dim_head[0].weight)
-            nn.init.zeros_(self.dim_head[0].bias)
+            # dim_head[0]: leave PyTorch Kaiming default (do NOT zero-initialize)
             nn.init.zeros_(self.dim_head[2].weight)
             nn.init.zeros_(self.dim_head[2].bias)
 
