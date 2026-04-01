@@ -155,13 +155,14 @@ class RouterDiversityLoss(nn.Module):
     """
     Penalizes all 6 Bloom levels converging to the same dimension.
 
-    Without this, the router can satisfy both efficiency (push all down) and
-    contrastive (push all up) losses by assigning the same dim to every level —
-    the path of least resistance. This loss rewards differentiation.
+    Uses mean pairwise distance instead of variance.
+    Variance gives zero gradient when all dims are equal (common at init).
+    Pairwise distance has non-zero gradient even when all dims are identical,
+    which allows it to break the initial symmetry and push levels apart.
 
-    L_diversity = -Var(dim_0, ..., dim_5)
+    L_diversity = -mean_{i<j}(|dim_i - dim_j|) / span
 
-    Normalized by span² so the scale is invariant to [MIN_DIM, MAX_DIM].
+    Normalized by span so scale is in [0, 1].
     """
 
     EMBEDDING_DIM = 768.0
@@ -171,8 +172,13 @@ class RouterDiversityLoss(nn.Module):
         """all_dims: [6] continuous dims for all Bloom levels."""
         span = self.EMBEDDING_DIM - self.MIN_DIM
         normalized = (all_dims - self.MIN_DIM) / span   # [6] in [0, 1]
-        var = normalized.var()
-        return -var  # maximize variance = minimize negative variance
+        # Pairwise distances: [6, 6] → upper triangle → mean
+        diff = normalized.unsqueeze(0) - normalized.unsqueeze(1)  # [6, 6]
+        pairwise_dist = diff.abs()
+        # Upper triangle only (avoid double-counting)
+        mask = torch.triu(torch.ones(6, 6, device=all_dims.device), diagonal=1)
+        mean_dist = (pairwise_dist * mask).sum() / mask.sum()
+        return -mean_dist  # maximize spread = minimize negative distance
 
 
 class MRLAnchorRegularizationLoss(nn.Module):
@@ -259,17 +265,27 @@ class BAMCombinedLoss(nn.Module):
         )
         self.diversity = RouterDiversityLoss()
 
-    def set_epoch(self, epoch: int, total_epochs: int):
+    def set_epoch(self, epoch: int, total_epochs: int, freeze_encoder: bool = False):
         """
         Call at the start of each epoch to update:
           1. Temperature: cosine anneal from temp_start to temp_end.
+             SKIPPED for frozen encoder — annealing inflates loss scale without
+             improving representations (encoder can't sharpen), causing contrastive
+             gradient to grow until it exactly cancels efficiency gradient, parking
+             the router at a fixed equilibrium dim for all Bloom levels.
           2. Efficiency weight: 0 for encoder_warmup_epochs, then config value.
         """
-        # Cosine temperature annealing
-        progress = epoch / max(total_epochs - 1, 1)
-        t = self.temp_end + 0.5 * (self.temp_start - self.temp_end) * (1 + math.cos(math.pi * progress))
-        self.contrastive.set_temperature(t)
-        self.mrl_anchor.temperature = t
+        if freeze_encoder:
+            # Fixed temperature for frozen encoder: no annealing, stable loss scale
+            t = self.temp_end  # use the "sharp" end temperature from the start
+            self.contrastive.set_temperature(t)
+            self.mrl_anchor.temperature = t
+        else:
+            # Cosine temperature annealing for full (unfrozen) model
+            progress = epoch / max(total_epochs - 1, 1)
+            t = self.temp_end + 0.5 * (self.temp_start - self.temp_end) * (1 + math.cos(math.pi * progress))
+            self.contrastive.set_temperature(t)
+            self.mrl_anchor.temperature = t
 
         # Efficiency gate: zero out during encoder warmup
         if epoch < self.encoder_warmup_epochs:
