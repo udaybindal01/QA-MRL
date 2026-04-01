@@ -188,7 +188,15 @@ class BAMTrainer:
     def load_checkpoint(self, path):
         ckpt = torch.load(os.path.join(path, "checkpoint.pt"), map_location=self.device)
         self.model.load_state_dict(ckpt["model_state_dict"], strict=False)
-        self.state = TrainingState(**ckpt["training_state"])
+        # training_state only exists in BAM checkpoints, not MRL checkpoints
+        if "training_state" in ckpt:
+            self.state = TrainingState(**ckpt["training_state"])
+        if "optimizer_state_dict" in ckpt:
+            try:
+                self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            except Exception:
+                pass  # param groups differ (e.g. MRL→BAM frozen), start fresh optimizer
+        self.logger.info(f"Loaded checkpoint from {path}")
 
     def train(self):
         self.logger.info("Starting BAM v4 training...")
