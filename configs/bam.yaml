@@ -36,8 +36,12 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.1      # Reduced from 0.3 — 0.3 over-compressed to 204 dims hurting quality
+    efficiency_weight: 0.1      # Active only after encoder_warmup_epochs
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
+    encoder_warmup_epochs: 5    # First 5 epochs: efficiency_weight=0, build encoder quality
+    temperature_schedule:
+      start: 0.1                # Warm start — smooth gradients while encoder is learning
+      end: 0.02                 # Cold end — sharp distribution that specifically improves R@1
     # bloom_frequencies injected at runtime by train_bam.py from training data
   checkpoint_dir: "/tmp/bam-ckpts/"
   save_every_n_steps: 1000

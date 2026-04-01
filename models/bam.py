@@ -26,36 +26,38 @@ from models.encoder import MRLEncoder
 
 class BloomDimRouter(nn.Module):
     """
-    Learns one scalar per Bloom level → continuous truncation dimension.
+    Learns one truncation dimension per Bloom level with guaranteed monotonicity.
 
-    6 learnable scalars. Each is passed through:
-        continuous_dim = sigmoid(raw) * (EMBEDDING_DIM - MIN_DIM) + MIN_DIM
+    Architecture: cumulative softplus — each level's dim = previous level's dim + Δ_b,
+    where Δ_b = softplus(raw_b) * scale. This ensures dim(b) >= dim(b-1) for all b,
+    which matches the cognitive hierarchy (higher Bloom → more complex → more dims).
 
-    This guarantees dims stay in [MIN_DIM, EMBEDDING_DIM] = [128, 768].
-    MIN_DIM=128 prevents Remember from collapsing to near-zero dims where
-    retrieval quality degrades severely (MRL@64 already loses ~8 R@10 pts).
+    Base (Remember) starts at MIN_DIM=128 + softplus(raw_0) * scale.
+    Total span = EMBEDDING_DIM - MIN_DIM = 640, split across 6 levels.
 
-    Straight-through estimator rounds for the binary mask while keeping
-    gradients flowing through the continuous value for the efficiency loss.
-
-    Initialization: inverse-sigmoid of [150, 230, 330, 440, 550, 660]
-    in the [128, 768] range — Remember starts at ~150, Create at ~660.
+    No vanilla sigmoid → no independent scalars → no risk of non-monotonic collapse.
+    Straight-through estimator for the binary mask.
     """
 
     EMBEDDING_DIM = 768
-    MIN_DIM = 128  # Hard floor — never route below this
-    # Target initial dims per Bloom level (0-indexed: Remember=0 ... Create=5)
-    INIT_DIMS = [150, 230, 330, 440, 550, 660]
+    MIN_DIM = 128
 
     def __init__(self):
         super().__init__()
-        self.bloom_dim_params = nn.Parameter(torch.zeros(6))
-        span = self.EMBEDDING_DIM - self.MIN_DIM  # 640
+        # 6 raw params, each controls the *incremental* step above the previous level.
+        # Initialize so that dims ≈ [150, 230, 330, 440, 550, 660].
+        # Increments: [22, 80, 100, 110, 110, 110] in [128, 768] range.
+        # softplus(x) ≈ x for x >> 0; solve softplus(raw) * scale = target_increment.
+        # Use scale=640/6 ≈ 107 so each raw≈1 contributes ~107 dims.
+        self.scale = (self.EMBEDDING_DIM - self.MIN_DIM) / 6.0  # 106.67
+        target_increments = [22.0, 80.0, 100.0, 110.0, 110.0, 110.0]
+        self.raw_deltas = nn.Parameter(torch.zeros(6))
         with torch.no_grad():
-            for b, target_dim in enumerate(self.INIT_DIMS):
-                v = (target_dim - self.MIN_DIM) / span  # target sigmoid output
-                # inverse sigmoid: log(v / (1 - v))
-                self.bloom_dim_params[b] = math.log(v / (1.0 - v))
+            for b, inc in enumerate(target_increments):
+                # softplus(x) ≈ x + log(1+exp(-x)), solve for x: inv_softplus(y/scale)
+                y = inc / self.scale
+                # inv_softplus(y) = log(exp(y) - 1) for y > 0
+                self.raw_deltas[b] = math.log(math.exp(y) - 1.0 + 1e-8)
 
     def forward(self, bloom_levels: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -67,16 +69,17 @@ class BloomDimRouter(nn.Module):
             continuous_dim: [B] float dim before rounding (used by efficiency loss)
             discrete_dim: [B] float, rounded value with STE for gradient flow
         """
-        raw = self.bloom_dim_params[bloom_levels]  # [B]
-        span = self.EMBEDDING_DIM - self.MIN_DIM
-        # Dims guaranteed in [MIN_DIM, EMBEDDING_DIM] = [128, 768]
-        continuous_dim = torch.sigmoid(raw) * span + self.MIN_DIM  # [B]
+        # cumulative sum of softplus deltas gives monotonically increasing dims
+        deltas = F.softplus(self.raw_deltas) * self.scale   # [6], all positive
+        cum_dims = self.MIN_DIM + deltas.cumsum(dim=0)      # [6], monotone increasing
+        cum_dims = cum_dims.clamp(max=self.EMBEDDING_DIM)
 
-        # Straight-through estimator: round in forward, pass gradient as identity
+        continuous_dim = cum_dims[bloom_levels]  # [B]
+
+        # Straight-through estimator
         rounded = continuous_dim.round()
         discrete_dim = continuous_dim + (rounded - continuous_dim).detach()
 
-        # Build binary mask: dim i is active if i < rounded_dim
         arange = torch.arange(self.EMBEDDING_DIM, device=bloom_levels.device).float()
         mask = (arange.unsqueeze(0) < rounded.unsqueeze(-1)).float()  # [B, 768]
 
@@ -88,10 +91,11 @@ class BloomDimRouter(nn.Module):
 
     def get_dim_table(self) -> Dict[int, float]:
         """Returns {bloom_level: expected_dim} for logging. No gradient."""
-        span = self.EMBEDDING_DIM - self.MIN_DIM
         with torch.no_grad():
-            dims = torch.sigmoid(self.bloom_dim_params) * span + self.MIN_DIM
-        return {b: round(dims[b].item()) for b in range(6)}
+            deltas = F.softplus(self.raw_deltas) * self.scale
+            cum_dims = self.MIN_DIM + deltas.cumsum(dim=0)
+            cum_dims = cum_dims.clamp(max=self.EMBEDDING_DIM)
+        return {b: round(cum_dims[b].item()) for b in range(6)}
 
 
 class BloomAlignedMRL(nn.Module):

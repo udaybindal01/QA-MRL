@@ -30,6 +30,11 @@ class BloomMaskedContrastiveLoss(nn.Module):
 
     class_weights: [6] tensor, one weight per Bloom level (0-indexed).
     Computed from training data as 1/sqrt(freq), normalized to mean=1.
+
+    temperature is set dynamically via set_temperature() during training.
+    Typical schedule: 0.1 (epoch 0) → 0.02 (epoch 14) via cosine annealing.
+    High T early = smooth gradients while encoder is still learning.
+    Low T late = sharp ranking distribution that specifically improves R@1.
     """
 
     def __init__(self, temperature: float = 0.05,
@@ -73,7 +78,10 @@ class BloomMaskedContrastiveLoss(nn.Module):
         else:
             loss = per_sample_loss.mean()
 
-        return loss, {"contrastive": loss.item()}
+        return loss, {"contrastive": loss.item(), "temperature": self.temperature}
+
+    def set_temperature(self, t: float):
+        self.temperature = t
 
 
 class BloomTwoFactorEfficiencyLoss(nn.Module):
@@ -181,15 +189,40 @@ class BAMCombinedLoss(nn.Module):
         cw = 1.0 / f.sqrt()
         cw = (cw / cw.mean()).tolist()
 
+        ts = lc.get("temperature_schedule", {})
+        self.temp_start = ts.get("start", 0.1)
+        self.temp_end   = ts.get("end",   0.02)
+        # encoder_warmup_epochs: efficiency loss is 0 for this many epochs so the
+        # encoder builds quality before routing compression turns on.
+        self.encoder_warmup_epochs = lc.get("encoder_warmup_epochs", 0)
+
         self.contrastive = BloomMaskedContrastiveLoss(
-            temperature=0.05,
+            temperature=self.temp_start,
             class_weights=cw,
         )
         self.efficiency = BloomTwoFactorEfficiencyLoss(bloom_frequencies=freqs)
         self.mrl_anchor = MRLAnchorRegularizationLoss(
             mrl_dims=mc["mrl_dims"],
-            temperature=0.05,
+            temperature=self.temp_start,
         )
+
+    def set_epoch(self, epoch: int, total_epochs: int):
+        """
+        Call at the start of each epoch to update:
+          1. Temperature: cosine anneal from temp_start to temp_end.
+          2. Efficiency weight: 0 for encoder_warmup_epochs, then config value.
+        """
+        # Cosine temperature annealing
+        progress = epoch / max(total_epochs - 1, 1)
+        t = self.temp_end + 0.5 * (self.temp_start - self.temp_end) * (1 + math.cos(math.pi * progress))
+        self.contrastive.set_temperature(t)
+        self.mrl_anchor.temperature = t
+
+        # Efficiency gate: zero out during encoder warmup
+        if epoch < self.encoder_warmup_epochs:
+            self._active_efficiency_weight = 0.0
+        else:
+            self._active_efficiency_weight = self.efficiency_weight
 
     def forward(
         self,
@@ -206,9 +239,11 @@ class BAMCombinedLoss(nn.Module):
         l_e, e_stats = self.efficiency(continuous_dim, bloom_labels)
         l_a, a_stats = self.mrl_anchor(query_emb, positive_emb)
 
+        eff_w = getattr(self, "_active_efficiency_weight", self.efficiency_weight)
         total = (self.contrastive_weight * l_c
-                 + self.efficiency_weight * l_e
+                 + eff_w * l_e
                  + self.mrl_anchor_weight * l_a)
+        e_stats["efficiency_weight_active"] = eff_w
 
         stats = {}
         stats.update(c_stats)

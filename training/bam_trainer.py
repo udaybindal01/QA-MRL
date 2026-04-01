@@ -199,6 +199,11 @@ class BAMTrainer:
 
         for epoch in range(self.num_epochs):
             self.state.epoch = epoch
+            # Update temperature (cosine anneal) and efficiency gate
+            self.criterion.set_epoch(epoch, self.num_epochs)
+            t = self.criterion.contrastive.temperature
+            ew = getattr(self.criterion, "_active_efficiency_weight", self.criterion.efficiency_weight)
+            self.logger.info(f"Epoch {epoch}: temperature={t:.4f}, efficiency_weight={ew:.3f}")
             self.train_epoch(epoch)
             self.save_checkpoint(f"epoch_{epoch}")
 

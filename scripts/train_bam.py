@@ -46,11 +46,25 @@ def main():
     parser.add_argument("--init_encoder", default=None,
                         help="Initialize encoder from MRL baseline checkpoint dir")
     parser.add_argument("--resume", default=None,
-                        help="Resume from BAM checkpoint dir")
+                        help="Resume from BAM checkpoint dir (e.g. for hard-negative fine-tuning)")
+    parser.add_argument("--train_path", default=None,
+                        help="Override data.train_path (e.g. train_hard.jsonl)")
+    parser.add_argument("--checkpoint_dir", default=None,
+                        help="Override training.checkpoint_dir")
+    parser.add_argument("--num_epochs", type=int, default=None,
+                        help="Override training.num_epochs (e.g. 5 for fine-tuning pass)")
     args = parser.parse_args()
 
     config = load_config(args.config)
     set_seed(config["training"]["seed"])
+
+    # CLI overrides
+    if args.train_path:
+        config["data"]["train_path"] = args.train_path
+    if args.checkpoint_dir:
+        config["training"]["checkpoint_dir"] = args.checkpoint_dir
+    if args.num_epochs is not None:
+        config["training"]["num_epochs"] = args.num_epochs
 
     print("=" * 60)
     print("Training BAM: Bloom-Aligned Matryoshka")
