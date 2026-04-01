@@ -122,6 +122,9 @@ if [ "$SKIP_EVAL" = false ]; then
   log "  6b: Full evaluation suite..."
   python scripts/run_evaluation.py \
       --config configs/neurips.yaml \
+      --checkpoint "$BAM_CKPT/best/" \
+      --baseline   "$MRL_CKPT/best/" \
+      --output_dir "$RESULTS_DIR/full_eval/" \
       2>&1 | tee "$LOG_DIR/run_evaluation.log"
 
   log "  6c: Ablations..."
