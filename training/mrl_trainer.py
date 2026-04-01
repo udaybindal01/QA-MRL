@@ -88,7 +88,9 @@ class MRLBaselineTrainer:
                 self.logger.info(f"Epoch {epoch}: {vm}")
                 if vm.get("ndcg_10", 0) > self.best_metric:
                     self.best_metric = vm["ndcg_10"]
-                    self.save_checkpoint("best")
+                    # NOTE: selected on val-set pairwise NDCG, not full corpus.
+                    # Run scripts/find_best_epoch.py after training for true best.
+                    self.save_checkpoint("inbatch_best")
 
         self.save_checkpoint("final")
         self.wandb.finish()

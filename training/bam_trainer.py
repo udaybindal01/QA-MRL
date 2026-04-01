@@ -124,7 +124,10 @@ class BAMTrainer:
                     if vm.get("ndcg_10", 0) > self.state.best_metric:
                         self.state.best_metric = vm["ndcg_10"]
                         self.state.best_epoch = epoch
-                        self.save_checkpoint("best")
+                        # NOTE: "inbatch_best" is selected on val-set pairwise NDCG,
+                        # NOT full corpus retrieval. This is an approximation only.
+                        # Run scripts/find_best_epoch.py after training for the true best.
+                        self.save_checkpoint("inbatch_best")
                     self.model.train()
 
                 if self.state.global_step % self.save_every == 0:

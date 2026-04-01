@@ -63,8 +63,9 @@ training:
 
     # Inverse-sqrt class weights for imbalanced Bloom distribution.
     # Computed from dataset: Remember 64%, Apply 16%, Create 9%, Analyze 6%, Evaluate 4%, Understand 2%
-    # Formula: 1/sqrt(freq), normalized so mean=1 (keeps overall loss scale unchanged).
-    class_weights: [0.30, 2.00, 0.62, 1.01, 1.24, 0.83]
+    # Remember raised to 0.50 (from 0.30) so it retains enough gradient to beat MRL baseline.
+    # All weights normalized so mean=1 (total loss scale unchanged).
+    class_weights: [0.50, 1.90, 0.60, 1.00, 1.20, 0.80]
   checkpoint_dir: "/tmp/bam-ckpts/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
