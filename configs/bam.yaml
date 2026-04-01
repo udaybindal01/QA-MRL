@@ -54,6 +54,16 @@ training:
   loss:
     contrastive_weight: 1.0
     efficiency_weight: 0.3
+
+    # Bilateral target dims per Bloom level (as ratio of 768).
+    # Model is pulled toward these targets from both directions.
+    # Remember→154, Understand→230, Apply→323, Analyze→430, Evaluate→538, Create→653
+    bloom_target_ratios: [0.20, 0.30, 0.42, 0.56, 0.70, 0.85]
+
+    # Inverse-sqrt class weights for imbalanced Bloom distribution.
+    # Computed from dataset: Remember 64%, Apply 16%, Create 9%, Analyze 6%, Evaluate 4%, Understand 2%
+    # Formula: 1/sqrt(freq), normalized so mean=1 (keeps overall loss scale unchanged).
+    class_weights: [0.30, 2.00, 0.62, 1.01, 1.24, 0.83]
   checkpoint_dir: "/tmp/bam-ckpts/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
