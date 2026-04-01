@@ -1,20 +1,27 @@
 """
-BAM Training Losses v6.
+BAM Training Losses v7.
 
-Two-factor efficiency loss replacing all previous designs:
+Efficiency loss — per-class averaged, cognitive-only weights:
 
-  weight(b) = (1 - b/6) * sqrt(freq(b)),  normalized to mean=1
+  L_efficiency = (1/C) Σ_b [ cognitive(b) * mean_{i: bloom_i=b}(dim_i / D) ]
 
-  - (1 - b/6): cognitive simplicity — Remember=1.0, Create=0.167 (floor, not zero)
-  - sqrt(freq(b)): dataset frequency — common classes face more compression
-  - Multiplicative: high pressure only when BOTH factors are high
-  - No hardcoded targets, no forced monotonicity
-  - Frequencies computed from actual training data at runtime
+  where cognitive(b) = (1 - b/6):
+    Remember=1.0, Understand=0.833, ..., Create=0.167
+
+  Key change from v6: per-class averaging (not per-sample).
+  In v6, the per-sample mean was dominated by Remember (64% of batches),
+  causing the optimizer to aggressively compress Remember purely to satisfy
+  the overall loss gradient — "frequency gaming."
+  Per-class averaging gives each Bloom level an equal gradient contribution
+  regardless of its frequency. The cognitive weight then independently controls
+  how much compression pressure each level faces based on its cognitive complexity.
+
+  Frequency is no longer in the per-sample weight. It was redundant once
+  per-class averaging is applied at the aggregation level.
 
 Class weights for contrastive loss:
   weight(b) = 1 / sqrt(freq(b)), normalized to mean=1
-  Boosts rare classes (Understand, Evaluate) without 40x explosion.
-  Also computed from training data — not hardcoded.
+  Computed from training data — not hardcoded.
 """
 
 import math
@@ -86,43 +93,54 @@ class BloomMaskedContrastiveLoss(nn.Module):
 
 class BloomTwoFactorEfficiencyLoss(nn.Module):
     """
-    Efficiency penalty: weight(b) = (1 - b/6) * sqrt(freq(b)), normalized.
+    Efficiency penalty with per-class averaging to prevent frequency gaming.
 
-    Cognitive factor (1 - b/6):
-      Remember=1.000, Understand=0.833, Apply=0.667,
-      Analyze=0.500, Evaluate=0.333, Create=0.167
-      Create gets 0.167 not 0.0 — has a floor, not free pass.
+    L = (1/C) Σ_b [ cognitive(b) * mean_{i: bloom_i=b}(dim_i / D) ]
 
-    Frequency factor sqrt(freq(b)):
-      Softens the raw frequency so rare classes (Understand 1.5%) aren't
-      completely ignored, and common classes (Remember 64%) aren't crushed.
+    cognitive(b) = (1 - b/6): compression pressure decreases with cognitive level.
+      Remember=1.0, Understand=0.833, Apply=0.667, Analyze=0.500,
+      Evaluate=0.333, Create=0.167 (floor, not zero).
 
-    Multiplicative: a Bloom level only faces strong pressure if it is BOTH
-    cognitively simple AND frequently occurring. Rare+complex levels (Evaluate)
-    get very low pressure — the model has flexibility to use dims as needed.
+    Per-class averaging ensures each Bloom level contributes equal gradient weight
+    to the efficiency loss, regardless of its frequency in the batch.
+    This prevents the optimizer from gaming the loss by compressing the majority
+    class (Remember=64%) well beyond the semantically optimal point.
 
-    Frequencies computed from training data at runtime (passed in constructor).
+    bloom_frequencies is accepted for API compatibility but no longer used in the
+    per-sample weights — frequency imbalance is handled by per-class averaging.
     """
+
+    EMBEDDING_DIM = 768.0
 
     def __init__(self, bloom_frequencies: List[float]):
         super().__init__()
-        freqs = torch.tensor(bloom_frequencies, dtype=torch.float).clamp(min=1e-6)
+        # Cognitive-only weights: simplicity of each Bloom level
         cognitive = torch.tensor([1.0 - b / 6.0 for b in range(6)], dtype=torch.float)
-        weights = cognitive * freqs.sqrt()
-        weights = weights / weights.mean()   # normalize so mean=1
-        self.register_buffer("weights", weights)
+        self.register_buffer("cognitive_weights", cognitive)
 
     def forward(
         self,
         continuous_dim: torch.Tensor,   # [B] float
         bloom_labels: torch.Tensor,     # [B] int 0-indexed
     ):
-        w = self.weights.to(bloom_labels.device)[bloom_labels]   # [B]
-        loss = (continuous_dim / 768.0 * w).mean()
-        return loss, {
-            "efficiency": loss.item(),
-            "avg_dim": continuous_dim.mean().item(),
-        }
+        total = torch.tensor(0.0, device=continuous_dim.device)
+        n_classes = 0
+        per_class_dims = {}
+
+        for b in range(6):
+            mask = (bloom_labels == b)
+            if mask.sum() == 0:
+                continue
+            cw = self.cognitive_weights[b]
+            class_mean_dim = continuous_dim[mask].mean()
+            total = total + cw * (class_mean_dim / self.EMBEDDING_DIM)
+            n_classes += 1
+            per_class_dims[b] = class_mean_dim.item()
+
+        loss = total / max(n_classes, 1)
+        stats = {"efficiency": loss.item(), "avg_dim": continuous_dim.mean().item()}
+        stats.update({f"dim_b{b}": d for b, d in per_class_dims.items()})
+        return loss, stats
 
 
 class MRLAnchorRegularizationLoss(nn.Module):

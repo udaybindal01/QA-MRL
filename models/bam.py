@@ -26,38 +26,54 @@ from models.encoder import MRLEncoder
 
 class BloomDimRouter(nn.Module):
     """
-    Learns one truncation dimension per Bloom level with guaranteed monotonicity.
+    Learns one truncation dimension per Bloom level via independent MLP heads.
 
-    Architecture: cumulative softplus — each level's dim = previous level's dim + Δ_b,
-    where Δ_b = softplus(raw_b) * scale. This ensures dim(b) >= dim(b-1) for all b,
-    which matches the cognitive hierarchy (higher Bloom → more complex → more dims).
+    Each Bloom level b gets its own learned embedding → 2-layer MLP → sigmoid → dim.
+    There is NO ordinal inductive bias — the model can freely learn that
+    Evaluate needs 512 dims while Create needs only 256 if the data supports it.
+    Monotonicity is NOT enforced; it should emerge from the training signal.
 
-    Base (Remember) starts at MIN_DIM=128 + softplus(raw_0) * scale.
-    Total span = EMBEDDING_DIM - MIN_DIM = 640, split across 6 levels.
+    Architecture per level:
+        Embedding(6, hidden_dim=32) → Linear(32, 16) → ReLU → Linear(16, 1) → sigmoid
+        → continuous_dim ∈ [MIN_DIM, EMBEDDING_DIM] = [128, 768]
 
-    No vanilla sigmoid → no independent scalars → no risk of non-monotonic collapse.
-    Straight-through estimator for the binary mask.
+    Initialization: all 6 levels start at the midpoint (~448 dims).
+    No ordinal prior — let the efficiency and contrastive losses determine
+    the optimal allocation per class independently.
+
+    Straight-through estimator rounds for the binary mask while passing
+    gradients through the continuous dim to the efficiency loss.
     """
 
     EMBEDDING_DIM = 768
     MIN_DIM = 128
 
-    def __init__(self):
+    def __init__(self, hidden_dim: int = 32):
         super().__init__()
-        # 6 raw params, each controls the *incremental* step above the previous level.
-        # Initialize so that dims ≈ [150, 230, 330, 440, 550, 660].
-        # Increments: [22, 80, 100, 110, 110, 110] in [128, 768] range.
-        # softplus(x) ≈ x for x >> 0; solve softplus(raw) * scale = target_increment.
-        # Use scale=640/6 ≈ 107 so each raw≈1 contributes ~107 dims.
-        self.scale = (self.EMBEDDING_DIM - self.MIN_DIM) / 6.0  # 106.67
-        target_increments = [22.0, 80.0, 100.0, 110.0, 110.0, 110.0]
-        self.raw_deltas = nn.Parameter(torch.zeros(6))
+        self._span = self.EMBEDDING_DIM - self.MIN_DIM  # 640
+
+        self.bloom_emb = nn.Embedding(6, hidden_dim)
+        self.dim_head = nn.Sequential(
+            nn.Linear(hidden_dim, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1),
+        )
+
+        # Zero-initialize → sigmoid(0)=0.5 → all levels start at ~448 dims (midpoint)
+        # No ordinal bias. The optimizer discovers the optimal per-class allocation.
         with torch.no_grad():
-            for b, inc in enumerate(target_increments):
-                # softplus(x) ≈ x + log(1+exp(-x)), solve for x: inv_softplus(y/scale)
-                y = inc / self.scale
-                # inv_softplus(y) = log(exp(y) - 1) for y > 0
-                self.raw_deltas[b] = math.log(math.exp(y) - 1.0 + 1e-8)
+            nn.init.normal_(self.bloom_emb.weight, mean=0.0, std=0.02)
+            nn.init.zeros_(self.dim_head[0].weight)
+            nn.init.zeros_(self.dim_head[0].bias)
+            nn.init.zeros_(self.dim_head[2].weight)
+            nn.init.zeros_(self.dim_head[2].bias)
+
+    def _all_dims(self) -> torch.Tensor:
+        """Compute continuous dim for all 6 levels. [6] — used in forward + get_dim_table."""
+        idx = torch.arange(6, device=self.bloom_emb.weight.device)
+        emb = self.bloom_emb(idx)                       # [6, hidden]
+        logit = self.dim_head(emb).squeeze(-1)          # [6]
+        return torch.sigmoid(logit) * self._span + self.MIN_DIM  # [6] in [128, 768]
 
     def forward(self, bloom_levels: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -69,14 +85,10 @@ class BloomDimRouter(nn.Module):
             continuous_dim: [B] float dim before rounding (used by efficiency loss)
             discrete_dim: [B] float, rounded value with STE for gradient flow
         """
-        # cumulative sum of softplus deltas gives monotonically increasing dims
-        deltas = F.softplus(self.raw_deltas) * self.scale   # [6], all positive
-        cum_dims = self.MIN_DIM + deltas.cumsum(dim=0)      # [6], monotone increasing
-        cum_dims = cum_dims.clamp(max=self.EMBEDDING_DIM)
+        all_dims = self._all_dims()              # [6]
+        continuous_dim = all_dims[bloom_levels]  # [B]
 
-        continuous_dim = cum_dims[bloom_levels]  # [B]
-
-        # Straight-through estimator
+        # Straight-through estimator: round in forward, gradient flows as identity
         rounded = continuous_dim.round()
         discrete_dim = continuous_dim + (rounded - continuous_dim).detach()
 
@@ -92,10 +104,8 @@ class BloomDimRouter(nn.Module):
     def get_dim_table(self) -> Dict[int, float]:
         """Returns {bloom_level: expected_dim} for logging. No gradient."""
         with torch.no_grad():
-            deltas = F.softplus(self.raw_deltas) * self.scale
-            cum_dims = self.MIN_DIM + deltas.cumsum(dim=0)
-            cum_dims = cum_dims.clamp(max=self.EMBEDDING_DIM)
-        return {b: round(cum_dims[b].item()) for b in range(6)}
+            dims = self._all_dims()
+        return {b: round(dims[b].item()) for b in range(6)}
 
 
 class BloomAlignedMRL(nn.Module):
@@ -217,12 +227,16 @@ class BloomAlignedMRL(nn.Module):
 
     def get_parameter_groups(self, config):
         oc = config["training"]["optimizer"]
-        # Router has only 6 params — needs high LR to learn quickly
-        fast_lr = oc.get("router_lr", oc["encoder_lr"] * 50)
-        return [
-            {"params": list(self.encoder.parameters()), "lr": oc["encoder_lr"]},
-            {"params": list(self.bloom_router.parameters()), "lr": fast_lr},
-        ]
+        freeze = config["training"].get("freeze_encoder", False)
+        # Router is a small MLP (~800 params) — use higher LR than encoder.
+        # With freeze_encoder=True, encoder params have requires_grad=False so
+        # they're excluded from the optimizer automatically.
+        fast_lr = oc.get("router_lr", oc["encoder_lr"] * 10)
+        groups = [{"params": list(self.bloom_router.parameters()), "lr": fast_lr}]
+        if not freeze:
+            groups.append({"params": list(self.encoder.parameters()),
+                           "lr": oc["encoder_lr"]})
+        return groups
 
     def get_bloom_dim_table(self) -> Dict[int, float]:
         return self.bloom_router.get_dim_table()

@@ -30,7 +30,7 @@ training:
     lr: 2.0e-5
     weight_decay: 0.01
     encoder_lr: 2.0e-5
-    router_lr: 1.0e-3           # BloomDimRouter has only 6 params — needs high LR
+    router_lr: 2.0e-4           # BloomDimRouter MLP (~800 params) — 10x encoder LR
   scheduler:
     type: "cosine"
     warmup_ratio: 0.1

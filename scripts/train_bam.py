@@ -53,6 +53,9 @@ def main():
                         help="Override training.checkpoint_dir")
     parser.add_argument("--num_epochs", type=int, default=None,
                         help="Override training.num_epochs (e.g. 5 for fine-tuning pass)")
+    parser.add_argument("--freeze_encoder", action="store_true",
+                        help="Freeze encoder weights — only train the BloomDimRouter. "
+                             "Use this to isolate routing contribution from extra training.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -87,7 +90,19 @@ def main():
         else:
             print(f"WARNING: checkpoint not found at {ckpt_path}, starting from scratch")
 
-    print(f"Parameters: {count_parameters(model)}")
+    # Freeze encoder — only train the BloomDimRouter.
+    # Use this to isolate the routing contribution from extra encoder training.
+    # The paper experiment: BAM with frozen encoder vs MRL-continued (same total steps).
+    # If frozen-encoder BAM still improves over MRL truncated at same avg dims → routing works.
+    if args.freeze_encoder:
+        model.freeze_encoder()
+        trainable = count_parameters(model)
+        total = count_parameters(model)
+        router_params = sum(p.numel() for p in model.bloom_router.parameters())
+        print(f"Encoder FROZEN. Only training BloomDimRouter ({router_params} params).")
+    else:
+        print(f"Parameters: {count_parameters(model)}")
+    config["training"]["freeze_encoder"] = args.freeze_encoder
 
     tokenizer = AutoTokenizer.from_pretrained(config["model"]["backbone"])
     loaders = build_dataloaders(config, tokenizer)
