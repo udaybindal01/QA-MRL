@@ -36,7 +36,7 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.3
+    efficiency_weight: 0.1      # Reduced from 0.3 — 0.3 over-compressed to 204 dims hurting quality
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
     # bloom_frequencies injected at runtime by train_bam.py from training data
   checkpoint_dir: "/tmp/bam-ckpts/"
