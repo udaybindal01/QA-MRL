@@ -60,6 +60,7 @@ class BAMTrainer:
         self.scaler = GradScaler(enabled=self.use_fp16)
 
         self.state = TrainingState()
+        self._resumed = False  # set to True by load_checkpoint
 
         self.logger.info(f"BAM Parameters: {count_parameters(model)}")
         self.logger.info(f"Training {self.num_epochs} epochs (no warmup, no early stopping).")
@@ -192,12 +193,13 @@ class BAMTrainer:
         # training_state only exists in BAM checkpoints, not MRL checkpoints
         if "training_state" in ckpt:
             self.state = TrainingState(**ckpt["training_state"])
+            self._resumed = True  # tells train() to skip already-completed epochs
         if "optimizer_state_dict" in ckpt:
             try:
                 self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             except Exception:
                 pass  # param groups differ (e.g. MRL→BAM frozen), start fresh optimizer
-        self.logger.info(f"Loaded checkpoint from {path}")
+        self.logger.info(f"Loaded checkpoint from {path} (epoch {self.state.epoch})")
 
     def train(self):
         self.logger.info("Starting BAM v4 training...")
@@ -206,7 +208,12 @@ class BAMTrainer:
         bloom_names = {0: "Remember", 1: "Understand", 2: "Apply",
                        3: "Analyze", 4: "Evaluate", 5: "Create"}
 
-        for epoch in range(self.num_epochs):
+        # If resuming from a saved checkpoint, skip already-completed epochs
+        start_epoch = (self.state.epoch + 1) if self._resumed else 0
+        if self._resumed:
+            self.logger.info(f"Resuming from epoch {self.state.epoch}, starting at epoch {start_epoch}")
+
+        for epoch in range(start_epoch, self.num_epochs):
             self.state.epoch = epoch
             # Update temperature (cosine anneal) and efficiency gate
             freeze_encoder = self.config["training"].get("freeze_encoder", False)
