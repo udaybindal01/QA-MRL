@@ -74,6 +74,12 @@ def main():
                         help="Metric to use for best-epoch selection")
     parser.add_argument("--output_dir", default=None,
                         help="Where to save per-epoch results JSON (default: checkpoint_dir)")
+    parser.add_argument("--skip_warmup_epochs", type=int, default=None,
+                        help="Skip the first N epochs from best-epoch selection (warmup epochs "
+                             "have efficiency_weight=0 and no routing compression — selecting "
+                             "them as 'best BAM' is misleading for efficiency claims). "
+                             "Defaults to encoder_warmup_epochs from config if not specified. "
+                             "Set to 0 to disable skipping.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -111,9 +117,22 @@ def main():
         print("Make sure training completed and saved per-epoch checkpoints.")
         sys.exit(1)
 
+    # Determine warmup cutoff: epochs below this are skipped for best-epoch selection.
+    # Warmup epochs have efficiency_weight=0 (no routing compression) — using them as
+    # "best BAM" would compare against uncompressed dims, defeating the efficiency claim.
+    if args.skip_warmup_epochs is not None:
+        warmup_cutoff = args.skip_warmup_epochs
+    elif args.model_type == "bam":
+        warmup_cutoff = config["training"]["loss"].get("encoder_warmup_epochs", 0)
+    else:
+        warmup_cutoff = 0  # MRL has no warmup concept here
+
     print(f"Found {len(epoch_dirs)} checkpoints to evaluate.")
     print(f"Selecting best by: {args.metric}")
     print(f"Model type: {args.model_type}")
+    if warmup_cutoff > 0:
+        print(f"Skipping warmup epochs 0–{warmup_cutoff-1} from best-epoch selection "
+              f"(efficiency_weight=0 during warmup → dims uncompressed → not a routing result).")
     print("=" * 70)
 
     results = {}
@@ -144,10 +163,11 @@ def main():
         ndcg = metrics.get("ndcg@10", 0)
         avg_dims = metrics.get("avg_active_dims", 768)
 
-        print(f"{name:10s} {r1:>8.4f} {r10:>8.4f} {r50:>8.4f} {ndcg:>10.4f} {avg_dims:>9.0f}")
-
+        is_warmup = (epoch_num != 9999 and epoch_num < warmup_cutoff)
+        warmup_tag = " [warmup]" if is_warmup else ""
+        print(f"{name:10s} {r1:>8.4f} {r10:>8.4f} {r50:>8.4f} {ndcg:>10.4f} {avg_dims:>9.0f}{warmup_tag}")
         target = metrics.get(args.metric, 0)
-        if target > best_metric_val:
+        if not is_warmup and target > best_metric_val:
             best_metric_val = target
             best_epoch_name = name
             best_epoch_dir = ckpt_dir
@@ -157,6 +177,14 @@ def main():
         torch.cuda.empty_cache() if device.type == "cuda" else None
 
     print("-" * len(header))
+    if warmup_cutoff > 0:
+        print(f"  [warmup] = efficiency_weight=0, not eligible for best-epoch selection")
+
+    if best_epoch_dir is None:
+        print("\nERROR: No eligible (post-warmup) epochs found. "
+              "Lower --skip_warmup_epochs or wait for more epochs to complete.")
+        sys.exit(1)
+
     print(f"\nBest epoch: {best_epoch_name}  ({args.metric} = {best_metric_val:.4f})")
 
     # Copy best to {checkpoint_dir}/best/
