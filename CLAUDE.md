@@ -9,7 +9,7 @@ QA-MRL is a research project on query-adaptive Matryoshka Representation Learnin
 **Three model variants:**
 - **Baseline MRL** — standard Matryoshka encoder with multi-resolution loss
 - **QA-MRL** — adds a query-adaptive router that learns soft/hard dimension masks
-- **BAM (v3)** — Bloom-Aligned MRL: classifies query Bloom level → maps to optimal truncation dimension via a global lookup table
+- **BAM (v4)** — Bloom-Aligned MRL: `BloomDimRouter` (learned MLP per Bloom level) → prefix mask over 768 dims via straight-through estimator
 
 ## Commands
 
@@ -39,6 +39,11 @@ python scripts/run_evaluation.py --config configs/neurips.yaml
 python scripts/eval_beir.py --config configs/neurips.yaml
 ```
 
+**Post-hoc best checkpoint selection** (run after training, uses corpus-level metrics not in-batch):
+```bash
+python scripts/find_best_epoch.py --checkpoint_dir /tmp/bam-ckpts/ --config configs/bam.yaml
+```
+
 **Analysis:**
 ```bash
 python scripts/run_diagnostics.py --config configs/default.yaml
@@ -52,32 +57,38 @@ python scripts/generate_figures.py
 ### Data flow
 ```
 Query → Transformer Encoder (BAAI/bge-base-en-v1.5, 768-dim)
-      → BAM: Bloom classifier → global dim mapping → truncated embedding
+      → BAM: BloomDimRouter (learned MLP) → continuous dim → prefix binary mask (STE)
+             masked_emb = normalize(full_emb * mask)   # zero dims ignored at retrieval
       → QA-MRL: soft/group router → dimension mask → masked embedding
       → FAISS index → retrieved documents
+
+Documents: always encoded at full 768 dims; dot-product naturally ignores zero query dims.
 ```
 
-### Key design decisions (BAM v3)
-- **Bloom is query-only**: documents have no Bloom labels (prior approach of labeling documents caused contrastive loss misalignment)
-- **Global dim mapping**: a Bloom-level → truncation-dimension lookup table replaces the per-query MLP that collapsed to fixed 384
-- **No early stopping**: trains all 15 epochs, saves every checkpoint for post-hoc selection
-- **Curriculum**: temperature annealing (warm→hard) rather than Bloom-distance negative weighting
+### BAM v4 key design decisions
+- **Bloom is query-only**: documents have no Bloom labels (labeling documents causes contrastive loss misalignment)
+- **`BloomDimRouter`**: 6 independent learned embeddings → 2-layer MLP → sigmoid → continuous dim ∈ [128, 768]. STE: hard prefix mask in forward, soft sigmoid in backward. NOT a lookup table.
+- **Zero-init trap**: `dim_head[2]` (output layer) is zero-initialized for midpoint start (~448 dims); `dim_head[0]` (hidden layer) uses Kaiming default — zeroing it would collapse all levels to identical gradient paths.
+- **No early stopping**: trains all 15 epochs, saves every epoch for post-hoc selection via `find_best_epoch.py`. In-batch val NDCG is an approximation only.
+- **Temperature annealing**: cosine 0.1→0.02 for unfrozen encoder; fixed at `temp_end` when encoder is frozen (annealing with frozen encoder parks the router at equilibrium).
+- **Efficiency loss gate**: `encoder_warmup_epochs` (default 5) — efficiency loss is zero while encoder builds quality, then activates.
 
-### Loss stack (BAM)
-- `BloomContrastiveLoss` — InfoNCE at full dimensions
-- `BloomAlignedMRLLoss` — multi-resolution loss + per-truncation Bloom classifiers
-- `TruncationPolicyLoss` — entropy bonus to prevent policy collapse
-- `BAMCombinedLoss` — weighted aggregation
+### Loss stack (BAM, `bam_losses.py` v7)
+- `BloomMaskedContrastiveLoss` — class-weighted (1/√freq) InfoNCE in masked subspace + difficulty weighting
+- `BloomTwoFactorEfficiencyLoss` — per-class averaged (not per-sample) efficiency penalty with cognitive weights (1 − b/6)
+- `RouterDiversityLoss` — maximizes mean pairwise distance between all 6 Bloom levels' dims (pairwise distance, not variance, to avoid zero-gradient at init)
+- `MRLAnchorRegularizationLoss` — InfoNCE at MRL anchor dims weighted D/√d to keep encoder sharp
+- `BAMCombinedLoss` — orchestrates all four; call `set_epoch()` at start of each epoch
 
 ### Core modules
 | File | Role |
 |------|------|
 | `models/encoder.py` | `MRLEncoder` — HuggingFace transformer wrapper, multi-resolution embeddings |
-| `models/bam.py` | `BloomAlignedMRL` v3 — query Bloom classifier + dim mapping |
+| `models/bam.py` | `BloomAlignedMRL` v4 + `BloomDimRouter` — MLP routing with STE prefix mask |
+| `models/bam_losses.py` | BAM-specific losses (see loss stack above) |
 | `models/qa_mrl.py` | `QAMRL` — full model with query/document routers |
 | `models/router.py` | `SoftRouter`, `GroupRouter` — dimension selection mechanisms |
-| `models/bam_losses.py` | BAM-specific loss functions |
-| `training/bam_trainer.py` | BAM training loop (no early stopping) |
+| `training/bam_trainer.py` | BAM training loop; supports resume, two-stage via `freeze_encoder` config |
 | `evaluation/evaluator.py` | FAISS retrieval + bootstrap confidence intervals |
 | `evaluation/bloom_stratified.py` | Metrics stratified by Bloom cognitive level |
 | `data/dataset.py` | `EducationalRetrievalDataset` with hard negative mining |
@@ -86,7 +97,7 @@ Query → Transformer Encoder (BAAI/bge-base-en-v1.5, 768-dim)
 
 Configs are YAML files in `configs/`. Key variants:
 - `default.yaml` — standard QA-MRL
-- `bam.yaml` — Bloom-aligned routing
+- `bam.yaml` — Bloom-aligned routing (BAM v4)
 - `neurips.yaml` — multi-backbone + BEIR evaluation
 - `real_data.yaml` — educational corpora (SciQ, QASC, OpenBookQA)
 
@@ -94,7 +105,8 @@ Key hyperparameters:
 - Backbone: `BAAI/bge-base-en-v1.5` (768-dim)
 - MRL truncation dims: `[64, 128, 256, 384, 512, 768]`
 - Training: 15 epochs, batch 16, gradient accumulation 8, AdamW + cosine LR + 10% warmup
-- Loss weights: contrastive=1.0, MRL=0.3–0.5, specialization=0.05, Bloom=0.05–0.3
+- Router LR is 10× encoder LR (`router_lr: 2e-4` vs `encoder_lr: 2e-5`)
+- `bloom_frequencies` injected at runtime by `train_bam.py` — not hardcoded in config
 
 Data paths (configurable in YAML):
 - Train/Val/Test: `/tmp/data/real/{train,val,test}.jsonl`
@@ -106,4 +118,9 @@ Data paths (configurable in YAML):
 - `.github/workflows/claude.yml` — Claude Code integration triggered by `@claude` mentions in issues/PRs
 - `.github/workflows/claude-code-review.yml` — Automated code review
 
-- Only look at the files that you want to update. Dont take all the files as context for every prompt.
+## Development notes
+
+- Only read the files relevant to the change you're making — do not load the entire codebase as context.
+- Val metrics during training (`inbatch_best` checkpoint) are in-batch pairwise NDCG, not corpus-level retrieval. Always use `find_best_epoch.py` for the true best checkpoint.
+- Bloom labels are 0-indexed internally (0=Remember … 5=Create) but 1-indexed in config YAML and data files.
+- Push all the changes to git

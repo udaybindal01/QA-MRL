@@ -1,10 +1,11 @@
 """
-Full evaluation pipeline v3.
+Full evaluation pipeline v4.
 
-v3 changes:
-- Removed bloom_aligned_recall@10 (invalid: docs have no Bloom level)
-- Added bootstrap confidence intervals for Bloom-stratified metrics
-- Bloom-stratified metrics use query Bloom labels only
+v4 changes:
+- Mask-aware eval: Option B (scattered mask) skips prefix slicing, uses masked dot product
+- avg_active_dims_per_bloom logged from hard mask (active_dims) when discrete_dim unavailable
+- bloom_routing_entropy per query logged when bloom_probs returned by model
+- _encode_queries returns extended tuple: (..., active_dims, bloom_probs)
 """
 
 import time
@@ -54,6 +55,11 @@ class FullEvaluator:
         1. Encode the full corpus
         2. For each test query, find its positive_id in the corpus
         3. Retrieve top-K from corpus and check if positive_id is retrieved
+
+        Routing modes (auto-detected from model output):
+          Option A (prefix mask, discrete_dim returned): grouped sliced similarity
+          Option B (scattered mask, active_dims returned): masked dot product
+          MRL baseline (no router): full-dim dot product
         """
         model.eval()
 
@@ -74,7 +80,7 @@ class FullEvaluator:
         )
         print(f"  Corpus embeddings: {corpus_embs.shape}")
 
-        # 2. Load test queries with their positive_id mappings
+        # 2. Load test queries
         print("  Loading test queries...")
         test_samples = []
         with open(test_data_path) as f:
@@ -82,44 +88,43 @@ class FullEvaluator:
                 test_samples.append(json.loads(line.strip()))
         print(f"  Test queries: {len(test_samples)}")
 
-        # Filter to queries whose positive_id exists in corpus
-        valid_samples = []
-        for s in test_samples:
-            pid = s.get("positive_id", "")
-            if pid in corpus_id_to_idx:
-                valid_samples.append(s)
+        valid_samples = [
+            s for s in test_samples
+            if s.get("positive_id", "") in corpus_id_to_idx
+        ]
         print(f"  Valid queries (positive in corpus): {len(valid_samples)}")
 
         if len(valid_samples) == 0:
             print("  ERROR: No valid query-passage pairs found!")
             return {}
 
-        # 3. Encode queries
+        # 3. Encode queries (extended return with active_dims and bloom_probs)
         print("  Encoding queries...")
         query_texts = [s["query"] for s in valid_samples]
-        query_embs, query_masks, latencies, query_dims, query_full_embs = self._encode_queries(
+        (query_embs, query_masks, latencies,
+         query_dims, query_full_embs,
+         query_active_dims, query_bloom_probs) = self._encode_queries(
             model, query_texts, tokenizer, device,
             learner_blooms=[s["bloom_level"] for s in valid_samples],
         )
 
-        # 4. Get ground truth indices
         gt_indices = np.array([corpus_id_to_idx[s["positive_id"]] for s in valid_samples])
         query_blooms = np.array([s["bloom_level"] for s in valid_samples])
 
-        # 5. Compute similarity and retrieve
+        # 4. Similarity and retrieval
         print("  Computing similarities...")
         N = len(valid_samples)
         chunk_size = 256
         rankings = np.zeros((N, max(self.ks)), dtype=np.int64)
 
-        if query_dims is not None and query_full_embs is not None:
-            # Grouped sliced similarity: normalize(q[:k]) · normalize(d[:k])
-            # Fixes training-eval mismatch — matches masked contrastive training objective.
-            # At most 6 unique k values (one per Bloom level) → efficient.
+        use_prefix_slicing = (query_dims is not None and query_full_embs is not None)
+
+        if use_prefix_slicing:
+            # Option A: grouped prefix slicing — normalize(q[:k]) · normalize(d[:k])
             k_values = query_dims.round().long()
             for k_val in k_values.unique():
                 k = int(k_val.item())
-                k = max(1, min(k, corpus_embs.size(1)))   # clamp to valid range
+                k = max(1, min(k, corpus_embs.size(1)))
                 group_idx = (k_values == k_val).nonzero(as_tuple=True)[0]
                 c_k = F.normalize(corpus_embs[:, :k], p=2, dim=-1).to(device)
                 for i in range(0, len(group_idx), chunk_size):
@@ -132,7 +137,7 @@ class FullEvaluator:
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
         else:
-            # Full-dim similarity for MRL baseline
+            # Option B or MRL baseline: masked dot product (query_embs has zeros at inactive dims)
             for i in range(0, N, chunk_size):
                 q_chunk = query_embs[i:i + chunk_size].to(device)
                 sim = torch.mm(q_chunk, corpus_embs.to(device).t())
@@ -142,23 +147,20 @@ class FullEvaluator:
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
 
-        # 6. Compute metrics
+        # 5. Compute metrics
         metrics = {}
 
-        # Standard metrics
         for k in self.ks:
             topk = rankings[:, :k]
             hits = np.array([gt_indices[i] in topk[i] for i in range(N)])
             metrics[f"recall@{k}"] = float(hits.mean())
 
-        # MRR
         mrrs = []
         for i in range(N):
             found = np.where(rankings[i] == gt_indices[i])[0]
             mrrs.append(1.0 / (found[0] + 1) if len(found) > 0 else 0.0)
         metrics["mrr"] = float(np.mean(mrrs))
 
-        # NDCG@10
         ndcgs = []
         for i in range(N):
             for j, idx in enumerate(rankings[i, :10]):
@@ -169,7 +171,13 @@ class FullEvaluator:
                 ndcgs.append(0.0)
         metrics["ndcg@10"] = float(np.mean(ndcgs))
 
-        # 7. Bloom-stratified metrics (query Bloom only)
+        # 6. Bloom-stratified metrics
+        bloom_entropies = None
+        if query_bloom_probs is not None:
+            # Compute per-query routing entropy H(bloom_probs)
+            p = query_bloom_probs.clamp(min=1e-9)
+            bloom_entropies = -(p * p.log()).sum(dim=-1).numpy()
+
         for level in range(1, 7):
             mask = query_blooms == level
             if mask.sum() == 0:
@@ -184,31 +192,46 @@ class FullEvaluator:
                 hits = np.array([level_gt[i] in topk[i] for i in range(n_level)])
                 metrics[f"bloom_{name}_recall@{k}"] = float(hits.mean())
 
-                # Bootstrap CI for R@10
                 if k == 10 and compute_bootstrap:
                     mean, lo, hi = bootstrap_ci(hits.astype(float))
                     metrics[f"bloom_{name}_recall@10_ci_lo"] = lo
                     metrics[f"bloom_{name}_recall@10_ci_hi"] = hi
                     metrics[f"bloom_{name}_n"] = n_level
 
-        # v3: NO bloom_aligned_recall@10 — documents don't have Bloom levels.
-        # A retrieved document is "good" if it's the right passage, regardless
-        # of any source-assigned cognitive label.
+            if bloom_entropies is not None:
+                metrics[f"bloom_{name}_routing_entropy"] = float(bloom_entropies[mask].mean())
 
-        # 8. Efficiency — per-query dims and per-Bloom averages
+        # 7. Efficiency metrics
+        # Option A: use discrete_dims for per-query and per-Bloom avg dims
         if query_dims is not None:
             metrics["avg_active_dims"] = float(query_dims.float().mean().item())
             for level in range(1, 7):
                 mask = query_blooms == level
                 if mask.sum() > 0:
                     name = BLOOM_NAMES[level]
-                    metrics[f"bloom_{name}_avg_dim"] = float(query_dims[mask].float().mean().item())
+                    metrics[f"bloom_{name}_avg_dim"] = float(
+                        query_dims[mask].float().mean().item()
+                    )
+        # Option B: use active_dims from hard mask
+        elif query_active_dims is not None:
+            metrics["avg_active_dims"] = float(query_active_dims.float().mean().item())
+            for level in range(1, 7):
+                mask = query_blooms == level
+                if mask.sum() > 0:
+                    name = BLOOM_NAMES[level]
+                    metrics[f"bloom_{name}_avg_dim"] = float(
+                        query_active_dims[mask].float().mean().item()
+                    )
+        # Soft mask fallback (if neither discrete_dim nor active_dims)
         elif query_masks is not None:
-            metrics["avg_active_dims"] = float((query_masks > 0.5).float().sum(dim=-1).mean().item())
+            metrics["avg_active_dims"] = float(
+                (query_masks > 0.5).float().sum(dim=-1).mean().item()
+            )
+
         if latencies:
             metrics["avg_latency_ms"] = float(np.mean(latencies))
 
-        # 9. MRL dimension comparison (baseline only)
+        # 8. MRL dimension comparison (baseline only)
         if mrl_truncation_dims and not hasattr(model, "query_router"):
             print("  Computing MRL truncation comparisons...")
             for d in mrl_truncation_dims:
@@ -217,7 +240,7 @@ class FullEvaluator:
 
                 trunc_rankings = []
                 for i in range(0, len(q_trunc), chunk_size):
-                    chunk = q_trunc[i:i+chunk_size].to(device)
+                    chunk = q_trunc[i:i + chunk_size].to(device)
                     sim = torch.mm(chunk, c_trunc.to(device).t())
                     topk = sim.topk(max(self.ks), dim=-1).indices.cpu().numpy()
                     trunc_rankings.append(topk)
@@ -228,18 +251,17 @@ class FullEvaluator:
                     hits = np.array([gt_indices[i] in topk[i] for i in range(N)])
                     metrics[f"mrl_d{d}_recall@{k}"] = float(hits.mean())
 
-        # Print summary
         self._print_summary(metrics, N, query_blooms, compute_bootstrap)
         return metrics
 
     def _encode_texts(self, model, texts, tokenizer, device,
-                       is_query=False, batch_size=128) -> torch.Tensor:
+                      is_query=False, batch_size=128) -> torch.Tensor:
         """Encode a list of texts."""
         all_embs = []
         for i in tqdm(range(0, len(texts), batch_size), desc="    encoding", leave=False):
-            batch_texts = texts[i:i+batch_size]
+            batch_texts = texts[i:i + batch_size]
             enc = tokenizer(batch_texts, padding=True, truncation=True,
-                           max_length=256, return_tensors="pt")
+                            max_length=256, return_tensors="pt")
             enc = {k: v.to(device) for k, v in enc.items()}
 
             if is_query and hasattr(model, "encode_queries"):
@@ -255,17 +277,21 @@ class FullEvaluator:
         return torch.cat(all_embs)
 
     def _encode_queries(self, model, query_texts, tokenizer, device,
-                         learner_blooms=None):
-        """Encode queries with optional learner features.
+                        learner_blooms=None):
+        """
+        Encode queries with optional learner features.
 
         Returns:
             embs:          [N, D] masked embeddings (BAM) or full embeddings (MRL)
-            masks:         [N, D] binary masks or None
+            masks:         [N, D] masks or None
             latencies:     list of per-query latency in ms
-            discrete_dims: [N] routed dim per query or None
-            full_embs:     [N, D] unmasked encoder outputs or None (for sliced similarity)
+            discrete_dims: [N] prefix dim per query (Option A) or None
+            full_embs:     [N, D] full encoder outputs (Option A only) or None
+            active_dims:   [N] count of active dims (Option B) or None
+            bloom_probs:   [N, 6] softmax routing distribution or None
         """
         all_embs, all_masks, all_dims, all_full_embs = [], [], [], []
+        all_active_dims, all_bloom_probs = [], []
         latencies = []
         batch_size = 64
 
@@ -275,7 +301,6 @@ class FullEvaluator:
                             max_length=128, return_tensors="pt")
             enc = {k: v.to(device) for k, v in enc.items()}
 
-            # Build one-hot learner features for BAM
             lf = None
             if learner_blooms and hasattr(model, "query_router"):
                 blooms = learner_blooms[i:i + len(batch)]
@@ -295,6 +320,10 @@ class FullEvaluator:
                     all_full_embs.append(out["full_embedding"].detach().cpu())
                 if "discrete_dim" in out:
                     all_dims.append(out["discrete_dim"].detach().cpu())
+                if "active_dims" in out:
+                    all_active_dims.append(out["active_dims"].detach().cpu())
+                if "bloom_probs" in out and out["bloom_probs"] is not None:
+                    all_bloom_probs.append(out["bloom_probs"].detach().cpu())
             else:
                 out = model(enc["input_ids"], enc["attention_mask"])
                 all_embs.append(out["full"].cpu())
@@ -304,7 +333,9 @@ class FullEvaluator:
         masks = torch.cat(all_masks) if all_masks else None
         discrete_dims = torch.cat(all_dims) if all_dims else None
         full_embs = torch.cat(all_full_embs) if all_full_embs else None
-        return embs, masks, latencies, discrete_dims, full_embs
+        active_dims = torch.cat(all_active_dims) if all_active_dims else None
+        bloom_probs = torch.cat(all_bloom_probs) if all_bloom_probs else None
+        return embs, masks, latencies, discrete_dims, full_embs, active_dims, bloom_probs
 
     def _print_summary(self, metrics, N, query_blooms, show_ci=True):
         print(f"\n  === Results (N={N}) ===")
@@ -322,16 +353,25 @@ class FullEvaluator:
             name = BLOOM_NAMES[level]
             n = int((query_blooms == level).sum())
             r10 = metrics.get(f"bloom_{name}_recall@10", 0)
+            avg_dim = metrics.get(f"bloom_{name}_avg_dim", None)
+            entropy = metrics.get(f"bloom_{name}_routing_entropy", None)
             if n > 0:
                 ci_str = ""
                 if show_ci:
                     lo = metrics.get(f"bloom_{name}_recall@10_ci_lo", 0)
                     hi = metrics.get(f"bloom_{name}_recall@10_ci_hi", 0)
                     ci_str = f"  95% CI=[{lo:.3f}, {hi:.3f}]"
-                print(f"    {name:12s} (n={n:4d}): R@10={r10:.4f}{ci_str}")
+                dim_str = f"  dim={avg_dim:.0f}" if avg_dim is not None else ""
+                ent_str = f"  H={entropy:.3f}" if entropy is not None else ""
+                print(f"    {name:12s} (n={n:4d}): R@10={r10:.4f}{ci_str}{dim_str}{ent_str}")
 
     def save_results(self, metrics, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
-            json.dump({k: float(v) if isinstance(v, (np.floating, float)) else v
-                       for k, v in metrics.items()}, f, indent=2)
+            json.dump(
+                {
+                    k: float(v) if isinstance(v, (np.floating, float)) else v
+                    for k, v in metrics.items()
+                },
+                f, indent=2,
+            )

@@ -1,0 +1,78 @@
+# BAM v4: Bloom-Aligned Matryoshka with Option B (scattered soft mask) + all v5 training features.
+# Keep configs/bam.yaml as-is so BAM v3/v4-A baseline still runs cleanly.
+
+model:
+  backbone: "BAAI/bge-base-en-v1.5"
+  embedding_dim: 768
+  pooling: "cls"
+  normalize_embeddings: true
+  mrl_dims: [64, 128, 256, 384, 512, 768]
+  use_mask_routing: true         # Option B: BloomMaskHead scattered soft mask
+  mask_sparsity_target: 0.44    # 339/768 active dims target
+  use_soft_bloom_routing: false  # N/A for Option B (mask head handles routing)
+
+data:
+  train_path: "/tmp/data/real/train.jsonl"
+  val_path: "/tmp/data/real/val.jsonl"
+  test_path: "/tmp/data/real/test.jsonl"
+  corpus_path: "/tmp/data/real/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
+  max_query_length: 128
+  max_passage_length: 256
+  num_hard_negatives: 3
+
+training:
+  seed: 42
+  num_epochs: 15
+  batch_size: 16
+  gradient_accumulation_steps: 8
+  fp16: true
+  max_grad_norm: 1.0
+  optimizer:
+    type: "adamw"
+    lr: 2.0e-5
+    weight_decay: 0.01
+    encoder_lr: 2.0e-5
+    router_lr: 2.0e-4           # BloomMaskHead MLP gets 10x encoder LR
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.1
+  use_pcgrad: false              # Set true to enable gradient surgery
+  encoder_freeze_after_epochs: 8 # Stage 1: epochs 0-7 (full model); Stage 2: epochs 8-14 (router only)
+  bloom_noise_rate: 0.05         # 5% Bloom label flip rate for robustness
+  loss:
+    contrastive_weight: 1.0
+    efficiency_weight: 0.1
+    mrl_anchor_weight: 0.2
+    diversity_weight: 0.0        # Not used for Option B (no prefix dims to spread)
+    mask_sparsity_weight: 0.1    # Keep ~44% dims active per Bloom level
+    mask_diversity_weight: 0.05  # Ensure different Bloom levels select different dims
+    encoder_warmup_epochs: 5
+    temperature_schedule:
+      start: 0.1
+      end: 0.02
+    # bloom_frequencies injected at runtime by train_bam.py
+  checkpoint_dir: "/tmp/bam-v4-ckpts/"
+  save_every_n_steps: 1000
+  eval_every_n_steps: 500
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50, 100]
+  bloom_stratified: true
+  tail_topic_threshold: 20
+  measure_latency: true
+
+diagnostics:
+  gradient_attribution: true
+  num_diagnostic_queries: 1000
+  probing:
+    probe_type: "linear"
+    probe_tasks: ["bloom_level", "subject_area"]
+    num_dimension_groups: 8
+
+logging:
+  use_wandb: true
+  wandb_project: "bam-emnlp"
+  wandb_entity: null
+  log_every_n_steps: 10

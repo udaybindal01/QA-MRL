@@ -1,21 +1,21 @@
 """
-Bloom-Aligned Matryoshka (BAM) Model v4.
+Bloom-Aligned Matryoshka (BAM) Model v4+.
 
-Routing via BloomDimRouter: 6 learnable scalar parameters (one per Bloom level).
-Each scalar → sigmoid → continuous dim in [0, 768] → binary mask.
+Two routing modes (config: model.use_mask_routing):
 
-Inference pipeline:
-  Query → Encoder → full 768-dim embedding
-       → External Bloom Classifier → predicted Bloom level (1-6)
-       → BloomDimRouter → binary mask of size 768
-       → masked_emb = normalize(full_emb * mask)
-       → FAISS search (only active dims matter for dot product)
+  Option A — default (use_mask_routing=False):
+    BloomDimRouter: 6 learned scalar params → prefix binary mask via STE.
+    Active dims are prefix-contiguous → fast grouped sliced similarity at eval.
+    Supports soft routing: bloom_probs @ all_dims instead of argmax lookup.
+    (set use_soft_bloom_routing=True in config)
 
-Document embeddings always stay full 768-dim.
-At retrieval time, dot product query·doc naturally ignores zero-masked dims.
+  Option B (use_mask_routing=True):
+    BloomMaskHead: 2-layer MLP (CLS + Bloom one-hot → sigmoid) → scattered mask.
+    Active dims are scattered (not prefix-contiguous).
+    Retrieval: masked_query · full_doc dot product (zero dims are naturally ignored).
+    Needs BloomMaskSparsityLoss + BloomMaskDiversityLoss to prevent all-ones collapse.
 """
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,29 +24,87 @@ from typing import Dict, Optional
 from models.encoder import MRLEncoder
 
 
+class BloomMaskHead(nn.Module):
+    """
+    Option B: Learned scattered soft mask over all 768 dims.
+
+    Architecture: Linear(774 → 256) → ReLU → Linear(256 → 768) → sigmoid
+    Input: concat(CLS_token[768], Bloom_onehot[6]) = [B, 774]
+    Output: soft mask in (0, 1)^768
+
+    STE binarization at 0.5: hard binary in forward, continuous sigmoid gradient in backward.
+    Output layer zero-initialized → sigmoid(0) = 0.5 at init (~384 active dims).
+
+    Without a sparsity loss the head learns to keep all dims active. Pair with
+    BloomMaskSparsityLoss (target ≈ 0.44 = 339/768).
+    """
+
+    EMBEDDING_DIM = 768
+    BLOOM_DIM = 6
+
+    def __init__(self, hidden_dim: int = 256, sparsity_target: float = 0.44):
+        super().__init__()
+        self.sparsity_target = sparsity_target
+        self.mlp = nn.Sequential(
+            nn.Linear(self.EMBEDDING_DIM + self.BLOOM_DIM, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, self.EMBEDDING_DIM),
+        )
+        # Zero output layer → sigmoid(0) = 0.5 at init, ~384 active dims
+        with torch.no_grad():
+            nn.init.zeros_(self.mlp[2].weight)
+            nn.init.zeros_(self.mlp[2].bias)
+
+    def forward(
+        self,
+        cls_token: torch.Tensor,
+        bloom_labels: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            cls_token:    [B, 768] CLS token from encoder (hidden_states[:, 0, :])
+            bloom_labels: [B] int 0-indexed Bloom levels
+
+        Returns:
+            mask:        [B, 768] STE mask — hard binary forward, soft sigmoid backward
+            soft_mask:   [B, 768] raw sigmoid output (used by sparsity/diversity losses)
+            active_dims: [B] count of active dims per query (from hard mask)
+        """
+        bloom_oh = F.one_hot(bloom_labels, num_classes=self.BLOOM_DIM).float()  # [B, 6]
+        x = torch.cat([cls_token, bloom_oh], dim=-1)         # [B, 774]
+        soft_mask = torch.sigmoid(self.mlp(x))               # [B, 768]
+        hard_mask = (soft_mask > 0.5).float()
+        mask = hard_mask + (soft_mask - soft_mask.detach())  # STE
+        return {
+            "mask": mask,
+            "soft_mask": soft_mask,
+            "active_dims": hard_mask.sum(dim=-1),            # [B]
+        }
+
+
 class BloomDimRouter(nn.Module):
     """
-    Learns one truncation dimension per Bloom level via independent MLP heads.
+    Option A: Learns one truncation dimension per Bloom level via independent MLP heads.
 
     Each Bloom level b gets its own learned embedding → 2-layer MLP → sigmoid → dim.
-    There is NO ordinal inductive bias — the model can freely learn that
-    Evaluate needs 512 dims while Create needs only 256 if the data supports it.
-    Monotonicity is NOT enforced; it should emerge from the training signal.
+    No ordinal inductive bias — the model freely learns that Evaluate needs 512 dims
+    while Create needs only 256 if the data supports it.
 
     Architecture per level:
         Embedding(6, hidden_dim=32) → Linear(32, 16) → ReLU → Linear(16, 1) → sigmoid
         → continuous_dim ∈ [MIN_DIM, EMBEDDING_DIM] = [128, 768]
 
-    Initialization: all 6 levels start at the midpoint (~448 dims).
-    No ordinal prior — let the efficiency and contrastive losses determine
-    the optimal allocation per class independently.
+    Initialization: all levels start at ~448 dims (midpoint). Output layer zero-initialized;
+    hidden layer uses Kaiming default (critical: zero-initializing it collapses all levels
+    to identical gradient paths — they can never diverge).
 
-    Straight-through estimator rounds for the binary mask while passing
-    gradients through the continuous dim to the efficiency loss.
+    Supports soft routing: pass bloom_probs=[B, 6] to get continuous_dim = bloom_probs @ all_dims.
+    Degrades more gracefully under Bloom classifier noise than hard argmax routing.
     """
 
     EMBEDDING_DIM = 768
     MIN_DIM = 128
+    MASK_TEMPERATURE = 10.0  # sigmoid sharpness; meaningful gradients within ±46 dims
 
     def __init__(self, hidden_dim: int = 32):
         super().__init__()
@@ -59,15 +117,6 @@ class BloomDimRouter(nn.Module):
             nn.Linear(16, 1),
         )
 
-        # Initialization strategy:
-        # - bloom_emb: small random → different per level (breaks symmetry)
-        # - dim_head[0] (hidden layer): Kaiming default → nonzero weights so
-        #   gradients flow through the network from step 2 onwards.
-        #   Zero-initializing this layer is a fatal bug: h = emb @ 0 = 0,
-        #   ReLU(0)=0, and the final layer receives 0 input → only the final
-        #   bias gets gradient → all 6 levels move together as one parameter.
-        # - dim_head[2] (output layer): zero weights + zero bias → logit=0 →
-        #   sigmoid(0)=0.5 → all levels start at ~448 dims (midpoint). ✓
         with torch.no_grad():
             nn.init.normal_(self.bloom_emb.weight, mean=0.0, std=0.02)
             # dim_head[0]: leave PyTorch Kaiming default (do NOT zero-initialize)
@@ -75,52 +124,56 @@ class BloomDimRouter(nn.Module):
             nn.init.zeros_(self.dim_head[2].bias)
 
     def _all_dims(self) -> torch.Tensor:
-        """Compute continuous dim for all 6 levels. [6] — used in forward + get_dim_table."""
+        """Continuous dim for all 6 levels. [6] — used in forward + get_dim_table."""
         idx = torch.arange(6, device=self.bloom_emb.weight.device)
-        emb = self.bloom_emb(idx)                       # [6, hidden]
-        logit = self.dim_head(emb).squeeze(-1)          # [6]
+        emb = self.bloom_emb(idx)
+        logit = self.dim_head(emb).squeeze(-1)
         return torch.sigmoid(logit) * self._span + self.MIN_DIM  # [6] in [128, 768]
 
-    # Sigmoid temperature for the soft mask used in STE.
-    # Higher = sharper boundary, gradients concentrated in ±~50 dims around boundary.
-    # Lower = diffuse gradients across all dims (poor signal).
-    # 10.0 is a good default: gradient is meaningful within ±46 dims of the boundary.
-    MASK_TEMPERATURE = 10.0
-
-    def forward(self, bloom_levels: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(
+        self,
+        bloom_levels: torch.Tensor,
+        bloom_probs: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
         """
         Args:
-            bloom_levels: [B] integer Bloom levels (0-indexed, 0=Remember, 5=Create)
+            bloom_levels: [B] integer Bloom levels (0-indexed). Used when bloom_probs is None.
+            bloom_probs:  [B, 6] softmax distribution over Bloom levels (soft routing).
+                          When provided, continuous_dim = bloom_probs @ all_dims (weighted avg).
+                          Stored in output for entropy logging.
 
         Returns:
-            mask: [B, 768] mask with STE — hard binary in forward, soft sigmoid in backward
+            mask:           [B, 768] STE prefix mask
             continuous_dim: [B] float dim before rounding (used by efficiency loss)
-            discrete_dim: [B] float, rounded value with STE
+            discrete_dim:   [B] float, rounded value with STE (used by eval for prefix slicing)
+            bloom_probs:    [B, 6] or None, passed through for entropy logging
         """
-        all_dims = self._all_dims()              # [6]
-        continuous_dim = all_dims[bloom_levels]  # [B]
+        all_dims = self._all_dims()  # [6]
+
+        if bloom_probs is not None:
+            # Soft routing: weighted average dim across all Bloom levels
+            continuous_dim = (bloom_probs * all_dims.unsqueeze(0)).sum(dim=-1)  # [B]
+        else:
+            continuous_dim = all_dims[bloom_levels]  # [B]
 
         arange = torch.arange(self.EMBEDDING_DIM, device=bloom_levels.device).float()
 
-        # Soft mask: differentiable sigmoid centered at continuous_dim boundary.
-        # Gradient flows: contrastive loss → soft_mask → continuous_dim → MLP → bloom_emb
+        # Soft sigmoid mask for gradient flow, hard prefix mask for forward pass
         soft_mask = torch.sigmoid(
             self.MASK_TEMPERATURE * (continuous_dim.unsqueeze(-1) - arange.unsqueeze(0))
         )  # [B, 768]
-
-        # Hard mask: exact binary prefix used in forward pass for retrieval
         rounded = continuous_dim.round()
         hard_mask = (arange.unsqueeze(0) < rounded.unsqueeze(-1)).float()  # [B, 768]
 
-        # STE on the mask: forward uses hard_mask, backward uses soft_mask
+        # STE: hard forward, soft backward
         mask = hard_mask + (soft_mask - soft_mask.detach())
-
         discrete_dim = continuous_dim + (rounded - continuous_dim).detach()
 
         return {
             "mask": mask,
             "continuous_dim": continuous_dim,
             "discrete_dim": discrete_dim,
+            "bloom_probs": bloom_probs,
         }
 
     def get_dim_table(self) -> Dict[int, float]:
@@ -132,13 +185,15 @@ class BloomDimRouter(nn.Module):
 
 class BloomAlignedMRL(nn.Module):
     """
-    Bloom-Aligned Matryoshka model v4.
+    Bloom-Aligned Matryoshka model v4+.
 
-    Key design:
-    - BloomDimRouter: 6 scalar params → per-query binary mask
-    - Queries are masked; documents stay full 768 dims
-    - Dot product query·doc ignores zero-masked query dims naturally
-    - Bloom labels from external pre-trained classifier (not trained here)
+    Routing mode selected by config model.use_mask_routing:
+      False (default) → BloomDimRouter (prefix mask, Option A)
+      True            → BloomMaskHead  (scattered mask, Option B)
+
+    Queries are masked; documents stay at full 768 dims.
+    Dot product query·doc naturally ignores zero-masked query dims.
+    Bloom labels come from an external pre-trained classifier (not learned here).
     """
 
     def __init__(self, config: dict):
@@ -154,7 +209,15 @@ class BloomAlignedMRL(nn.Module):
             normalize=mc["normalize_embeddings"],
         )
 
-        self.bloom_router = BloomDimRouter()
+        self.bloom_router = BloomDimRouter()  # always present (used for Option A, dims table)
+
+        self.use_mask_routing = mc.get("use_mask_routing", False)
+        self.use_soft_bloom_routing = mc.get("use_soft_bloom_routing", False)
+
+        if self.use_mask_routing:
+            self.bloom_mask_head = BloomMaskHead(
+                sparsity_target=mc.get("mask_sparsity_target", 0.44)
+            )
 
         self.embedding_dim = mc["embedding_dim"]
         self.mrl_dims = mc["mrl_dims"]
@@ -165,41 +228,60 @@ class BloomAlignedMRL(nn.Module):
         attention_mask: torch.Tensor,
         token_type_ids: Optional[torch.Tensor] = None,
         bloom_labels: Optional[torch.Tensor] = None,
+        bloom_probs: Optional[torch.Tensor] = None,   # [B, 6] for soft routing (Option A)
         learner_features: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Encode query with Bloom-adaptive masking.
 
-        bloom_labels: [B] int 0-indexed. Required.
-        If not provided, falls back to learner_features (one-hot [B,6]).
-        If neither provided, defaults to full 768 dims (bloom level 5).
+        bloom_labels: [B] int 0-indexed. Preferred.
+        bloom_probs:  [B, 6] soft distribution for soft routing (Option A only).
+        learner_features: [B, 6] one-hot fallback if bloom_labels not provided.
+        If none provided, defaults to Bloom level 5 (Create = max dims).
         """
         if bloom_labels is None:
             if learner_features is not None:
                 bloom_labels = learner_features.argmax(dim=-1)
             else:
-                # Default to full dims (Create level)
                 B = input_ids.size(0)
-                bloom_labels = torch.full((B,), 5, dtype=torch.long,
-                                          device=input_ids.device)
+                bloom_labels = torch.full(
+                    (B,), 5, dtype=torch.long, device=input_ids.device
+                )
 
         enc = self.encoder(input_ids, attention_mask, token_type_ids)
-        full_emb = enc["full"]  # [B, D] normalized
+        full_emb = enc["full"]  # [B, 768] normalized
 
-        router_out = self.bloom_router(bloom_labels)
-        mask = router_out["mask"]              # [B, 768]
-        continuous_dim = router_out["continuous_dim"]  # [B]
-        discrete_dim = router_out["discrete_dim"]      # [B]
+        if self.use_mask_routing:
+            # Option B: scattered soft mask from BloomMaskHead
+            cls_token = enc["hidden_states"][:, 0, :]  # [B, 768] unnormalized CLS
+            head_out = self.bloom_mask_head(cls_token, bloom_labels)
+            mask = head_out["mask"]
+            masked_emb = F.normalize(full_emb * mask, p=2, dim=-1)
+            return {
+                "full_embedding": full_emb,
+                "masked_embedding": masked_emb,
+                "mask": mask,
+                "soft_mask": head_out["soft_mask"],
+                "active_dims": head_out["active_dims"],
+                # No continuous_dim/discrete_dim — scattered mask has no prefix dim
+            }
+        else:
+            # Option A: prefix mask from BloomDimRouter
+            if self.use_soft_bloom_routing and bloom_probs is None:
+                # Degenerate soft probs = one-hot (no change in behavior, but enables the code path)
+                bloom_probs = F.one_hot(bloom_labels, num_classes=6).float()
 
-        masked_emb = F.normalize(full_emb * mask, p=2, dim=-1)  # [B, 768]
-
-        return {
-            "full_embedding": full_emb,
-            "masked_embedding": masked_emb,
-            "mask": mask,
-            "continuous_dim": continuous_dim,
-            "discrete_dim": discrete_dim,
-        }
+            router_out = self.bloom_router(bloom_labels, bloom_probs=bloom_probs)
+            mask = router_out["mask"]
+            masked_emb = F.normalize(full_emb * mask, p=2, dim=-1)
+            return {
+                "full_embedding": full_emb,
+                "masked_embedding": masked_emb,
+                "mask": mask,
+                "continuous_dim": router_out["continuous_dim"],
+                "discrete_dim": router_out["discrete_dim"],
+                "bloom_probs": router_out["bloom_probs"],
+            }
 
     def encode_documents(
         self,
@@ -212,8 +294,9 @@ class BloomAlignedMRL(nn.Module):
         return {
             "full_embedding": enc["full"],
             "masked_embedding": enc["full"],
-            "mask": torch.ones(enc["full"].size(0), self.embedding_dim,
-                               device=enc["full"].device),
+            "mask": torch.ones(
+                enc["full"].size(0), self.embedding_dim, device=enc["full"].device
+            ),
         }
 
     def forward(
@@ -224,18 +307,31 @@ class BloomAlignedMRL(nn.Module):
         learner_features=None, bloom_labels=None, subject_labels=None,
     ) -> Dict[str, torch.Tensor]:
         """Full forward pass for training."""
-        q = self.encode_queries(query_input_ids, query_attention_mask,
-                                bloom_labels=bloom_labels)
+        q = self.encode_queries(
+            query_input_ids, query_attention_mask,
+            bloom_labels=bloom_labels,
+        )
         p = self.encode_documents(positive_input_ids, positive_attention_mask)
 
         result = {
             "query_embedding": q["full_embedding"],
             "query_masked": q["masked_embedding"],
             "query_mask": q["mask"],
-            "continuous_dim": q["continuous_dim"],
-            "discrete_dim": q["discrete_dim"],
             "positive_embedding": p["full_embedding"],
         }
+
+        # Option A outputs
+        if "continuous_dim" in q:
+            result["continuous_dim"] = q["continuous_dim"]
+            result["discrete_dim"] = q["discrete_dim"]
+        if "bloom_probs" in q:
+            result["bloom_probs"] = q["bloom_probs"]
+
+        # Option B outputs
+        if "soft_mask" in q:
+            result["soft_mask"] = q["soft_mask"]
+        if "active_dims" in q:
+            result["active_dims"] = q["active_dims"]
 
         if negative_input_ids is not None:
             B, N, L = negative_input_ids.shape
@@ -250,25 +346,28 @@ class BloomAlignedMRL(nn.Module):
     def get_parameter_groups(self, config):
         oc = config["training"]["optimizer"]
         freeze = config["training"].get("freeze_encoder", False)
-        # Router is a small MLP (~800 params) — use higher LR than encoder.
-        # With freeze_encoder=True, encoder params have requires_grad=False so
-        # they're excluded from the optimizer automatically.
         fast_lr = oc.get("router_lr", oc["encoder_lr"] * 10)
-        groups = [{"params": list(self.bloom_router.parameters()), "lr": fast_lr}]
+        # Router + mask head params get the fast LR
+        routing_params = list(self.bloom_router.parameters())
+        if hasattr(self, "bloom_mask_head"):
+            routing_params += list(self.bloom_mask_head.parameters())
+        groups = [{"params": routing_params, "lr": fast_lr}]
         if not freeze:
-            groups.append({"params": list(self.encoder.parameters()),
-                           "lr": oc["encoder_lr"]})
+            groups.append(
+                {"params": list(self.encoder.parameters()), "lr": oc["encoder_lr"]}
+            )
         return groups
 
     def get_bloom_dim_table(self) -> Dict[int, float]:
         return self.bloom_router.get_dim_table()
 
-    # Compatibility
     def freeze_encoder(self):
-        for p in self.encoder.parameters(): p.requires_grad = False
+        for p in self.encoder.parameters():
+            p.requires_grad = False
 
     def unfreeze_encoder(self):
-        for p in self.encoder.parameters(): p.requires_grad = True
+        for p in self.encoder.parameters():
+            p.requires_grad = True
 
     @property
     def query_router(self):

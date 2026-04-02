@@ -6,6 +6,9 @@ model:
   pooling: "cls"
   normalize_embeddings: true
   mrl_dims: [64, 128, 256, 384, 512, 768]
+  use_mask_routing: false        # Option B: scattered soft mask (BloomMaskHead). false = Option A (prefix mask)
+  mask_sparsity_target: 0.44    # 339/768 — only used when use_mask_routing=true
+  use_soft_bloom_routing: false  # Option A: softmax @ all_dims instead of argmax lookup
 
 data:
   train_path: "/tmp/data/real/train.jsonl"
@@ -38,13 +41,18 @@ training:
     contrastive_weight: 1.0
     efficiency_weight: 0.1      # Active only after encoder_warmup_epochs
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
-    diversity_weight: 0.05      # Penalize all Bloom levels collapsing to same dim
+    diversity_weight: 0.05      # Penalize all Bloom levels collapsing to same dim (Option A)
+    mask_sparsity_weight: 0.1   # Sparsity loss weight (Option B only)
+    mask_diversity_weight: 0.05 # Mask diversity loss weight (Option B only)
     encoder_warmup_epochs: 5    # Full model: first 5 epochs efficiency=0, build encoder quality
                                 # Frozen encoder: override to 0 via --encoder_warmup_epochs 0
     temperature_schedule:
       start: 0.1                # Warm start — smooth gradients while encoder is learning
       end: 0.02                 # Cold end — sharp distribution that specifically improves R@1
     # bloom_frequencies injected at runtime by train_bam.py from training data
+  use_pcgrad: false                 # PCGrad gradient surgery — off by default
+  encoder_freeze_after_epochs: null # Two-stage: freeze encoder after this epoch (null = disabled)
+  bloom_noise_rate: 0.0             # Label noise augmentation (0 = disabled, 0.05 = 5% flip rate)
   checkpoint_dir: "/tmp/bam-ckpts/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
