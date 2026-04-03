@@ -46,7 +46,9 @@ log() { echo ""; echo "=========================================================
 run_data() {
     log "DATA PREPARATION"
     python data/build_real_data.py
-    python data/annotate_bloom_pretrained.py
+    python data/annotate_bloom_pretrained.py \
+        --data_dir "$DATA_DIR" \
+        --method pretrained
     python data/curriculum_negatives.py \
         --pairs "$DATA_DIR/train.jsonl" \
         --corpus "$DATA_DIR/corpus.jsonl" \
