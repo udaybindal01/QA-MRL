@@ -47,7 +47,11 @@ run_data() {
     log "DATA PREPARATION"
     python data/build_real_data.py
     python data/annotate_bloom_pretrained.py
-    python data/curriculum_negatives.py
+    python data/curriculum_negatives.py \
+        --pairs "$DATA_DIR/train.jsonl" \
+        --corpus "$DATA_DIR/corpus.jsonl" \
+        --output "$DATA_DIR/train_curriculum.jsonl" \
+        --stage 0.7 --num_neg 3
     echo "Data preparation complete. Corpus at $DATA_DIR/"
 }
 
