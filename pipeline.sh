@@ -68,16 +68,28 @@ run_train_mrl() {
 # ---- STEP: train_bam ---------------------------------------------------------
 run_train_bam() {
     log "TRAINING: BAM v4-A (prefix routing)"
+
+    # Find best MRL epoch first (warm-start encoder for BAM)
+    python scripts/find_best_epoch.py \
+        --config "$MRL_CONFIG" \
+        --checkpoint_dir "$MRL_CKPT_DIR" \
+        --model_type mrl \
+        --metric recall@10
+
+    MRL_BEST="$MRL_CKPT_DIR/best"
     python scripts/train_bam.py \
-        --config "$BAM_CONFIG"
+        --config "$BAM_CONFIG" \
+        --init_encoder "$MRL_BEST"
     echo "BAM v4-A training complete. Checkpoints at $BAM_CKPT_DIR/"
 }
 
 # ---- STEP: train_v4 ----------------------------------------------------------
 run_train_v4() {
     log "TRAINING: BAM v4 Option B (scattered mask)"
+    MRL_BEST="$MRL_CKPT_DIR/best"
     python scripts/train_bam.py \
-        --config "$BAM_V4_CONFIG"
+        --config "$BAM_V4_CONFIG" \
+        --init_encoder "$MRL_BEST"
     echo "BAM v4 Option B training complete. Checkpoints at $BAM_V4_CKPT_DIR/"
 }
 
