@@ -28,7 +28,7 @@ BAM_CKPT_DIR="/tmp/bam-ckpts"
 BAM_V4_CKPT_DIR="/tmp/bam-v4-ckpts"
 MRL_CKPT_DIR="/tmp/mrl-ckpts"
 RESULTS_DIR="results"
-DATA_DIR="/tmp/data/real"
+DATA_DIR="./data/real"
 
 BAM_CONFIG="configs/bam.yaml"
 BAM_V4_CONFIG="configs/bam_v4.yaml"
