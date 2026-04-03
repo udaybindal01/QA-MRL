@@ -23,10 +23,10 @@ model:
 
 data:
   # For educational experiments
-  train_path: "/tmp/data/real/train.jsonl"
-  val_path: "/tmp/data/real/val.jsonl"
-  test_path: "/tmp/data/real/test.jsonl"
-  corpus_path: "/tmp/data/real/corpus.jsonl"
+  train_path: "./data/real/train.jsonl"
+  val_path: "./data/real/val.jsonl"
+  test_path: "./data/real/test.jsonl"
+  corpus_path: "./data/real/corpus.jsonl"
   bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
   subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
   max_query_length: 128
@@ -59,7 +59,7 @@ training:
     mrl_warmup_epochs: 3
     router_warmup_epochs: 2
     joint_epochs: 10
-  checkpoint_dir: "/tmp/mrl-ckpts/"
+  checkpoint_dir: "./checkpoints/mrl-ckpts/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
 
