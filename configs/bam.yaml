@@ -53,7 +53,7 @@ training:
   use_pcgrad: false                 # PCGrad gradient surgery — off by default
   encoder_freeze_after_epochs: null # Two-stage: freeze encoder after this epoch (null = disabled)
   bloom_noise_rate: 0.0             # Label noise augmentation (0 = disabled, 0.05 = 5% flip rate)
-  checkpoint_dir: "./checkpoints/bam-ckpts/"
+  checkpoint_dir: "/tmp/bam-ckpts/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
 

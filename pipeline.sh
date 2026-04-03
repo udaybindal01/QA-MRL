@@ -24,9 +24,9 @@
 set -euo pipefail
 
 # ---- Configuration -----------------------------------------------------------
-BAM_CKPT_DIR="./checkpoints/bam-ckpts"
-BAM_V4_CKPT_DIR="./checkpoints/bam-v4-ckpts"
-MRL_CKPT_DIR="./checkpoints/mrl-ckpts"
+BAM_CKPT_DIR="/tmp/bam-ckpts"
+BAM_V4_CKPT_DIR="/tmp/bam-v4-ckpts"
+MRL_CKPT_DIR="/tmp/mrl-ckpts"
 RESULTS_DIR="results"
 DATA_DIR="./data/real"
 

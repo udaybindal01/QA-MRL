@@ -53,7 +53,7 @@ training:
       start: 0.1
       end: 0.02
     # bloom_frequencies injected at runtime by train_bam.py
-  checkpoint_dir: "./checkpoints/bam-v4-ckpts/"
+  checkpoint_dir: "/tmp/bam-v4-ckpts/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
 
