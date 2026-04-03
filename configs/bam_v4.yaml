@@ -12,10 +12,10 @@ model:
   use_soft_bloom_routing: false  # N/A for Option B (mask head handles routing)
 
 data:
-  train_path: "/tmp/data/real/train.jsonl"
-  val_path: "/tmp/data/real/val.jsonl"
-  test_path: "/tmp/data/real/test.jsonl"
-  corpus_path: "/tmp/data/real/corpus.jsonl"
+  train_path: "./data/real/train.jsonl"
+  val_path: "./data/real/val.jsonl"
+  test_path: "./data/real/test.jsonl"
+  corpus_path: "./data/real/corpus.jsonl"
   bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
   subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
   max_query_length: 128
