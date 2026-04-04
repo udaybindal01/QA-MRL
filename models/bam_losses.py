@@ -475,9 +475,18 @@ class BAMCombinedLoss(nn.Module):
             query_emb, positive_emb, query_mask, negative_embs, bloom_labels
         )
 
-        # Efficiency: use active_dims for Option B, continuous_dim for Option A
-        eff_input = active_dims if (continuous_dim is None and active_dims is not None) \
-                    else continuous_dim
+        # Efficiency: use soft_mask mean (continuous, non-zero gradient even at collapse)
+        # for Option B; continuous_dim for Option A.
+        # Using hard active_dims for Option B causes zero-gradient when mask collapses to 0,
+        # making recovery impossible. soft_mask.mean(dim=-1) * D gives an equivalent
+        # expected active-dim count but is always differentiable.
+        if soft_mask is not None:
+            # Option B: convert soft_mask fraction → expected active dims [B]
+            eff_input = soft_mask.mean(dim=-1) * BloomTwoFactorEfficiencyLoss.EMBEDDING_DIM
+        elif continuous_dim is not None:
+            eff_input = continuous_dim
+        else:
+            eff_input = None
         if eff_input is not None:
             l_e, e_stats = self.efficiency(eff_input, bloom_labels)
         else:
@@ -544,8 +553,12 @@ class BAMCombinedLoss(nn.Module):
             query_emb, positive_emb, query_mask, negative_embs, bloom_labels
         )
 
-        eff_input = active_dims if (continuous_dim is None and active_dims is not None) \
-                    else continuous_dim
+        if soft_mask is not None:
+            eff_input = soft_mask.mean(dim=-1) * BloomTwoFactorEfficiencyLoss.EMBEDDING_DIM
+        elif continuous_dim is not None:
+            eff_input = continuous_dim
+        else:
+            eff_input = None
         eff_w = getattr(self, "_active_efficiency_weight", self.efficiency_weight)
 
         routing = torch.tensor(0.0, device=query_emb.device)

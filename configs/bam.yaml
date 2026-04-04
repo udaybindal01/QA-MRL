@@ -39,9 +39,9 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.1      # Active only after encoder_warmup_epochs
+    efficiency_weight: 0.05     # Active only after encoder_warmup_epochs (reduced to give diversity room)
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
-    diversity_weight: 0.05      # Penalize all Bloom levels collapsing to same dim (Option A)
+    diversity_weight: 0.2       # Penalize all Bloom levels collapsing to same dim (Option A); was 0.05, too weak
     mask_sparsity_weight: 0.1   # Sparsity loss weight (Option B only)
     mask_diversity_weight: 0.05 # Mask diversity loss weight (Option B only)
     encoder_warmup_epochs: 5    # Full model: first 5 epochs efficiency=0, build encoder quality
