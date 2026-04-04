@@ -100,12 +100,14 @@ run_find_best() {
     python scripts/find_best_epoch.py \
         --checkpoint_dir "$BAM_CKPT_DIR" \
         --config "$BAM_CONFIG" \
+        --model_type bam \
         --output_dir "$RESULTS_DIR/best_epochs/bam/"
 
     echo "  MRL Baseline..."
     python scripts/find_best_epoch.py \
         --checkpoint_dir "$MRL_CKPT_DIR" \
         --config "$MRL_CONFIG" \
+        --model_type mrl \
         --output_dir "$RESULTS_DIR/best_epochs/mrl/"
 
     if [ -d "$BAM_V4_CKPT_DIR" ]; then
@@ -113,6 +115,7 @@ run_find_best() {
         python scripts/find_best_epoch.py \
             --checkpoint_dir "$BAM_V4_CKPT_DIR" \
             --config "$BAM_V4_CONFIG" \
+            --model_type bam \
             --output_dir "$RESULTS_DIR/best_epochs/bam_v4/"
     fi
 }
