@@ -59,8 +59,9 @@ training:
       3: 0.55                    # Analyze    → 422 dims
       4: 0.60                    # Evaluate   → 461 dims
       5: 0.65                    # Create     → 499 dims
-    encoder_warmup_epochs: 5     # Efficiency gate (not used since efficiency_weight=0,
-                                 # kept for compatibility)
+    encoder_warmup_epochs: 0     # Must be 0 for Option B: efficiency_weight=0 throughout,
+                                 # so no warmup concept. Non-zero value causes find_best_epoch
+                                 # to wrongly skip eligible epochs from best-epoch selection.
     temperature_schedule:
       start: 0.1
       end: 0.02

@@ -45,19 +45,28 @@ BLOOM_NAMES = {1: "Remember", 2: "Understand", 3: "Apply",
 
 @torch.no_grad()
 def evaluate_bam(model, test_path, corpus_path, tokenizer, device,
-                 ablation: str = "normal"):
+                 ablation: str = "normal", **kwargs):
     """
     Evaluate BAM under ablation conditions.
 
     ablation:
-      "normal"        — real Bloom labels from test data
-      "random_bloom"  — random Bloom labels 0-5
-      "fixed_1"       — all queries set to Bloom 0 (Remember = min dims)
-      "fixed_6"       — all queries set to Bloom 5 (Create = max dims)
-      "no_routing"    — router forced to 768 dims (isolates fine-tuning)
-      "soft_routing"  — bloom_probs = softmax(uniform) @ all_dims (soft routing)
+      "normal"           — real (predicted) Bloom labels from cache / ground truth
+      "random_bloom"     — random Bloom labels 0-5 (different per query per call)
+      "fixed_1"          — all queries set to Bloom 0 (Remember = min dims)
+      "fixed_6"          — all queries set to Bloom 5 (Create = max dims)
+      "no_routing"       — router forced to 768 dims (isolates fine-tuning gain)
+      "soft_routing"     — bloom_probs = softmax(uniform) @ all_dims (soft routing)
+      "fixed_avg_budget" — all queries use the same fixed dim = avg dim of "normal" run,
+                           isolating whether Bloom-specific routing beats any routing at
+                           the same compression budget
     """
     model.eval()
+
+    # For fixed_avg_budget: caller must pass the avg_dim (float) via kwargs.
+    # This ablation routes ALL queries to the same fixed dim equal to the average
+    # dim of the "normal" run, answering "does Bloom routing beat any routing at
+    # the same compression budget?"
+    fixed_dim = kwargs.get("fixed_dim", None)
 
     # For no_routing: temporarily force all levels to max dims
     # Works for Option A (BloomDimRouter). For Option B, mask head can't be overridden
@@ -96,6 +105,22 @@ def evaluate_bam(model, test_path, corpus_path, tokenizer, device,
                 samples.append(json.loads(line.strip()))
         valid = [s for s in samples if s.get("positive_id", "") in corpus_id_to_idx]
 
+        # Load predicted Bloom labels (same source as training) if cache exists.
+        bloom_cache_path = test_path + ".bloom_cache.json"
+        bloom_cache = None
+        if os.path.exists(bloom_cache_path):
+            with open(bloom_cache_path) as _f:
+                _cache = json.load(_f)
+            if len(_cache) == len(samples):
+                bloom_cache = _cache
+        sample_to_cache_idx = {id(s): i for i, s in enumerate(samples)} if bloom_cache else {}
+
+        def get_bloom_label_0idx(s):
+            """Return 0-indexed Bloom label: predicted (from cache) or ground-truth."""
+            if bloom_cache is not None:
+                return bloom_cache[sample_to_cache_idx[id(s)]]
+            return s["bloom_level"] - 1
+
         query_embs_list, query_dims_list, query_active_list = [], [], []
         for i in tqdm(range(0, len(valid), 64), desc="  queries", leave=False):
             batch_samples = valid[i:i + 64]
@@ -111,9 +136,21 @@ def evaluate_bam(model, test_path, corpus_path, tokenizer, device,
                 bloom_labels = torch.zeros(B, dtype=torch.long, device=device)
             elif ablation == "fixed_6":
                 bloom_labels = torch.full((B,), 5, dtype=torch.long, device=device)
+            elif ablation == "fixed_avg_budget":
+                # All queries routed to the Bloom level whose learned dim is closest
+                # to the target avg budget. This isolates "Bloom routing" from
+                # "routing at the right compression budget".
+                if not model.use_mask_routing:
+                    dim_table = model.bloom_router.get_dim_table()  # {0..5: float}
+                    target = fixed_dim if fixed_dim else 427.0
+                    closest_level = min(dim_table, key=lambda b: abs(dim_table[b] - target))
+                    bloom_labels = torch.full((B,), closest_level, dtype=torch.long, device=device)
+                else:
+                    # Option B has no prefix dim concept; use all-ones mask at ~target fraction
+                    bloom_labels = torch.zeros(B, dtype=torch.long, device=device)
             else:  # normal, no_routing, soft_routing
                 bloom_labels = torch.tensor(
-                    [s["bloom_level"] - 1 for s in batch_samples],
+                    [get_bloom_label_0idx(s) for s in batch_samples],
                     dtype=torch.long, device=device,
                 )
 
@@ -147,7 +184,7 @@ def evaluate_bam(model, test_path, corpus_path, tokenizer, device,
                 enc = {k: v.to(device) for k, v in enc.items()}
                 B = len(batch_texts)
                 bloom_labels = torch.tensor(
-                    [s["bloom_level"] - 1 for s in batch_samples],
+                    [get_bloom_label_0idx(s) for s in batch_samples],
                     dtype=torch.long, device=device,
                 )
                 out = model.encode_queries(enc["input_ids"], enc["attention_mask"],
@@ -348,13 +385,21 @@ def main():
     test_path = config["data"]["test_path"]
     corpus_path = config["data"]["corpus_path"]
 
+    def _load_ckpt(model, ckpt_path, label):
+        if os.path.exists(ckpt_path):
+            state = torch.load(ckpt_path, map_location=device)
+            result = model.load_state_dict(state["model_state_dict"], strict=False)
+            if result.missing_keys:
+                print(f"  WARNING [{label}] missing keys: "
+                      f"{result.missing_keys[:5]}{'...' if len(result.missing_keys) > 5 else ''}")
+            if result.unexpected_keys:
+                print(f"  WARNING [{label}] unexpected keys: "
+                      f"{result.unexpected_keys[:5]}{'...' if len(result.unexpected_keys) > 5 else ''}")
+            print(f"Loaded {label} from {ckpt_path}")
+
     config["training"]["loss"]["bloom_frequencies"] = [1/6] * 6
     bam_model = BloomAlignedMRL(config)
-    ckpt_path = os.path.join(args.checkpoint, "checkpoint.pt")
-    if os.path.exists(ckpt_path):
-        state = torch.load(ckpt_path, map_location=device)
-        bam_model.load_state_dict(state["model_state_dict"], strict=False)
-        print(f"Loaded BAM from {ckpt_path}")
+    _load_ckpt(bam_model, os.path.join(args.checkpoint, "checkpoint.pt"), "BAM")
     bam_model.to(device).eval()
 
     all_results = {}
@@ -374,17 +419,23 @@ def main():
             bam_model, test_path, corpus_path, tokenizer, device, ablation
         )
 
+    # --- Fixed-budget random routing ablation ---
+    # Routes ALL queries to the same fixed Bloom level whose dim is closest to BAM full's
+    # avg dim. Answers: "does Bloom routing beat any routing at the same budget?"
+    bam_avg_dim = all_results["BAM full"].get("avg_dims", 427.0)
+    print(f"\n{'─' * 60}\n  BAM fixed avg budget (dim≈{bam_avg_dim:.0f})\n{'─' * 60}")
+    all_results["BAM fixed avg budget"] = evaluate_bam(
+        bam_model, test_path, corpus_path, tokenizer, device,
+        ablation="fixed_avg_budget", fixed_dim=bam_avg_dim,
+    )
+
     # --- New ablation: mask_vs_truncation (Option B vs Option A at same avg dims) ---
     if args.checkpoint_v4:
         print(f"\n{'─' * 60}\n  BAM v4 Option B (mask_vs_truncation)\n{'─' * 60}")
         config_v4 = load_config(args.config_v4)
         config_v4["training"]["loss"]["bloom_frequencies"] = [1/6] * 6
         bam_v4 = BloomAlignedMRL(config_v4)
-        f = os.path.join(args.checkpoint_v4, "checkpoint.pt")
-        if os.path.exists(f):
-            bam_v4.load_state_dict(
-                torch.load(f, map_location=device)["model_state_dict"], strict=False
-            )
+        _load_ckpt(bam_v4, os.path.join(args.checkpoint_v4, "checkpoint.pt"), "BAM v4")
         bam_v4.to(device).eval()
         all_results["BAM v4 Option B"] = evaluate_bam(
             bam_v4, test_path, corpus_path, tokenizer, device, "normal"
@@ -394,11 +445,7 @@ def main():
     if args.checkpoint_joint:
         print(f"\n{'─' * 60}\n  BAM joint (two_stage_vs_joint)\n{'─' * 60}")
         bam_joint = BloomAlignedMRL(config)
-        f = os.path.join(args.checkpoint_joint, "checkpoint.pt")
-        if os.path.exists(f):
-            bam_joint.load_state_dict(
-                torch.load(f, map_location=device)["model_state_dict"], strict=False
-            )
+        _load_ckpt(bam_joint, os.path.join(args.checkpoint_joint, "checkpoint.pt"), "BAM joint")
         bam_joint.to(device).eval()
         all_results["BAM joint (no stage 2)"] = evaluate_bam(
             bam_joint, test_path, corpus_path, tokenizer, device, "normal"
@@ -410,11 +457,7 @@ def main():
         mc = config["model"]
         bl_model = MRLEncoder(model_name=mc["backbone"], embedding_dim=mc["embedding_dim"],
                               mrl_dims=mc["mrl_dims"])
-        bl_ckpt = os.path.join(args.baseline, "checkpoint.pt")
-        if os.path.exists(bl_ckpt):
-            bl_model.load_state_dict(
-                torch.load(bl_ckpt, map_location=device)["model_state_dict"], strict=False
-            )
+        _load_ckpt(bl_model, os.path.join(args.baseline, "checkpoint.pt"), "MRL")
         bl_model.to(device).eval()
         all_results["MRL Baseline"] = evaluate_mrl_baseline(
             bl_model, test_path, corpus_path, tokenizer, device

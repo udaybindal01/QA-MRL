@@ -26,13 +26,23 @@ from evaluation.evaluator import FullEvaluator, BLOOM_NAMES
 from transformers import AutoTokenizer
 
 
+def _warn_ckpt_mismatch(result, path, label):
+    if result.missing_keys:
+        print(f"  WARNING [{label}] missing keys: "
+              f"{result.missing_keys[:5]}{'...' if len(result.missing_keys) > 5 else ''}")
+    if result.unexpected_keys:
+        print(f"  WARNING [{label}] unexpected keys: "
+              f"{result.unexpected_keys[:5]}{'...' if len(result.unexpected_keys) > 5 else ''}")
+
+
 def load_bam(config, ckpt_path, device):
     config["training"]["loss"].setdefault("bloom_frequencies", [1/6] * 6)
     model = BloomAlignedMRL(config)
     f = os.path.join(ckpt_path, "checkpoint.pt")
     if os.path.exists(f):
         ckpt = torch.load(f, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        result = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        _warn_ckpt_mismatch(result, f, "BAM")
         print(f"  Loaded BAM from {f}")
     model.to(device).eval()
     return model
@@ -45,7 +55,8 @@ def load_mrl(config, ckpt_path, device):
     f = os.path.join(ckpt_path, "checkpoint.pt")
     if os.path.exists(f):
         ckpt = torch.load(f, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        result = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        _warn_ckpt_mismatch(result, f, "MRL")
         print(f"  Loaded MRL baseline from {f}")
     model.to(device).eval()
     return model

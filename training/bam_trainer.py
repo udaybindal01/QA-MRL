@@ -182,7 +182,12 @@ class BAMTrainer:
         return loss_dict
 
     def _train_step_pcgrad(self, batch, bloom_label):
-        with autocast(enabled=self.use_fp16):
+        # PCGrad requires separate backward passes per loss.
+        # With FP16 we cannot call scaler.scale(loss).backward() inside pc_backward
+        # because each backward must be independent. Solution: run in fp32 when pcgrad
+        # is active. This is safe — PCGrad is a research feature (use_pcgrad=false by
+        # default), and the encoder warm-start from MRL already ensures stable gradients.
+        with autocast(enabled=False):
             outputs = self.model(
                 query_input_ids=batch["query_input_ids"],
                 query_attention_mask=batch["query_attention_mask"],
@@ -212,7 +217,12 @@ class BAMTrainer:
             l_c = l_c / self.grad_accum
             l_r = l_r / self.grad_accum
 
+        # pc_backward calls .backward() internally with no scaler — requires fp32
         self.pcgrad.pc_backward([l_c, l_r])
+        nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+        self.pcgrad.step()
+        self.optimizer.zero_grad()
+
         total = (l_c + l_r).item() * self.grad_accum
         return {"total": total, "contrastive": l_c.item() * self.grad_accum,
                 "routing": l_r.item() * self.grad_accum}
@@ -234,15 +244,13 @@ class BAMTrainer:
 
             if (step + 1) % self.grad_accum == 0:
                 if not self.use_pcgrad:
+                    # Standard path: scaler handles unscale + step + update
                     self.scaler.unscale_(self.optimizer)
                     nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
-                else:
-                    # PCGrad already applied gradients via pc_backward
-                    nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                    self.pcgrad.step()
-                self.optimizer.zero_grad()
+                    self.optimizer.zero_grad()
+                # PCGrad path: clip+step+zero_grad already done inside _train_step_pcgrad
                 self.scheduler.step()
                 self.state.global_step += 1
 

@@ -88,6 +88,21 @@ class FullEvaluator:
                 test_samples.append(json.loads(line.strip()))
         print(f"  Test queries: {len(test_samples)}")
 
+        # Load cached predicted Bloom labels if available (same labels used at training).
+        # Fall back to ground-truth bloom_level (1-indexed → 0-indexed) if no cache.
+        bloom_cache_path = test_data_path + ".bloom_cache.json"
+        bloom_cache = None
+        if os.path.exists(bloom_cache_path):
+            import json as _json
+            with open(bloom_cache_path) as _f:
+                _cache = _json.load(_f)
+            if len(_cache) == len(test_samples):
+                bloom_cache = _cache
+                print(f"  Using predicted Bloom labels from cache: {bloom_cache_path}")
+            else:
+                print(f"  WARNING: bloom cache size {len(_cache)} != {len(test_samples)}, "
+                      f"falling back to ground-truth bloom_level.")
+
         valid_samples = [
             s for s in test_samples
             if s.get("positive_id", "") in corpus_id_to_idx
@@ -98,6 +113,17 @@ class FullEvaluator:
             print("  ERROR: No valid query-passage pairs found!")
             return {}
 
+        # Build per-sample Bloom labels (0-indexed) for routing.
+        # Prefer cached predicted labels (matches training); fall back to ground truth.
+        if bloom_cache is not None:
+            # cache is indexed over all test_samples; we need indices for valid_samples
+            sample_to_cache_idx = {id(s): i for i, s in enumerate(test_samples)}
+            learner_blooms_0idx = [
+                bloom_cache[sample_to_cache_idx[id(s)]] for s in valid_samples
+            ]
+        else:
+            learner_blooms_0idx = [s["bloom_level"] - 1 for s in valid_samples]
+
         # 3. Encode queries (extended return with active_dims and bloom_probs)
         print("  Encoding queries...")
         query_texts = [s["query"] for s in valid_samples]
@@ -105,10 +131,13 @@ class FullEvaluator:
          query_dims, query_full_embs,
          query_active_dims, query_bloom_probs) = self._encode_queries(
             model, query_texts, tokenizer, device,
-            learner_blooms=[s["bloom_level"] for s in valid_samples],
+            learner_blooms_0idx=learner_blooms_0idx,
         )
 
         gt_indices = np.array([corpus_id_to_idx[s["positive_id"]] for s in valid_samples])
+        # query_blooms is 1-indexed for display/stratification (BLOOM_NAMES keys are 1-6).
+        # Use ground-truth bloom_level for stratification reporting regardless of routing source,
+        # so Bloom-stratified metrics always reflect the true query taxonomy.
         query_blooms = np.array([s["bloom_level"] for s in valid_samples])
 
         # 4. Similarity and retrieval
@@ -277,9 +306,13 @@ class FullEvaluator:
         return torch.cat(all_embs)
 
     def _encode_queries(self, model, query_texts, tokenizer, device,
-                        learner_blooms=None):
+                        learner_blooms_0idx=None):
         """
-        Encode queries with optional learner features.
+        Encode queries with optional Bloom routing.
+
+        learner_blooms_0idx: list of int, 0-indexed Bloom levels (0=Remember … 5=Create).
+            These should be the PREDICTED bloom labels (same source as training),
+            not ground-truth labels, to avoid train/eval mismatch.
 
         Returns:
             embs:          [N, D] masked embeddings (BAM) or full embeddings (MRL)
@@ -302,12 +335,12 @@ class FullEvaluator:
             enc = {k: v.to(device) for k, v in enc.items()}
 
             lf = None
-            if learner_blooms and hasattr(model, "query_router"):
-                blooms = learner_blooms[i:i + len(batch)]
+            if learner_blooms_0idx and hasattr(model, "query_router"):
+                blooms_0 = learner_blooms_0idx[i:i + len(batch)]
                 lf = torch.zeros(len(batch), 6)
-                for j, bl in enumerate(blooms):
-                    assert 1 <= bl <= 6, f"Bloom level must be 1-6 (1-indexed), got {bl}."
-                    lf[j, bl - 1] = 1.0
+                for j, bl in enumerate(blooms_0):
+                    assert 0 <= bl <= 5, f"Bloom level must be 0-5 (0-indexed), got {bl}."
+                    lf[j, bl] = 1.0
                 lf = lf.to(device)
 
             t0 = time.time()

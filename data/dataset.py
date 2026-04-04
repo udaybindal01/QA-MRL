@@ -252,6 +252,13 @@ class EducationalCorpusBuilder:
 class EducationalRetrievalDataset(Dataset):
     """Training dataset: query + positive + hard negatives + labels."""
 
+    # Bloom label map for cip29/bert-blooms-taxonomy-classifier output strings
+    _BLOOM_MAP = {
+        "remember": 0, "understand": 1, "apply": 2,
+        "analyze": 3, "evaluate": 4, "create": 5,
+    }
+    _BLOOM_MODEL = "cip29/bert-blooms-taxonomy-classifier"
+
     def __init__(self, data_path, tokenizer, max_query_length=128,
                  max_passage_length=256, num_hard_negatives=7):
         self.tokenizer = tokenizer
@@ -264,43 +271,54 @@ class EducationalRetrievalDataset(Dataset):
             for line in f:
                 self.samples.append(json.loads(line.strip()))
 
-        # --- PRETRAINED BLOOM CLASSIFIER INFERENCE ---
-        print(f"Loading pretrained Bloom classifier to score {len(self.samples)} queries...")
-        model_name = "cip29/bert-blooms-taxonomy-classifier"
-        b_tokenizer = AutoTokenizer.from_pretrained(model_name)
-        b_model = AutoModelForSequenceClassification.from_pretrained(model_name)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        b_model.to(device)
-        b_model.eval()
+        # --- PRETRAINED BLOOM CLASSIFIER INFERENCE (cached) ---
+        # Cache file lives next to the data file so the classifier only runs
+        # once per split (not once per DataLoader construction).
+        cache_path = data_path + ".bloom_cache.json"
+        predicted_blooms = self._load_or_run_bloom_classifier(cache_path)
 
-        batch_size = 128
-        queries = [s["query"] for s in self.samples]
-        predicted_blooms = []
-
-        # Map string outputs to 0-5 indices
-        bloom_map = {"remember": 0, "understand": 1, "apply": 2, "analyze": 3, "evaluate": 4, "create": 5}
-
-        with torch.no_grad():
-            for i in range(0, len(queries), batch_size):
-                batch_queries = queries[i:i+batch_size]
-                inputs = b_tokenizer(batch_queries, padding=True, truncation=True, return_tensors="pt").to(device)
-                outputs = b_model(**inputs)
-                preds = outputs.logits.argmax(dim=-1).cpu().tolist()
-
-                for p in preds:
-                    label_str = b_model.config.id2label.get(p, str(p)).lower()
-                    mapped_idx = next((v for k, v in bloom_map.items() if k in label_str), p)
-                    mapped_idx = max(0, min(mapped_idx, 5))
-                    predicted_blooms.append(mapped_idx)
-
-        # Inject the predicted scores back into the samples
+        # Inject predicted labels (0-indexed) into samples for __getitem__
         for s, b in zip(self.samples, predicted_blooms):
             s["predicted_bloom_level"] = b
 
-        # Free up VRAM so main training isn't affected
+    def _load_or_run_bloom_classifier(self, cache_path: str):
+        """Load cached Bloom predictions or run classifier and save cache."""
+        if os.path.exists(cache_path):
+            with open(cache_path) as f:
+                cached = json.load(f)
+            if len(cached) == len(self.samples):
+                print(f"Loaded Bloom predictions from cache: {cache_path}")
+                return cached
+            print(f"Cache size mismatch ({len(cached)} vs {len(self.samples)}), re-running classifier.")
+
+        print(f"Running Bloom classifier on {len(self.samples)} queries (saving to {cache_path})...")
+        b_tokenizer = AutoTokenizer.from_pretrained(self._BLOOM_MODEL)
+        b_model = AutoModelForSequenceClassification.from_pretrained(self._BLOOM_MODEL)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        b_model.to(device).eval()
+
+        queries = [s["query"] for s in self.samples]
+        predicted_blooms = []
+
+        with torch.no_grad():
+            for i in range(0, len(queries), 128):
+                inputs = b_tokenizer(
+                    queries[i:i + 128], padding=True, truncation=True, return_tensors="pt"
+                ).to(device)
+                logits = b_model(**inputs).logits
+                for p in logits.argmax(dim=-1).cpu().tolist():
+                    label_str = b_model.config.id2label.get(p, str(p)).lower()
+                    idx = next((v for k, v in self._BLOOM_MAP.items() if k in label_str), p)
+                    predicted_blooms.append(max(0, min(int(idx), 5)))
+
         del b_model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+        with open(cache_path, "w") as f:
+            json.dump(predicted_blooms, f)
+        print(f"Saved Bloom predictions to {cache_path}")
+        return predicted_blooms
 
     def __len__(self):
         return len(self.samples)

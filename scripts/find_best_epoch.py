@@ -37,12 +37,23 @@ from evaluation.evaluator import FullEvaluator
 from transformers import AutoTokenizer
 
 
+def _warn_ckpt_mismatch(result, ckpt_dir, model_label):
+    """Print unexpected/missing keys so wrong-checkpoint loads surface immediately."""
+    if result.missing_keys:
+        print(f"  WARNING [{model_label}] missing keys in {ckpt_dir}: "
+              f"{result.missing_keys[:5]}{'...' if len(result.missing_keys) > 5 else ''}")
+    if result.unexpected_keys:
+        print(f"  WARNING [{model_label}] unexpected keys in {ckpt_dir}: "
+              f"{result.unexpected_keys[:5]}{'...' if len(result.unexpected_keys) > 5 else ''}")
+
+
 def load_bam(config, ckpt_dir, device):
     model = BloomAlignedMRL(config)
     f = os.path.join(ckpt_dir, "checkpoint.pt")
     if os.path.exists(f):
         ckpt = torch.load(f, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        result = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        _warn_ckpt_mismatch(result, ckpt_dir, "BAM")
     model.to(device).eval()
     return model
 
@@ -57,7 +68,8 @@ def load_mrl(config, ckpt_dir, device):
     f = os.path.join(ckpt_dir, "checkpoint.pt")
     if os.path.exists(f):
         ckpt = torch.load(f, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        result = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        _warn_ckpt_mismatch(result, ckpt_dir, "MRL")
     model.to(device).eval()
     return model
 

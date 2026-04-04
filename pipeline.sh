@@ -116,6 +116,7 @@ run_find_best() {
             --checkpoint_dir "$BAM_V4_CKPT_DIR" \
             --config "$BAM_V4_CONFIG" \
             --model_type bam \
+            --skip_warmup_epochs 0 \
             --output_dir "$RESULTS_DIR/best_epochs/bam_v4/"
     fi
 }
