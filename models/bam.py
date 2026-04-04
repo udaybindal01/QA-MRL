@@ -50,10 +50,15 @@ class BloomMaskHead(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, self.EMBEDDING_DIM),
         )
-        # Zero output layer → sigmoid(0) = 0.5 at init, ~384 active dims
+        # Zero weight, bias=+1 → sigmoid(1) ≈ 0.73 at init, ~561 active dims.
+        # DO NOT zero-init bias: sigmoid(0)=0.5 and (0.5 > 0.5) is False, so
+        # hard_mask=0 everywhere from batch 1, STE gives mask=0+0=0, masked
+        # embeddings are zero vectors, contrastive loss collapses before any
+        # gradient flows. Starting at 0.73 > 0.5 keeps the mask alive so
+        # the sparsity loss can gradually prune it down to the 0.44 target.
         with torch.no_grad():
             nn.init.zeros_(self.mlp[2].weight)
-            nn.init.zeros_(self.mlp[2].bias)
+            nn.init.constant_(self.mlp[2].bias, 1.0)
 
     def forward(
         self,
