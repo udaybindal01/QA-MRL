@@ -187,25 +187,39 @@ class BloomMaskSparsityLoss(nn.Module):
 
     L = mean_b [ |mean_{i: bloom_i=b}(mean_d(soft_mask[i])) - target_sparsity_b| ]
 
-    target_sparsity: fraction of dims to keep active. Default 0.44 = 339/768 globally.
-    Can vary per Bloom level by passing level_targets dict {0: 0.3, 1: 0.35, ...}.
+    Default per-level targets follow the cognitive load hypothesis:
+    lower Bloom levels (Remember) need fewer dims; higher levels (Create) need more.
 
-    Without this loss, BloomMaskHead learns to keep all 768 dims active (trivial solution).
+        Remember  (b=0): 0.40 → 307 dims
+        Understand(b=1): 0.45 → 346 dims
+        Apply     (b=2): 0.50 → 384 dims
+        Analyze   (b=3): 0.55 → 422 dims
+        Evaluate  (b=4): 0.60 → 461 dims
+        Create    (b=5): 0.65 → 499 dims
+
+    These targets force genuine Bloom-level differentiation in the mask AND
+    encode the cognitive load hypothesis directly into the loss structure.
+    Override with level_targets dict {0: target0, ...} or global_target for uniform.
     """
+
+    # Cognitively-motivated defaults: more dims for higher Bloom levels
+    _COGNITIVE_DEFAULTS = {0: 0.40, 1: 0.45, 2: 0.50, 3: 0.55, 4: 0.60, 5: 0.65}
 
     def __init__(
         self,
-        global_target: float = 0.44,
+        global_target: Optional[float] = None,
         level_targets: Optional[dict] = None,
     ):
         super().__init__()
-        # Per-level targets; fall back to global if not specified
+        # Per-level targets: explicit level_targets > global_target > cognitive defaults
         self.targets = {}
         for b in range(6):
             if level_targets and b in level_targets:
                 self.targets[b] = level_targets[b]
-            else:
+            elif global_target is not None:
                 self.targets[b] = global_target
+            else:
+                self.targets[b] = self._COGNITIVE_DEFAULTS[b]
 
     def forward(
         self,
@@ -239,11 +253,13 @@ class BloomMaskDiversityLoss(nn.Module):
 
     L = mean_{i<j} max(0, sim(mean_mask_i, mean_mask_j) - margin)
 
-    margin: similarity threshold; pairs above it incur a penalty.
-    Ensures Evaluate and Apply select genuinely different dimension subsets.
+    margin: similarity threshold above which a penalty is incurred.
+    Default margin=0.3 (tight) — with masks at 0.97 similarity, margin=0.7 only
+    yields 0.27 penalty per pair; margin=0.3 yields 0.67, giving 2.5× stronger gradient
+    to push Bloom levels toward genuinely different dimension subsets.
     """
 
-    def __init__(self, margin: float = 0.7):
+    def __init__(self, margin: float = 0.3):
         super().__init__()
         self.margin = margin
 
@@ -434,9 +450,19 @@ class BAMCombinedLoss(nn.Module):
         )
         self.diversity = RouterDiversityLoss()
 
-        # Option B losses
-        self.mask_sparsity = BloomMaskSparsityLoss(global_target=0.44)
-        self.mask_diversity = BloomMaskDiversityLoss(margin=0.7)
+        # Option B losses — per-level sparsity targets and diversity margin from config
+        global_sparsity = mc.get("mask_sparsity_target", None)
+        level_targets_cfg = lc.get("mask_level_targets", None)
+        if level_targets_cfg is not None:
+            level_targets = {int(k): float(v) for k, v in level_targets_cfg.items()}
+        else:
+            level_targets = None
+        self.mask_sparsity = BloomMaskSparsityLoss(
+            global_target=global_sparsity,
+            level_targets=level_targets,
+        )
+        diversity_margin = lc.get("mask_diversity_margin", 0.3)
+        self.mask_diversity = BloomMaskDiversityLoss(margin=diversity_margin)
 
     def set_epoch(self, epoch: int, total_epochs: int, freeze_encoder: bool = False):
         """

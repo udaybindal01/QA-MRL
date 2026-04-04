@@ -28,37 +28,51 @@ class BloomMaskHead(nn.Module):
     """
     Option B: Learned scattered soft mask over all 768 dims.
 
-    Architecture: Linear(774 → 256) → ReLU → Linear(256 → 768) → sigmoid
-    Input: concat(CLS_token[768], Bloom_onehot[6]) = [B, 774]
-    Output: soft mask in (0, 1)^768
+    Architecture:
+        shared_mlp: Linear(768 → hidden_dim) → ReLU → Linear(hidden_dim → 768)
+        bloom_bias: Embedding(6, 768) — per-level additive offset in pre-sigmoid space
+        soft_mask  = sigmoid(shared_mlp(CLS) + bloom_bias(bloom_level))
 
-    STE binarization at 0.5: hard binary in forward, continuous sigmoid gradient in backward.
-    Output layer zero-initialized → sigmoid(0) = 0.5 at init (~384 active dims).
+    The Bloom one-hot used to be concatenated into a 774-dim input and lost in a
+    256-dim bottleneck. Now the Bloom signal acts directly in the 768-dim output
+    space via a learned per-level bias, guaranteeing different levels can select
+    genuinely different dimensions even when CLS tokens are similar.
 
-    Without a sparsity loss the head learns to keep all dims active. Pair with
-    BloomMaskSparsityLoss (target ≈ 0.44 = 339/768).
+    STE binarization at 0.5: hard binary in forward, continuous sigmoid in backward.
+
+    Initialization:
+        shared_mlp output weight: zeros, bias: +1.0
+            → sigmoid(1) ≈ 0.73, ~561 active dims at init (masks alive from batch 1).
+            DO NOT use bias=0: sigmoid(0)=0.5 and (0.5 > 0.5) is False → hard_mask=0
+            everywhere → STE mask=0 → zero embeddings → instant collapse.
+        bloom_bias: small random N(0, 0.1) per level
+            → breaks symmetry between Bloom levels from the first gradient step,
+            allowing the diversity loss to push levels apart.
     """
 
     EMBEDDING_DIM = 768
     BLOOM_DIM = 6
 
-    def __init__(self, hidden_dim: int = 256, sparsity_target: float = 0.44):
+    def __init__(self, hidden_dim: int = 256, sparsity_target: float = 0.55):
         super().__init__()
         self.sparsity_target = sparsity_target
-        self.mlp = nn.Sequential(
-            nn.Linear(self.EMBEDDING_DIM + self.BLOOM_DIM, hidden_dim),
+
+        # Shared content-based MLP: takes CLS token only
+        self.shared_mlp = nn.Sequential(
+            nn.Linear(self.EMBEDDING_DIM, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, self.EMBEDDING_DIM),
         )
-        # Zero weight, bias=+1 → sigmoid(1) ≈ 0.73 at init, ~561 active dims.
-        # DO NOT zero-init bias: sigmoid(0)=0.5 and (0.5 > 0.5) is False, so
-        # hard_mask=0 everywhere from batch 1, STE gives mask=0+0=0, masked
-        # embeddings are zero vectors, contrastive loss collapses before any
-        # gradient flows. Starting at 0.73 > 0.5 keeps the mask alive so
-        # the sparsity loss can gradually prune it down to the 0.44 target.
+        # Per-Bloom-level additive offset applied in pre-sigmoid space.
+        # Acts directly in 768-dim output space — not bottlenecked through hidden_dim.
+        self.bloom_bias = nn.Embedding(self.BLOOM_DIM, self.EMBEDDING_DIM)
+
         with torch.no_grad():
-            nn.init.zeros_(self.mlp[2].weight)
-            nn.init.constant_(self.mlp[2].bias, 1.0)
+            # Shared MLP output: zero weight, bias=+1 → all levels start at 0.73
+            nn.init.zeros_(self.shared_mlp[2].weight)
+            nn.init.constant_(self.shared_mlp[2].bias, 1.0)
+            # Bloom bias: small random init breaks level symmetry from step 1
+            nn.init.normal_(self.bloom_bias.weight, mean=0.0, std=0.1)
 
     def forward(
         self,
@@ -75,15 +89,15 @@ class BloomMaskHead(nn.Module):
             soft_mask:   [B, 768] raw sigmoid output (used by sparsity/diversity losses)
             active_dims: [B] count of active dims per query (from hard mask)
         """
-        bloom_oh = F.one_hot(bloom_labels, num_classes=self.BLOOM_DIM).float()  # [B, 6]
-        x = torch.cat([cls_token, bloom_oh], dim=-1)         # [B, 774]
-        soft_mask = torch.sigmoid(self.mlp(x))               # [B, 768]
+        content_logit = self.shared_mlp(cls_token)                  # [B, 768]
+        bloom_offset  = self.bloom_bias(bloom_labels)                # [B, 768]
+        soft_mask = torch.sigmoid(content_logit + bloom_offset)      # [B, 768]
         hard_mask = (soft_mask > 0.5).float()
-        mask = hard_mask + (soft_mask - soft_mask.detach())  # STE
+        mask = hard_mask + (soft_mask - soft_mask.detach())          # STE
         return {
             "mask": mask,
             "soft_mask": soft_mask,
-            "active_dims": hard_mask.sum(dim=-1),            # [B]
+            "active_dims": hard_mask.sum(dim=-1),                    # [B]
         }
 
 
