@@ -67,7 +67,7 @@ def evaluate_at_noise(model, valid, corpus_embs, corpus_id_to_idx,
         B = len(batch)
 
         bloom_labels = torch.tensor(
-            [s["bloom_level"] - 1 for s in batch],
+            [s.get("predicted_bloom_level", s["bloom_level"] - 1) for s in batch],
             dtype=torch.long, device=device,
         )
         bloom_labels = flip_bloom_labels(bloom_labels, flip_rate)
@@ -104,6 +104,75 @@ def evaluate_at_noise(model, valid, corpus_embs, corpus_id_to_idx,
     return float(hits.mean())
 
 
+def measure_classifier_accuracy(test_path: str) -> dict:
+    """
+    Measure Bloom classifier accuracy on the test set.
+
+    Compares predicted bloom labels (from cache) against ground-truth bloom_level.
+    If no cache exists, reports that the classifier hasn't been run.
+    Returns per-level and overall accuracy, and a confusion matrix.
+    """
+    samples = []
+    with open(test_path) as f:
+        for line in f:
+            samples.append(json.loads(line.strip()))
+
+    cache_path = test_path + ".bloom_cache.json"
+    if not os.path.exists(cache_path):
+        print("  No bloom cache found. Run training first to generate predictions.")
+        return {"accuracy": None, "note": "No cache available"}
+
+    with open(cache_path) as f:
+        predicted = json.load(f)
+    if len(predicted) != len(samples):
+        print(f"  Cache size mismatch: {len(predicted)} vs {len(samples)}")
+        return {"accuracy": None, "note": "Cache size mismatch"}
+
+    gt = [s["bloom_level"] - 1 for s in samples]  # 0-indexed
+    pred = predicted
+
+    correct = sum(p == g for p, g in zip(pred, gt))
+    accuracy = correct / len(gt)
+
+    # Per-level accuracy
+    per_level_correct = {b: 0 for b in range(6)}
+    per_level_total   = {b: 0 for b in range(6)}
+    for p, g in zip(pred, gt):
+        per_level_total[g] += 1
+        if p == g:
+            per_level_correct[g] += 1
+
+    # 6x6 confusion matrix
+    confusion = np.zeros((6, 6), dtype=int)
+    for p, g in zip(pred, gt):
+        confusion[g][p] += 1
+
+    names = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
+    print(f"\n=== Bloom Classifier Accuracy on Test Set ===")
+    print(f"  Overall accuracy: {accuracy:.3f} ({correct}/{len(gt)})")
+    print(f"\n  Per-level accuracy:")
+    per_level_acc = {}
+    for b in range(6):
+        n = per_level_total[b]
+        c = per_level_correct[b]
+        acc_b = c / n if n > 0 else 0.0
+        per_level_acc[names[b]] = acc_b
+        print(f"    {names[b]:12s}: {acc_b:.3f} ({c}/{n})")
+
+    print(f"\n  Confusion matrix (rows=true, cols=predicted):")
+    print(f"  {'':12s}" + "".join(f"{n[:4]:>8s}" for n in names))
+    for i, name in enumerate(names):
+        row = f"  {name:12s}" + "".join(f"{confusion[i][j]:>8d}" for j in range(6))
+        print(row)
+
+    return {
+        "overall_accuracy": float(accuracy),
+        "per_level_accuracy": per_level_acc,
+        "n_samples": len(gt),
+        "confusion_matrix": confusion.tolist(),
+    }
+
+
 @torch.no_grad()
 def run_analysis(args):
     config = load_config(args.config)
@@ -112,13 +181,25 @@ def run_analysis(args):
     tokenizer = AutoTokenizer.from_pretrained(config["model"]["backbone"])
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # ── Step 0: Measure classifier accuracy FIRST ──────────────────────────
+    # This directly bounds BAM's routing quality ceiling.
+    print("=" * 60)
+    print("Step 0: Bloom Classifier Accuracy (routing quality ceiling)")
+    print("=" * 60)
+    classifier_stats = measure_classifier_accuracy(config["data"]["test_path"])
+    acc_path = os.path.join(args.output_dir, "classifier_accuracy.json")
+    with open(acc_path, "w") as f:
+        json.dump(classifier_stats, f, indent=2)
+
     config["training"]["loss"]["bloom_frequencies"] = [1/6] * 6
     model = BloomAlignedMRL(config)
     ckpt = os.path.join(args.checkpoint, "checkpoint.pt")
     if os.path.exists(ckpt):
-        model.load_state_dict(
+        result = model.load_state_dict(
             torch.load(ckpt, map_location=device)["model_state_dict"], strict=False
         )
+        if result.missing_keys:
+            print(f"WARNING missing keys: {result.missing_keys[:5]}")
         print(f"Loaded from {ckpt}")
     model.to(device).eval()
 

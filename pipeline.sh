@@ -231,6 +231,27 @@ run_analysis() {
     echo "Analysis complete. Results at $RESULTS_DIR/analysis/"
 }
 
+# ---- STEP: beir --------------------------------------------------------------
+run_beir() {
+    log "BEIR CROSS-DOMAIN EVALUATION"
+    mkdir -p "$RESULTS_DIR/beir"
+
+    BAM_BEST="$BAM_CKPT_DIR/best"
+    if [ -f "$RESULTS_DIR/best_epochs/bam/best_checkpoint_path.txt" ]; then
+        BAM_BEST=$(cat "$RESULTS_DIR/best_epochs/bam/best_checkpoint_path.txt")
+    fi
+
+    MRL_BEST="$MRL_CKPT_DIR/best"
+
+    python scripts/eval_beir.py \
+        --config "$MRL_CONFIG" \
+        --checkpoint "$BAM_BEST" \
+        --baseline "$MRL_BEST" \
+        --datasets scifact nfcorpus fiqa arguana \
+        --output_dir "$RESULTS_DIR/beir/"
+    echo "BEIR evaluation complete. Results at $RESULTS_DIR/beir/"
+}
+
 # ---- STEP: efficiency --------------------------------------------------------
 run_efficiency() {
     log "EFFICIENCY BENCHMARK"
@@ -261,6 +282,7 @@ case "$STEP" in
         run_ablations
         run_analysis
         run_efficiency
+        run_beir
         log "PIPELINE COMPLETE"
         echo "Results saved to $RESULTS_DIR/"
         ;;
@@ -273,9 +295,10 @@ case "$STEP" in
     ablations)   run_ablations ;;
     analysis)    run_analysis ;;
     efficiency)  run_efficiency ;;
+    beir)        run_beir ;;
     *)
         echo "Unknown step: $STEP"
-        echo "Valid steps: all, data, train_mrl, train_bam, train_v4, find_best, eval, ablations, analysis, efficiency"
+        echo "Valid steps: all, data, train_mrl, train_bam, train_v4, find_best, eval, ablations, analysis, efficiency, beir"
         exit 1
         ;;
 esac

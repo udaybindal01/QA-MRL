@@ -39,6 +39,32 @@ def bootstrap_ci(hits, n_bootstrap=1000, ci=0.95, seed=42):
     return float(hits.mean()), float(lo), float(hi)
 
 
+def permutation_test(hits_a: np.ndarray, hits_b: np.ndarray,
+                     n_permutations: int = 5000, seed: int = 42) -> float:
+    """
+    Two-sample permutation test for difference in R@k between two Bloom levels.
+
+    Tests H0: mean(hits_a) == mean(hits_b) under random group assignment.
+    Returns p-value (two-tailed). Use alpha=0.05 for significance.
+
+    Handles unequal sample sizes. If either group has <5 samples, returns
+    p=1.0 (underpowered — report CI instead).
+    """
+    if len(hits_a) < 5 or len(hits_b) < 5:
+        return 1.0
+    observed_diff = abs(hits_a.mean() - hits_b.mean())
+    combined = np.concatenate([hits_a, hits_b])
+    n_a = len(hits_a)
+    rng = np.random.RandomState(seed)
+    count = 0
+    for _ in range(n_permutations):
+        perm = rng.permutation(combined)
+        diff = abs(perm[:n_a].mean() - perm[n_a:].mean())
+        if diff >= observed_diff:
+            count += 1
+    return count / n_permutations
+
+
 class FullEvaluator:
 
     def __init__(self, config: dict):
@@ -207,6 +233,20 @@ class FullEvaluator:
             p = query_bloom_probs.clamp(min=1e-9)
             bloom_entropies = -(p * p.log()).sum(dim=-1).numpy()
 
+        # Build corpus bloom_level lookup for bloom_consistent_recall
+        # Counts a hit if any top-K doc has the same Bloom level as the query's positive.
+        # Addresses single-positive evaluation noise (reviewer D): a query may retrieve
+        # equally valid documents that happen not to be the labeled positive.
+        corpus_bloom = np.array([c.get("bloom_level", 0) for c in corpus])
+        query_positive_blooms = np.array(
+            [corpus[corpus_id_to_idx[s["positive_id"]]].get("bloom_level", 0)
+             for s in valid_samples]
+        )
+        has_bloom_in_corpus = (corpus_bloom > 0).any()
+
+        # Collect per-level hits arrays for significance testing (reviewer J)
+        level_hits_r10 = {}
+
         for level in range(1, 7):
             mask = query_blooms == level
             if mask.sum() == 0:
@@ -221,19 +261,53 @@ class FullEvaluator:
                 hits = np.array([level_gt[i] in topk[i] for i in range(n_level)])
                 metrics[f"bloom_{name}_recall@{k}"] = float(hits.mean())
 
-                if k == 10 and compute_bootstrap:
-                    mean, lo, hi = bootstrap_ci(hits.astype(float))
-                    metrics[f"bloom_{name}_recall@10_ci_lo"] = lo
-                    metrics[f"bloom_{name}_recall@10_ci_hi"] = hi
-                    metrics[f"bloom_{name}_n"] = n_level
+                if k == 10:
+                    level_hits_r10[level] = hits.astype(float)
+                    if compute_bootstrap:
+                        mean, lo, hi = bootstrap_ci(hits.astype(float))
+                        metrics[f"bloom_{name}_recall@10_ci_lo"] = lo
+                        metrics[f"bloom_{name}_recall@10_ci_hi"] = hi
+                        metrics[f"bloom_{name}_n"] = n_level
+
+            # bloom_consistent_recall@10: counts hit if any top-10 doc has same
+            # Bloom level as the query's positive (addresses single-positive noise).
+            if has_bloom_in_corpus and k == 10:
+                pos_blooms_level = query_positive_blooms[mask]
+                consistent_hits = np.array([
+                    any(corpus_bloom[level_rankings[i, j]] == pos_blooms_level[i]
+                        for j in range(10))
+                    for i in range(n_level)
+                ])
+                metrics[f"bloom_{name}_consistent_recall@10"] = float(consistent_hits.mean())
 
             if bloom_entropies is not None:
                 metrics[f"bloom_{name}_routing_entropy"] = float(bloom_entropies[mask].mean())
 
+        # Pairwise significance testing across consecutive Bloom levels (reviewer J)
+        # Tests H0: adjacent Bloom levels have the same R@10 under random group assignment.
+        if compute_bootstrap and len(level_hits_r10) >= 2:
+            levels_sorted = sorted(level_hits_r10.keys())
+            for i in range(len(levels_sorted) - 1):
+                la, lb = levels_sorted[i], levels_sorted[i + 1]
+                p_val = permutation_test(level_hits_r10[la], level_hits_r10[lb])
+                key = f"bloom_{BLOOM_NAMES[la]}_vs_{BLOOM_NAMES[lb]}_pvalue"
+                metrics[key] = float(p_val)
+
         # 7. Efficiency metrics
-        # Option A: use discrete_dims for per-query and per-Bloom avg dims
+        # Option A (prefix mask): avg_active_dims = contiguous prefix length.
+        #   FAISS can index these as compact subvectors of size avg_active_dims.
+        #   Retrieval speedup: linear in dim reduction (768→427 ≈ 1.8× faster).
+        # Option B (scattered mask): avg_active_dims_scattered = non-contiguous active dims.
+        #   IMPORTANT: scattered dims CANNOT be indexed as FAISS sub-vectors.
+        #   Full 768-dim corpus index is required; savings come from sparse dot product only.
+        #   Compute saving at query time = fraction of zero dims (768-active)/768.
         if query_dims is not None:
+            # Option A: prefix mask
             metrics["avg_active_dims"] = float(query_dims.float().mean().item())
+            metrics["efficiency_mode"] = "prefix_contiguous"
+            metrics["sparse_ratio"] = float(
+                1.0 - query_dims.float().mean().item() / 768.0
+            )
             for level in range(1, 7):
                 mask = query_blooms == level
                 if mask.sum() > 0:
@@ -241,9 +315,15 @@ class FullEvaluator:
                     metrics[f"bloom_{name}_avg_dim"] = float(
                         query_dims[mask].float().mean().item()
                     )
-        # Option B: use active_dims from hard mask
         elif query_active_dims is not None:
+            # Option B: scattered mask — note that this is NOT FAISS-compatible sub-indexing
             metrics["avg_active_dims"] = float(query_active_dims.float().mean().item())
+            metrics["avg_active_dims_scattered"] = metrics["avg_active_dims"]
+            metrics["efficiency_mode"] = "scattered_non_contiguous"
+            metrics["sparse_ratio"] = float(
+                1.0 - query_active_dims.float().mean().item() / 768.0
+            )
+            metrics["faiss_subindex_compatible"] = False
             for level in range(1, 7):
                 mask = query_blooms == level
                 if mask.sum() > 0:
@@ -251,8 +331,8 @@ class FullEvaluator:
                     metrics[f"bloom_{name}_avg_dim"] = float(
                         query_active_dims[mask].float().mean().item()
                     )
-        # Soft mask fallback (if neither discrete_dim nor active_dims)
         elif query_masks is not None:
+            # Soft mask fallback
             metrics["avg_active_dims"] = float(
                 (query_masks > 0.5).float().sum(dim=-1).mean().item()
             )
@@ -379,15 +459,22 @@ class FullEvaluator:
         print(f"  MRR:    {metrics.get('mrr', 0):.4f}")
         print(f"  NDCG@10:{metrics.get('ndcg@10', 0):.4f}")
         if "avg_active_dims" in metrics:
-            print(f"  Active dims: {metrics['avg_active_dims']:.0f}")
+            mode = metrics.get("efficiency_mode", "")
+            sparse = metrics.get("sparse_ratio", 0.0)
+            faiss_ok = metrics.get("faiss_subindex_compatible", True)
+            faiss_note = "" if faiss_ok else " [scattered — NOT FAISS sub-index]"
+            print(f"  Active dims: {metrics['avg_active_dims']:.0f} / 768  "
+                  f"(sparse_ratio={sparse:.2f}{faiss_note})")
 
         print(f"\n  Bloom-Stratified R@10 (query Bloom only):")
+        levels_printed = []
         for level in range(1, 7):
             name = BLOOM_NAMES[level]
             n = int((query_blooms == level).sum())
             r10 = metrics.get(f"bloom_{name}_recall@10", 0)
             avg_dim = metrics.get(f"bloom_{name}_avg_dim", None)
             entropy = metrics.get(f"bloom_{name}_routing_entropy", None)
+            consistent = metrics.get(f"bloom_{name}_consistent_recall@10", None)
             if n > 0:
                 ci_str = ""
                 if show_ci:
@@ -396,7 +483,17 @@ class FullEvaluator:
                     ci_str = f"  95% CI=[{lo:.3f}, {hi:.3f}]"
                 dim_str = f"  dim={avg_dim:.0f}" if avg_dim is not None else ""
                 ent_str = f"  H={entropy:.3f}" if entropy is not None else ""
-                print(f"    {name:12s} (n={n:4d}): R@10={r10:.4f}{ci_str}{dim_str}{ent_str}")
+                con_str = f"  cons_R@10={consistent:.3f}" if consistent is not None else ""
+                print(f"    {name:12s} (n={n:4d}): R@10={r10:.4f}{ci_str}{dim_str}{ent_str}{con_str}")
+                levels_printed.append(level)
+        # Significance: adjacent Bloom level pairs
+        for i in range(len(levels_printed) - 1):
+            la, lb = levels_printed[i], levels_printed[i + 1]
+            pkey = f"bloom_{BLOOM_NAMES[la]}_vs_{BLOOM_NAMES[lb]}_pvalue"
+            if pkey in metrics:
+                p = metrics[pkey]
+                sig = "**" if p < 0.01 else ("*" if p < 0.05 else "ns")
+                print(f"      {BLOOM_NAMES[la]} vs {BLOOM_NAMES[lb]}: p={p:.3f} [{sig}]")
 
     def save_results(self, metrics, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)

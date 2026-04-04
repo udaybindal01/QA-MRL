@@ -57,6 +57,7 @@ class BAMTrainer:
         self.encoder_freeze_after = tc.get("encoder_freeze_after_epochs", None)
         self.use_pcgrad = tc.get("use_pcgrad", False)
         self.bloom_noise_rate = tc.get("bloom_noise_rate", 0.0)
+        self.hard_neg_refresh_epochs = tc.get("hard_neg_refresh_epochs", None)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
@@ -127,6 +128,54 @@ class BAMTrainer:
                 self.optimizer, T_max=max(remaining_steps, 1)
             )
             self._stage2_active = True
+
+    def _refresh_hard_negatives(self, epoch: int):
+        """
+        Re-mine hard negatives against the current model embedding space.
+
+        Saves refreshed pairs to {train_path}.refreshed.jsonl and rebuilds
+        the train DataLoader from the new file. This counters the "easy negative
+        drift" problem: negatives mined at initialization become trivially easy
+        as the model improves.
+        """
+        from scripts.refresh_hard_negatives import refresh_hard_negatives
+        from data.dataset import EducationalRetrievalDataset, build_dataloaders
+        from transformers import AutoTokenizer
+
+        self.logger.info(f"Epoch {epoch}: refreshing hard negatives against current model...")
+        self.model.eval()
+
+        dc = self.config["data"]
+        train_path = dc["train_path"]
+        corpus_path = dc["corpus_path"]
+        refreshed_path = train_path.replace(".jsonl", f"_epoch{epoch}_refreshed.jsonl")
+        num_neg = dc.get("num_hard_negatives", 3)
+
+        tokenizer = AutoTokenizer.from_pretrained(self.config["model"]["backbone"])
+
+        with torch.no_grad():
+            refresh_hard_negatives(
+                model=self.model,
+                tokenizer=tokenizer,
+                pairs_path=train_path,
+                corpus_path=corpus_path,
+                output_path=refreshed_path,
+                device=self.device,
+                num_neg=num_neg,
+                margin=0.05,
+                batch_size=128,
+            )
+
+        # Rebuild train DataLoader from refreshed pairs
+        refreshed_config = dict(self.config)
+        refreshed_config["data"] = dict(dc)
+        refreshed_config["data"]["train_path"] = refreshed_path
+        new_loaders = build_dataloaders(refreshed_config, tokenizer)
+        if "train" in new_loaders:
+            self.train_loader = new_loaders["train"]
+            self.logger.info(f"  Train loader rebuilt from {refreshed_path} "
+                             f"({len(self.train_loader)} batches).")
+        self.model.train()
 
     def _inject_bloom_noise(self, bloom_label: torch.Tensor) -> torch.Tensor:
         """Randomly flip a fraction of Bloom labels (0-5 range) for robustness."""
@@ -376,6 +425,12 @@ class BAMTrainer:
 
         for epoch in range(start_epoch, self.num_epochs):
             self.state.epoch = epoch
+
+            # Dynamic hard negative refresh
+            if (self.hard_neg_refresh_epochs is not None
+                    and epoch > 0
+                    and epoch % self.hard_neg_refresh_epochs == 0):
+                self._refresh_hard_negatives(epoch)
 
             # Check two-stage transition
             self._maybe_transition_to_stage2(epoch)

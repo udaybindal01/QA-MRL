@@ -8,7 +8,10 @@ model:
   normalize_embeddings: true
   mrl_dims: [64, 128, 256, 384, 512, 768]
   use_mask_routing: true         # Option B: BloomMaskHead scattered soft mask
-  mask_sparsity_target: null    # null = use per-level cognitive defaults (see mask_level_targets)
+  mask_sparsity_target: 0.50    # Global uniform sparsity: 384/768 dims across all Bloom levels.
+                                 # Per-level targets removed — cognitive load hypothesis is
+                                 # tested post-hoc via analyze_bloom_dim_allocation.py, not
+                                 # baked into the training signal (which would be circular).
   use_soft_bloom_routing: false  # N/A for Option B (mask head handles routing)
 
 data:
@@ -41,24 +44,28 @@ training:
   use_pcgrad: false              # Set true to enable gradient surgery
   encoder_freeze_after_epochs: null  # Keep joint training — scattered mask needs encoder to keep adapting
   bloom_noise_rate: 0.05         # 5% Bloom label flip rate for robustness
+  hard_neg_refresh_epochs: null  # Refresh hard negatives every N epochs (null = disabled)
   loss:
     contrastive_weight: 1.0
     efficiency_weight: 0.0       # OFF for Option B: sparsity loss controls compression.
                                  # Efficiency + sparsity together over-compressed to 132 dims.
-    mrl_anchor_weight: 0.05      # Reduced from 0.2: MRL anchor enforces prefix-dim structure
-                                 # which conflicts with scattered mask selection.
+    mrl_anchor_weight: 0.0       # OFF for Option B: MRL anchor enforces prefix-dim structure
+                                 # which directly conflicts with scattered mask selection
+                                 # (scattered dims are NOT prefix-contiguous by design).
+                                 # Keeping it at 0.05 pulls the encoder toward prefix structure
+                                 # while the mask head tries to escape it — net effect is
+                                 # weaker masks and higher sparsity loss. Disable completely.
     diversity_weight: 0.0        # Not used for Option B (no prefix dims to spread)
     mask_sparsity_weight: 0.25   # Sole compression signal now efficiency is off. Stronger
                                  # to maintain per-level targets against contrastive pressure.
     mask_diversity_weight: 0.15  # Push different Bloom levels to select different dims.
     mask_diversity_margin: 0.3   # Tight margin (was 0.7). At sim=0.97, penalty=0.67 vs 0.27.
-    mask_level_targets:          # Cognitive load hypothesis: higher Bloom → more dims.
-      0: 0.40                    # Remember   → 307 dims (simple recall)
-      1: 0.45                    # Understand → 346 dims
-      2: 0.50                    # Apply      → 384 dims
-      3: 0.55                    # Analyze    → 422 dims
-      4: 0.60                    # Evaluate   → 461 dims
-      5: 0.65                    # Create     → 499 dims
+    # mask_level_targets removed: per-level cognitive targets (0.40–0.65) baked the
+    # cognitive load hypothesis directly into the training signal, making any claim
+    # that the model "validates" the hypothesis circular. Instead we use a uniform
+    # global sparsity target (mask_sparsity_target: 0.50 in model config) and test
+    # post-hoc whether the trained model spontaneously allocates more dims to higher
+    # Bloom levels. Run: python scripts/analyze_bloom_dim_allocation.py
     encoder_warmup_epochs: 0     # Must be 0 for Option B: efficiency_weight=0 throughout,
                                  # so no warmup concept. Non-zero value causes find_best_epoch
                                  # to wrongly skip eligible epochs from best-epoch selection.
