@@ -39,9 +39,10 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.2      # Doubled from 0.1: diversity removal means efficiency must create
-                                # the full cognitive ordering. Creates ~200-250 dim spread between
-                                # Remember (cw=1.0 → strong push) and Create (cw=0.167 → weak push).
+    efficiency_weight: 0.3      # Stage 2 (frozen encoder): encoder can no longer adapt to resist
+                                # compression, so 0.3 no longer over-compresses the way it did when
+                                # the encoder was trainable. Creates strong cognitive ordering:
+                                # Remember (cw=1.0) → ~300 dims, Create (cw=0.167) → ~550 dims.
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
     diversity_weight: 0.0       # REMOVED. RouterDiversityLoss was always a workaround for the
                                 # zero-init trap (dim_head[2].weight=0 blocked bloom_emb gradients).
@@ -62,7 +63,12 @@ training:
       end: 0.02                 # Cold end — sharp distribution that specifically improves R@1
     # bloom_frequencies injected at runtime by train_bam.py from training data
   use_pcgrad: false                 # PCGrad gradient surgery — off by default
-  encoder_freeze_after_epochs: null # Two-stage: freeze encoder after this epoch (null = disabled)
+  encoder_freeze_after_epochs: 4    # Two-stage training: freeze encoder after epoch 4 (Stage 2 starts
+                                    # at epoch 5, same time efficiency activates). With trainable encoder,
+                                    # the 109M-param encoder adapts to resist compression — efficiency=0.2
+                                    # lost the arms race (Remember only dropped 3 dims over 10 epochs).
+                                    # Frozen encoder cannot fight back; router trains in isolation and
+                                    # efficiency cleanly controls dim selection per Bloom level.
   bloom_noise_rate: 0.0             # Label noise augmentation (0 = disabled, 0.05 = 5% flip rate)
   hard_neg_refresh_epochs: null     # Refresh hard negatives every N epochs (null = disabled).
                                     # Uses current model to re-mine negatives against full corpus.
