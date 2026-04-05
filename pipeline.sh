@@ -107,13 +107,7 @@ best_ckpt() {
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 0 — INSTALL DEPENDENCIES
 # ─────────────────────────────────────────────────────────────────────────────
-run_install() {
-    log "STEP 0 — INSTALLING DEPENDENCIES"
-    python3 -m pip install --upgrade pip
-    python3 -m pip install -r requirements.txt \
-        || die "pip install -r requirements.txt failed"
-    echo "Dependencies installed."
-}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 1 — DATA
@@ -432,7 +426,6 @@ if [[ "$STEP" == "all" ]]; then
     echo "    $RESULTS_DIR/beir/                          ← cross-domain"
 else
     case "$STEP" in
-        install)    run_install ;;
         data)       run_data ;;
         train_mrl)  run_train_mrl ;;
         find_mrl)   run_find_mrl ;;
