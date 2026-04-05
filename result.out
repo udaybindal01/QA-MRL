@@ -1,0 +1,215 @@
+══════════════════════════════════════════════════════
+  [22:20:25]  STEP 7/11 — FULL EVALUATION
+══════════════════════════════════════════════════════
+/home2/uday.bindal/miniconda3/lib/python3.12/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+============================================================
+BAM v3/v4-A (prefix routing)
+============================================================
+  Loaded BAM from /tmp/bam-ckpts/best/checkpoint.pt
+  Loading corpus...
+  Corpus: 40640 passages
+  Encoding corpus...
+  Corpus embeddings: torch.Size([40640, 768])                                                                                                                                                         
+  Loading test queries...
+  Test queries: 1857
+  Using predicted Bloom labels from cache: ./data/real/test.jsonl.bloom_cache.json
+  Valid queries (positive in corpus): 1857
+  Encoding queries...
+  Computing similarities...
+
+  === Results (N=1857) ===
+  R@1:    0.3145
+  R@5:    0.4830
+  R@10:   0.5412
+  R@50:   0.6699
+  MRR:    0.3948
+  NDCG@10:0.4247
+  Active dims: 447 / 768  (sparse_ratio=0.42)
+
+  Bloom-Stratified R@10 (query Bloom only):
+    Remember     (n=1198): R@10=0.6135  95% CI=[0.588, 0.641]  dim=447
+    Understand   (n=  28): R@10=0.2857  95% CI=[0.143, 0.464]  dim=447
+    Apply        (n= 290): R@10=0.2724  95% CI=[0.224, 0.321]  dim=447
+    Analyze      (n= 110): R@10=0.5455  95% CI=[0.455, 0.636]  dim=447
+    Evaluate     (n=  72): R@10=0.2500  95% CI=[0.153, 0.361]  dim=447
+    Create       (n= 159): R@10=0.6604  95% CI=[0.585, 0.730]  dim=447
+      Remember vs Understand: p=0.001 [**]
+      Understand vs Apply: p=1.000 [ns]
+      Apply vs Analyze: p=0.000 [**]
+      Analyze vs Evaluate: p=0.000 [**]
+      Evaluate vs Create: p=0.000 [**]
+
+============================================================
+BAM Encoder (no routing)
+============================================================
+  WARNING [MRL] missing keys: ['transformer.embeddings.word_embeddings.weight', 'transformer.embeddings.position_embeddings.weight', 'transformer.embeddings.token_type_embeddings.weight', 'transformer.embeddings.LayerNorm.weight', 'transformer.embeddings.LayerNorm.bias']...
+  WARNING [MRL] unexpected keys: ['encoder.transformer.embeddings.word_embeddings.weight', 'encoder.transformer.embeddings.position_embeddings.weight', 'encoder.transformer.embeddings.token_type_embeddings.weight', 'encoder.transformer.embeddings.LayerNorm.weight', 'encoder.transformer.embeddings.LayerNorm.bias']...
+  Loaded MRL baseline from /tmp/bam-ckpts/best/checkpoint.pt
+  Loading corpus...
+  Corpus: 40640 passages
+  Encoding corpus...
+  Corpus embeddings: torch.Size([40640, 768])                                                                                                                                                         
+  Loading test queries...
+  Test queries: 1857
+  Using predicted Bloom labels from cache: ./data/real/test.jsonl.bloom_cache.json
+  Valid queries (positive in corpus): 1857
+  Encoding queries...
+  Computing similarities...
+  Computing MRL truncation comparisons...
+
+  === Results (N=1857) ===
+  R@1:    0.2682
+  R@5:    0.4206
+  R@10:   0.4669
+  R@50:   0.5762
+  MRR:    0.3397
+  NDCG@10:0.3662
+
+  Bloom-Stratified R@10 (query Bloom only):
+    Remember     (n=1198): R@10=0.5451  95% CI=[0.517, 0.573]
+    Understand   (n=  28): R@10=0.2143  95% CI=[0.071, 0.393]
+    Apply        (n= 290): R@10=0.2000  95% CI=[0.152, 0.248]
+    Analyze      (n= 110): R@10=0.4727  95% CI=[0.391, 0.564]
+    Evaluate     (n=  72): R@10=0.1944  95% CI=[0.111, 0.292]
+    Create       (n= 159): R@10=0.5283  95% CI=[0.453, 0.610]
+      Remember vs Understand: p=0.001 [**]
+      Understand vs Apply: p=1.000 [ns]
+      Apply vs Analyze: p=0.000 [**]
+      Analyze vs Evaluate: p=0.000 [**]
+      Evaluate vs Create: p=0.000 [**]
+
+============================================================
+BAM v4 Option B (scattered mask)
+============================================================
+  Loaded BAM from /tmp/bam-v4-ckpts/best/checkpoint.pt
+  Loading corpus...
+  Corpus: 40640 passages
+  Encoding corpus...
+  Corpus embeddings: torch.Size([40640, 768])                                                                                                                                                         
+  Loading test queries...
+  Test queries: 1857
+  Using predicted Bloom labels from cache: ./data/real/test.jsonl.bloom_cache.json
+  Valid queries (positive in corpus): 1857
+  Encoding queries...
+  Computing similarities...
+
+  === Results (N=1857) ===
+  R@1:    0.3253
+  R@5:    0.5116
+  R@10:   0.5670
+  R@50:   0.7114
+  MRR:    0.4130
+  NDCG@10:0.4442
+  Active dims: 413 / 768  (sparse_ratio=0.46 [scattered — NOT FAISS sub-index])
+
+  Bloom-Stratified R@10 (query Bloom only):
+    Remember     (n=1198): R@10=0.6352  95% CI=[0.609, 0.663]  dim=426
+    Understand   (n=  28): R@10=0.3571  95% CI=[0.214, 0.536]  dim=380
+    Apply        (n= 290): R@10=0.3276  95% CI=[0.272, 0.379]  dim=366
+    Analyze      (n= 110): R@10=0.5273  95% CI=[0.436, 0.618]  dim=406
+    Evaluate     (n=  72): R@10=0.2639  95% CI=[0.153, 0.361]  dim=377
+    Create       (n= 159): R@10=0.6918  95% CI=[0.616, 0.767]  dim=421
+      Remember vs Understand: p=0.002 [**]
+      Understand vs Apply: p=0.843 [ns]
+      Apply vs Analyze: p=0.000 [**]
+      Analyze vs Evaluate: p=0.001 [**]
+      Evaluate vs Create: p=0.000 [**]
+
+============================================================
+MRL Baseline
+============================================================
+  Loaded MRL baseline from /tmp/mrl-ckpts/best/checkpoint.pt
+  Loading corpus...
+  Corpus: 40640 passages
+  Encoding corpus...
+  Corpus embeddings: torch.Size([40640, 768])                                                                                                                                                         
+  Loading test queries...
+  Test queries: 1857
+  Using predicted Bloom labels from cache: ./data/real/test.jsonl.bloom_cache.json
+  Valid queries (positive in corpus): 1857
+  Encoding queries...
+  Computing similarities...
+  Computing MRL truncation comparisons...
+
+  === Results (N=1857) ===
+  R@1:    0.2973
+  R@5:    0.4550
+  R@10:   0.5100
+  R@50:   0.6543
+  MRR:    0.3740
+  NDCG@10:0.4010
+
+  Bloom-Stratified R@10 (query Bloom only):
+    Remember     (n=1198): R@10=0.5726  95% CI=[0.546, 0.602]
+    Understand   (n=  28): R@10=0.3214  95% CI=[0.179, 0.500]
+    Apply        (n= 290): R@10=0.2759  95% CI=[0.228, 0.328]
+    Analyze      (n= 110): R@10=0.5091  95% CI=[0.418, 0.600]
+    Evaluate     (n=  72): R@10=0.2361  95% CI=[0.139, 0.333]
+    Create       (n= 159): R@10=0.6226  95% CI=[0.547, 0.698]
+      Remember vs Understand: p=0.012 [*]
+      Understand vs Apply: p=0.655 [ns]
+      Apply vs Analyze: p=0.000 [**]
+      Analyze vs Evaluate: p=0.001 [**]
+      Evaluate vs Create: p=0.000 [**]
+
+================================================================================
+RESULTS
+================================================================================
+Metric                                                  BAMBAM Encoder (no routing)BAM v4 (Option B)  MRL Baseline
+------------------------------------------------------------------------------------------------------------------
+recall@1                                             0.3145        0.2682        0.3253        0.2973
+recall@5                                             0.4830        0.4206        0.5116        0.4550
+recall@10                                            0.5412        0.4669        0.5670        0.5100
+recall@50                                            0.6699        0.5762        0.7114        0.6543
+mrr                                                  0.3948        0.3397        0.4130        0.3740
+ndcg@10                                              0.4247        0.3662        0.4442        0.4010
+
+avg_active_dims                                         447
+
+Bloom-Stratified R@10                        
+------------------------------------------------------------------------------------------------------------------
+  Remember                                           0.6135        0.5451        0.6352        0.5726
+                                               (n=1198, 95% CI=[0.588, 0.641])
+  Understand                                         0.2857        0.2143        0.3571        0.3214
+                                               (n=28, 95% CI=[0.143, 0.464])
+  Apply                                              0.2724        0.2000        0.3276        0.2759
+                                               (n=290, 95% CI=[0.224, 0.321])
+  Analyze                                            0.5455        0.4727        0.5273        0.5091
+                                               (n=110, 95% CI=[0.455, 0.636])
+  Evaluate                                           0.2500        0.1944        0.2639        0.2361
+                                               (n=72, 95% CI=[0.153, 0.361])
+  Create                                             0.6604        0.5283        0.6918        0.6226
+                                               (n=159, 95% CI=[0.585, 0.730])
+
+Avg Active Dims per Bloom Level              
+  Remember                                              447             0           426             0
+  Understand                                            447             0           380             0
+  Apply                                                 447             0           366             0
+  Analyze                                               447             0           406             0
+  Evaluate                                              447             0           377             0
+  Create                                                447             0           421             0
+
+Truncation R@10 comparison                   
+-------------------------------------------------------
+    Dims       MRL    MRL-cont    BAM-enc   BAM (routed)
+      64    0.4254                 0.3834
+     128    0.4707                 0.4292
+     256    0.4954                 0.4459
+     384    0.5003                 0.4567
+     512    0.4997                 0.4599
+     768    0.5094                 0.4663
+    ~447                                          0.5412  ← BAM routed
+
+============================================================
+BAM v4 Mask Specialization
+============================================================
+  Pairwise cosine similarity between Bloom-level average masks:
+                    Remember  Understand       Apply     Analyze    Evaluate      Create
+  Remember             1.000       0.950       0.947       0.971       0.965       0.969
+  Understand           0.950       1.000       0.960       0.959       0.958       0.949
+  Apply                0.947       0.960       1.000       0.964       0.961       0.953
+  Analyze              0.971       0.959       0.964       1.000       0.969       0.970
+  Evaluate             0.965       0.958       0.961       0.969       1.000       0.963
+  Create               0.969       0.949       0.953       0.970       0.963       1.000
+  Saved to ./results/bam_eval/mask_specialization_summary.json
