@@ -137,12 +137,14 @@ class BloomDimRouter(nn.Module):
         )
 
         with torch.no_grad():
-            nn.init.normal_(self.bloom_emb.weight, mean=0.0, std=0.05)
+            nn.init.normal_(self.bloom_emb.weight, mean=0.0, std=0.02)
             # dim_head[0]: leave PyTorch Kaiming default (do NOT zero-initialize)
-            # dim_head[2] weight: leave PyTorch Kaiming default — zero-init blocks gradient
-            #   flow to bloom_emb entirely (∂logit/∂hidden = weight = 0), so all 6 levels
-            #   receive zero gradient and are permanently locked at 448 dims.
-            # dim_head[2] bias: zero → sigmoid(0) = 0.5 → midpoint ~448 dims at start.
+            # dim_head[2]: zero weight + zero bias → logit=0 → sigmoid(0)=0.5
+            #   → all levels start at ~448 dims (midpoint). ✓
+            #   Zero weight forces all 6 levels through the same gradient path
+            #   (uniform compression) — efficiency cognitive weights then create
+            #   differentiation: Remember (cw=1.0) compresses fastest, Create (cw=0.167) slowest.
+            nn.init.zeros_(self.dim_head[2].weight)
             nn.init.zeros_(self.dim_head[2].bias)
 
     def _all_dims(self) -> torch.Tensor:
