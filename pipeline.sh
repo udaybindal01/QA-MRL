@@ -402,7 +402,6 @@ run_beir() {
 # MAIN DISPATCH
 # ─────────────────────────────────────────────────────────────────────────────
 if [[ "$STEP" == "all" ]]; then
-    should_run install    && run_install
     should_run data       && run_data
     should_run train_mrl  && run_train_mrl
     should_run find_mrl   && run_find_mrl
