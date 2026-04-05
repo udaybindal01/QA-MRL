@@ -39,13 +39,17 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.05     # Active only after encoder_warmup_epochs (reduced to give diversity room)
+    efficiency_weight: 0.1      # Restored from 0.05: 0.05 was too weak (contrastive 1.0 dominated 20:1)
+                                # and caused unconstrained high-dim selection. 0.3 over-compressed to
+                                # 204 dims; 0.1 is the confirmed working balance.
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
-    diversity_weight: 0.2       # Penalize all Bloom levels collapsing to same dim (Option A); was 0.05, too weak
+    diversity_weight: 0.2       # Penalize all Bloom levels collapsing to same dim (Option A)
     mask_sparsity_weight: 0.1   # Sparsity loss weight (Option B only)
     mask_diversity_weight: 0.05 # Mask diversity loss weight (Option B only)
-    encoder_warmup_epochs: 5    # Full model: first 5 epochs efficiency=0, build encoder quality
-                                # Frozen encoder: override to 0 via --encoder_warmup_epochs 0
+    encoder_warmup_epochs: 3    # Reduced from 5: efficiency kicks in at epoch 3 instead of 5.
+                                # Diversity loss was pushing levels to 768 for 5 epochs with no
+                                # compression counterforce; model anchored at high dims before
+                                # efficiency ever activated.
     temperature_schedule:
       start: 0.1                # Warm start — smooth gradients while encoder is learning
       end: 0.02                 # Cold end — sharp distribution that specifically improves R@1
