@@ -5,7 +5,7 @@
 #SBATCH --mem-per-cpu=4000
 #SBATCH -o output_bam_v4.out
 #SBATCH --time="4-00:00:00"
-#SBATCH -w gnode079
+#SBATCH -w gnode073
 
 echo "Time at entrypoint: $(date)"
 echo "Working directory: ${PWD}"
