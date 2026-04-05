@@ -53,23 +53,23 @@ class BloomMaskedContrastiveLoss(nn.Module):
         negative_embs: Optional[torch.Tensor] = None,
         bloom_labels: Optional[torch.Tensor] = None,
     ):
-        # Query is masked; documents (positive + negatives) are NOT masked.
-        # This matches eval: masked_q · full_doc dot product.
-        # Masking documents during training (masked_q · masked_doc) inflated
-        # positive similarity relative to eval because masked_doc has a higher
-        # per-active-dim magnitude than full_doc (normalized over fewer dims).
+        # Both query and documents are masked with the query mask during training.
+        # This operates the contrastive loss in the same reduced-dim subspace that
+        # the router selects, making the loss directly reward good retrieval within
+        # the chosen dims rather than fighting to match against full 768-dim docs.
         masked_q = F.normalize(query_emb * query_mask, p=2, dim=-1)
-        full_p   = F.normalize(positive_emb, p=2, dim=-1)
+        masked_p = F.normalize(positive_emb * query_mask, p=2, dim=-1)
 
         if negative_embs is not None:
-            full_n = F.normalize(negative_embs, p=2, dim=-1)   # [B, N, D]
-            pos_sim = (masked_q * full_p).sum(dim=-1) / self.temperature
-            neg_sim = torch.bmm(full_n, masked_q.unsqueeze(-1)).squeeze(-1) / self.temperature
+            mask_exp = query_mask.unsqueeze(1).expand_as(negative_embs)
+            masked_n = F.normalize(negative_embs * mask_exp, p=2, dim=-1)  # [B, N, D]
+            pos_sim = (masked_q * masked_p).sum(dim=-1) / self.temperature
+            neg_sim = torch.bmm(masked_n, masked_q.unsqueeze(-1)).squeeze(-1) / self.temperature
             logits = torch.cat([pos_sim.unsqueeze(-1), neg_sim], dim=-1)
             labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
             per_sample_loss = F.cross_entropy(logits, labels, reduction="none")
         else:
-            sim = torch.mm(masked_q, full_p.t()) / self.temperature
+            sim = torch.mm(masked_q, masked_p.t()) / self.temperature
             labels = torch.arange(sim.size(0), device=sim.device)
             per_sample_loss = F.cross_entropy(sim, labels, reduction="none")
 
