@@ -39,20 +39,24 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.1      # Restored from 0.05: 0.05 was too weak (contrastive 1.0 dominated 20:1)
-                                # and caused unconstrained high-dim selection. 0.3 over-compressed to
-                                # 204 dims; 0.1 is the confirmed working balance.
+    efficiency_weight: 0.2      # Doubled from 0.1: diversity removal means efficiency must create
+                                # the full cognitive ordering. Creates ~200-250 dim spread between
+                                # Remember (cw=1.0 → strong push) and Create (cw=0.167 → weak push).
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
-    diversity_weight: 0.05      # Gentle separation — Kaiming init now gives gradient flow so
-                                 # efficiency (0.1) handles cognitive ordering (Remember↓, Create↑).
-                                 # 0.2 was drowning out efficiency: levels ordered by random init, not
-                                 # cognitive weights (Understand→463, Evaluate→429 was backwards).
+    diversity_weight: 0.0       # REMOVED. RouterDiversityLoss was always a workaround for the
+                                # zero-init trap (dim_head[2].weight=0 blocked bloom_emb gradients).
+                                # With Kaiming init fix, gradients flow properly. Diversity applies to
+                                # ALL 6 levels every step (via _all_dims()), but efficiency only to
+                                # levels in the batch — rare levels (Understand 1.4%, Evaluate ~5%)
+                                # were governed entirely by diversity → wrong ordering by random init
+                                # (Understand→463, Evaluate→429 was backwards). Efficiency alone with
+                                # cognitive weights gives the correct ordering: Remember↓, Create↑.
     mask_sparsity_weight: 0.1   # Sparsity loss weight (Option B only)
     mask_diversity_weight: 0.05 # Mask diversity loss weight (Option B only)
-    encoder_warmup_epochs: 3    # Reduced from 5: efficiency kicks in at epoch 3 instead of 5.
-                                # Diversity loss was pushing levels to 768 for 5 epochs with no
-                                # compression counterforce; model anchored at high dims before
-                                # efficiency ever activated.
+    encoder_warmup_epochs: 5    # Restored to 5. Without diversity there is no warmup anchoring at 768,
+                                # so 5 epochs is safe. Encoder develops compact representations via MRL
+                                # anchor loss before efficiency activates, reducing contrastive
+                                # resistance when compression starts → cleaner cognitive ordering.
     temperature_schedule:
       start: 0.1                # Warm start — smooth gradients while encoder is learning
       end: 0.02                 # Cold end — sharp distribution that specifically improves R@1
