@@ -110,10 +110,10 @@ best_ckpt() {
 run_data() {
     log "STEP 1/11 — DATA PREPARATION"
 
-    python data/build_real_data.py \
+    python3 data/build_real_data.py \
         || die "build_real_data.py failed"
 
-    python data/annotate_bloom_pretrained.py \
+    python3 data/annotate_bloom_pretrained.py \
         --data_dir "$DATA_DIR" \
         --method pretrained \
         || die "annotate_bloom_pretrained.py failed"
@@ -121,7 +121,7 @@ run_data() {
     # Bloom prediction caches (.bloom_cache.json) are generated automatically
     # by EducationalRetrievalDataset on first training run — no extra step needed.
 
-    python data/curriculum_negatives.py \
+    python3 data/curriculum_negatives.py \
         --pairs   "$DATA_DIR/train.jsonl" \
         --corpus  "$DATA_DIR/corpus.jsonl" \
         --output  "$DATA_DIR/train_curriculum.jsonl" \
@@ -145,7 +145,7 @@ run_train_mrl() {
     [[ -f "$DATA_DIR/train.jsonl" ]] \
         || die "train.jsonl not found. Run: ./pipeline.sh --step data first."
 
-    python scripts/train_baseline_mrl.py \
+    python3 scripts/train_baseline_mrl.py \
         --config "$MRL_CONFIG" \
         || die "train_baseline_mrl.py failed"
 
@@ -163,7 +163,7 @@ run_find_mrl() {
 
     mkdir -p "$RESULTS_DIR/best_epochs/mrl"
 
-    python scripts/find_best_epoch.py \
+    python3 scripts/find_best_epoch.py \
         --checkpoint_dir "$MRL_CKPT_DIR" \
         --config         "$MRL_CONFIG" \
         --model_type     mrl \
@@ -184,7 +184,7 @@ run_train_bam() {
     [[ -f "$MRL_BEST/checkpoint.pt" ]] \
         || die "MRL best checkpoint not found at $MRL_BEST. Run find_mrl first."
 
-    python scripts/train_bam.py \
+    python3 scripts/train_bam.py \
         --config       "$BAM_CONFIG" \
         --init_encoder "$MRL_BEST" \
         || die "train_bam.py (Option A) failed"
@@ -202,7 +202,7 @@ run_train_v4() {
     [[ -f "$MRL_BEST/checkpoint.pt" ]] \
         || die "MRL best checkpoint not found at $MRL_BEST. Run find_mrl first."
 
-    python scripts/train_bam.py \
+    python3 scripts/train_bam.py \
         --config       "$BAM_V4_CONFIG" \
         --init_encoder "$MRL_BEST" \
         || die "train_bam.py (Option B) failed"
@@ -221,7 +221,7 @@ run_find_best() {
     [[ -d "$BAM_CKPT_DIR/epoch_0" ]] \
         || die "No BAM epoch checkpoints at $BAM_CKPT_DIR. Run train_bam first."
 
-    python scripts/find_best_epoch.py \
+    python3 scripts/find_best_epoch.py \
         --checkpoint_dir "$BAM_CKPT_DIR" \
         --config         "$BAM_CONFIG" \
         --model_type     bam \
@@ -233,7 +233,7 @@ run_find_best() {
     [[ -d "$BAM_V4_CKPT_DIR/epoch_0" ]] \
         || die "No BAM v4 epoch checkpoints at $BAM_V4_CKPT_DIR. Run train_v4 first."
 
-    python scripts/find_best_epoch.py \
+    python3 scripts/find_best_epoch.py \
         --checkpoint_dir  "$BAM_V4_CKPT_DIR" \
         --config          "$BAM_V4_CONFIG" \
         --model_type      bam \
@@ -261,7 +261,7 @@ run_eval() {
     [[ -f "$MRL_BEST/checkpoint.pt"    ]] || die "MRL checkpoint missing: $MRL_BEST"
     [[ -f "$BAM_V4_BEST/checkpoint.pt" ]] || die "BAM-B checkpoint missing: $BAM_V4_BEST"
 
-    python scripts/eval_bam.py \
+    python3 scripts/eval_bam.py \
         --config          "$BAM_CONFIG" \
         --checkpoint      "$BAM_BEST" \
         --baseline        "$MRL_BEST" \
@@ -286,7 +286,7 @@ run_ablations() {
 
     [[ -f "$BAM_BEST/checkpoint.pt" ]] || die "BAM-A checkpoint missing: $BAM_BEST"
 
-    python scripts/run_ablations.py \
+    python3 scripts/run_ablations.py \
         --config          "$BAM_CONFIG" \
         --checkpoint      "$BAM_BEST" \
         --baseline        "$MRL_BEST" \
@@ -312,35 +312,35 @@ run_analysis() {
     [[ -f "$BAM_V4_BEST/checkpoint.pt" ]] || die "BAM-B checkpoint missing: $BAM_V4_BEST"
 
     echo "  [1/5] Routing ambiguity..."
-    python scripts/analyze_routing_ambiguity.py \
+    python3 scripts/analyze_routing_ambiguity.py \
         --config "$BAM_CONFIG" \
         --checkpoint "$BAM_BEST" \
         --output_dir "$RESULTS_DIR/analysis/" \
         || echo "  WARNING: analyze_routing_ambiguity.py failed (non-fatal)"
 
     echo "  [2/5] Evaluate-level failure analysis..."
-    python scripts/analyze_evaluate_failures.py \
+    python3 scripts/analyze_evaluate_failures.py \
         --config "$BAM_CONFIG" \
         --checkpoint "$BAM_BEST" \
         --output_dir "$RESULTS_DIR/analysis/" \
         || echo "  WARNING: analyze_evaluate_failures.py failed (non-fatal)"
 
     echo "  [3/5] Classifier robustness + accuracy (reviewer C)..."
-    python scripts/analyze_classifier_robustness.py \
+    python3 scripts/analyze_classifier_robustness.py \
         --config "$BAM_CONFIG" \
         --checkpoint "$BAM_BEST" \
         --output_dir "$RESULTS_DIR/analysis/" \
         || die "analyze_classifier_robustness.py failed"
 
     echo "  [4/5] Mask specialization (Option B)..."
-    python scripts/analyze_mask_specialization.py \
+    python3 scripts/analyze_mask_specialization.py \
         --config "$BAM_V4_CONFIG" \
         --checkpoint "$BAM_V4_BEST" \
         --output_dir "$RESULTS_DIR/analysis/" \
         || echo "  WARNING: analyze_mask_specialization.py failed (non-fatal)"
 
     echo "  [5/5] Bloom dim allocation — cognitive load hypothesis test (reviewer B)..."
-    python scripts/analyze_bloom_dim_allocation.py \
+    python3 scripts/analyze_bloom_dim_allocation.py \
         --config "$BAM_V4_CONFIG" \
         --checkpoint "$BAM_V4_BEST" \
         --output_dir "$RESULTS_DIR/analysis/" \
@@ -360,7 +360,7 @@ run_efficiency() {
     BAM_BEST=$(best_ckpt "$RESULTS_DIR/best_epochs/bam" "$BAM_CKPT_DIR/best")
     [[ -f "$BAM_BEST/checkpoint.pt" ]] || die "BAM-A checkpoint missing: $BAM_BEST"
 
-    python -m evaluation.bloom_subindex \
+    python3 -m evaluation.bloom_subindex \
         --config "$BAM_CONFIG" \
         --checkpoint "$BAM_BEST" \
         --output_dir "$RESULTS_DIR/efficiency/" \
@@ -382,7 +382,7 @@ run_beir() {
     [[ -f "$BAM_BEST/checkpoint.pt" ]] || die "BAM-A checkpoint missing: $BAM_BEST"
     [[ -f "$MRL_BEST/checkpoint.pt" ]] || die "MRL checkpoint missing: $MRL_BEST"
 
-    python scripts/eval_beir.py \
+    python3 scripts/eval_beir.py \
         --config     "$MRL_CONFIG" \
         --checkpoint "$BAM_BEST" \
         --baseline   "$MRL_BEST" \
