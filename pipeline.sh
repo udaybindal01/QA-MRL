@@ -61,7 +61,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-ALL_STEPS=(data train_mrl find_mrl train_bam train_v4 find_best eval ablations analysis efficiency beir)
+ALL_STEPS=(install data train_mrl find_mrl train_bam train_v4 find_best eval ablations analysis efficiency beir)
 
 # Resolve --from: set STEP=all but skip earlier steps
 if [[ -n "$FROM_STEP" ]]; then
@@ -102,6 +102,17 @@ best_ckpt() {
     local results_dir="$1" fallback="$2"
     local f="$results_dir/best_checkpoint_path.txt"
     if [[ -f "$f" ]]; then cat "$f"; else echo "$fallback"; fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 0 — INSTALL DEPENDENCIES
+# ─────────────────────────────────────────────────────────────────────────────
+run_install() {
+    log "STEP 0 — INSTALLING DEPENDENCIES"
+    python3 -m pip install --upgrade pip
+    python3 -m pip install -r requirements.txt \
+        || die "pip install -r requirements.txt failed"
+    echo "Dependencies installed."
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -397,6 +408,7 @@ run_beir() {
 # MAIN DISPATCH
 # ─────────────────────────────────────────────────────────────────────────────
 if [[ "$STEP" == "all" ]]; then
+    should_run install    && run_install
     should_run data       && run_data
     should_run train_mrl  && run_train_mrl
     should_run find_mrl   && run_find_mrl
@@ -420,6 +432,7 @@ if [[ "$STEP" == "all" ]]; then
     echo "    $RESULTS_DIR/beir/                          ← cross-domain"
 else
     case "$STEP" in
+        install)    run_install ;;
         data)       run_data ;;
         train_mrl)  run_train_mrl ;;
         find_mrl)   run_find_mrl ;;
