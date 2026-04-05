@@ -43,7 +43,10 @@ training:
                                 # and caused unconstrained high-dim selection. 0.3 over-compressed to
                                 # 204 dims; 0.1 is the confirmed working balance.
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
-    diversity_weight: 0.2       # Penalize all Bloom levels collapsing to same dim (Option A)
+    diversity_weight: 0.05      # Gentle separation — Kaiming init now gives gradient flow so
+                                 # efficiency (0.1) handles cognitive ordering (Remember↓, Create↑).
+                                 # 0.2 was drowning out efficiency: levels ordered by random init, not
+                                 # cognitive weights (Understand→463, Evaluate→429 was backwards).
     mask_sparsity_weight: 0.1   # Sparsity loss weight (Option B only)
     mask_diversity_weight: 0.05 # Mask diversity loss weight (Option B only)
     encoder_warmup_epochs: 3    # Reduced from 5: efficiency kicks in at epoch 3 instead of 5.
