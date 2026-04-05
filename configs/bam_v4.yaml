@@ -58,8 +58,13 @@ training:
     diversity_weight: 0.0        # Not used for Option B (no prefix dims to spread)
     mask_sparsity_weight: 0.25   # Sole compression signal now efficiency is off. Stronger
                                  # to maintain per-level targets against contrastive pressure.
-    mask_diversity_weight: 0.15  # Push different Bloom levels to select different dims.
+    mask_diversity_weight: 0.25  # Push different Bloom levels to select different dims.
+                                 # Increased 0.15 → 0.25: pairwise cosine still 0.95+ at 0.15.
     mask_diversity_margin: 0.3   # Tight margin (was 0.7). At sim=0.97, penalty=0.67 vs 0.27.
+    mask_variance_weight: 0.5    # Per-dimension variance across Bloom levels (new in v9).
+                                 # Rewards each dim being "owned" by specific Bloom levels.
+                                 # 768 gradient signals vs 15 pairs in diversity loss —
+                                 # much stronger signal to break the 0.95+ cosine similarity.
     # mask_level_targets removed: per-level cognitive targets (0.40–0.65) baked the
     # cognitive load hypothesis directly into the training signal, making any claim
     # that the model "validates" the hypothesis circular. Instead we use a uniform

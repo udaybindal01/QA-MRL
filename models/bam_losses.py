@@ -1,5 +1,9 @@
 """
-BAM Training Losses v8.
+BAM Training Losses v9.
+
+New in v9:
+  BloomMaskVarianceLoss  — maximises per-dim variance of mean activation across Bloom levels;
+                           768 gradient signals vs 15 pairs in DiversityLoss; weight 0.5 in config
 
 New in v8:
   BloomMaskSparsityLoss  — keeps Option B mask active dims near target (default 339/768 ≈ 0.44)
@@ -299,6 +303,55 @@ class BloomMaskDiversityLoss(nn.Module):
         return loss, {"mask_diversity": loss.item()}
 
 
+class BloomMaskVarianceLoss(nn.Module):
+    """
+    Maximizes per-dimension activation variance across Bloom levels (Option B).
+
+    For each of the 768 dimensions, computes the variance of mean activation
+    probability across all Bloom levels present in the batch. Maximizing this
+    rewards each dimension being "owned" by specific Bloom levels rather than
+    uniformly active or inactive across all levels.
+
+    Why this works better than pairwise cosine diversity:
+      - Operates at the dimension level (768 signals) vs pair level (15 signals)
+      - Directly rewards specialization: dim d has high variance if it's active
+        for Remember queries but inactive for Create queries (or vice versa)
+      - Gradient flows to individual soft_mask entries, not just their aggregate
+
+    L = -mean_d( Var_b( mean_{i: bloom_i=b}(soft_mask[i, d]) ) )
+
+    We negate because we minimise loss but want to maximise variance.
+    Scale: soft_mask ∈ [0,1], so max variance per dim ≈ 0.25 (Bernoulli).
+    A weight of 0.5–1.0 is appropriate relative to sparsity/diversity losses.
+    """
+
+    def forward(
+        self,
+        soft_mask: torch.Tensor,    # [B, 768] sigmoid outputs
+        bloom_labels: torch.Tensor, # [B] int 0-indexed
+    ) -> tuple:
+        level_means = []
+        for b in range(6):
+            idx = bloom_labels == b
+            if idx.sum() > 0:
+                level_means.append(soft_mask[idx].mean(dim=0))  # [768]
+
+        if len(level_means) < 2:
+            return torch.tensor(0.0, device=soft_mask.device), {"mask_variance": 0.0}
+
+        stacked = torch.stack(level_means, dim=0)   # [L, 768]
+        # Variance across levels for each dim (unbiased=False: L can be small)
+        col_var = stacked.var(dim=0, unbiased=False)  # [768]
+        # Maximise variance → minimise its negative
+        loss = -col_var.mean()
+
+        return loss, {
+            "mask_variance": col_var.mean().item(),
+            "mask_var_max_dim": col_var.max().item(),
+            "mask_var_min_dim": col_var.min().item(),
+        }
+
+
 # ---------------------------------------------------------------------------
 # PCGrad optimizer wrapper (optional, Challenge 1 fix)
 # ---------------------------------------------------------------------------
@@ -425,8 +478,9 @@ class BAMCombinedLoss(nn.Module):
         self.efficiency_weight    = lc.get("efficiency_weight", 0.3)
         self.mrl_anchor_weight    = lc.get("mrl_anchor_weight", 0.2)
         self.diversity_weight     = lc.get("diversity_weight", 0.05)
-        self.mask_sparsity_weight = lc.get("mask_sparsity_weight", 0.1)
+        self.mask_sparsity_weight  = lc.get("mask_sparsity_weight", 0.1)
         self.mask_diversity_weight = lc.get("mask_diversity_weight", 0.05)
+        self.mask_variance_weight  = lc.get("mask_variance_weight", 0.0)
 
         freqs = lc.get("bloom_frequencies")
         if freqs is None:
@@ -467,6 +521,7 @@ class BAMCombinedLoss(nn.Module):
         )
         diversity_margin = lc.get("mask_diversity_margin", 0.3)
         self.mask_diversity = BloomMaskDiversityLoss(margin=diversity_margin)
+        self.mask_variance  = BloomMaskVarianceLoss()
 
     def set_epoch(self, epoch: int, total_epochs: int, freeze_encoder: bool = False):
         """
@@ -542,14 +597,17 @@ class BAMCombinedLoss(nn.Module):
             d_stats["diversity"] = l_d.item()
             d_stats["dim_variance"] = float(all_bloom_dims.var().item())
 
-        # Option B: mask sparsity + diversity
+        # Option B: mask sparsity + diversity + variance
         if soft_mask is not None:
             l_sp, sp_stats = self.mask_sparsity(soft_mask, bloom_labels)
             l_md, md_stats = self.mask_diversity(soft_mask, bloom_labels)
-            total = total + self.mask_sparsity_weight * l_sp
+            l_mv, mv_stats = self.mask_variance(soft_mask, bloom_labels)
+            total = total + self.mask_sparsity_weight  * l_sp
             total = total + self.mask_diversity_weight * l_md
+            total = total + self.mask_variance_weight  * l_mv
             d_stats.update(sp_stats)
             d_stats.update(md_stats)
+            d_stats.update(mv_stats)
 
         stats = {}
         stats.update(c_stats)
@@ -607,7 +665,9 @@ class BAMCombinedLoss(nn.Module):
         if soft_mask is not None:
             l_sp, _ = self.mask_sparsity(soft_mask, bloom_labels)
             l_md, _ = self.mask_diversity(soft_mask, bloom_labels)
-            routing = routing + self.mask_sparsity_weight * l_sp
+            l_mv, _ = self.mask_variance(soft_mask, bloom_labels)
+            routing = routing + self.mask_sparsity_weight  * l_sp
             routing = routing + self.mask_diversity_weight * l_md
+            routing = routing + self.mask_variance_weight  * l_mv
 
         return self.contrastive_weight * l_c, routing
