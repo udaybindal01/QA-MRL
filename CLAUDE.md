@@ -68,7 +68,7 @@ Documents: always encoded at full 768 dims; dot-product naturally ignores zero q
 ### BAM v4 key design decisions
 - **Bloom is query-only**: documents have no Bloom labels (labeling documents causes contrastive loss misalignment)
 - **`BloomDimRouter`**: 6 independent learned embeddings → 2-layer MLP → sigmoid → continuous dim ∈ [128, 768]. STE: hard prefix mask in forward, soft sigmoid in backward. NOT a lookup table.
-- **Zero-init trap**: `dim_head[2]` (output layer) is zero-initialized for midpoint start (~448 dims); `dim_head[0]` (hidden layer) uses Kaiming default — zeroing it would collapse all levels to identical gradient paths.
+- **Zero-init trap**: `dim_head[2].bias=0` for midpoint start (~448 dims); `dim_head[2].weight` uses Kaiming default (do NOT zero — zeroing blocks ∂logit/∂hidden = weight = 0, starving bloom_emb of gradients entirely and locking all levels at 448 forever). `dim_head[0]` also uses Kaiming default.
 - **No early stopping**: trains all 15 epochs, saves every epoch for post-hoc selection via `find_best_epoch.py`. In-batch val NDCG is an approximation only.
 - **Temperature annealing**: cosine 0.1→0.02 for unfrozen encoder; fixed at `temp_end` when encoder is frozen (annealing with frozen encoder parks the router at equilibrium).
 - **Efficiency loss gate**: `encoder_warmup_epochs` (default 5) — efficiency loss is zero while encoder builds quality, then activates.

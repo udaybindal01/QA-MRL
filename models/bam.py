@@ -137,9 +137,12 @@ class BloomDimRouter(nn.Module):
         )
 
         with torch.no_grad():
-            nn.init.normal_(self.bloom_emb.weight, mean=0.0, std=0.02)
+            nn.init.normal_(self.bloom_emb.weight, mean=0.0, std=0.05)
             # dim_head[0]: leave PyTorch Kaiming default (do NOT zero-initialize)
-            nn.init.zeros_(self.dim_head[2].weight)
+            # dim_head[2] weight: leave PyTorch Kaiming default — zero-init blocks gradient
+            #   flow to bloom_emb entirely (∂logit/∂hidden = weight = 0), so all 6 levels
+            #   receive zero gradient and are permanently locked at 448 dims.
+            # dim_head[2] bias: zero → sigmoid(0) = 0.5 → midpoint ~448 dims at start.
             nn.init.zeros_(self.dim_head[2].bias)
 
     def _all_dims(self) -> torch.Tensor:
