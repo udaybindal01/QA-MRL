@@ -53,23 +53,23 @@ class BloomMaskedContrastiveLoss(nn.Module):
         negative_embs: Optional[torch.Tensor] = None,
         bloom_labels: Optional[torch.Tensor] = None,
     ):
-        # Both query and documents are masked with the query mask during training.
-        # This operates the contrastive loss in the same reduced-dim subspace that
-        # the router selects, making the loss directly reward good retrieval within
-        # the chosen dims rather than fighting to match against full 768-dim docs.
+        # Query is masked; documents use full embeddings.
+        # Masking both query and document leaves similarity approximately unchanged
+        # (both lose the same dims), which kills the router gradient signal.
+        # Using full docs gives the router a clear learning signal: the masked query
+        # must retrieve full-dim documents, so keeping informative dims is rewarded.
         masked_q = F.normalize(query_emb * query_mask, p=2, dim=-1)
-        masked_p = F.normalize(positive_emb * query_mask, p=2, dim=-1)
+        full_p = F.normalize(positive_emb, p=2, dim=-1)
 
         if negative_embs is not None:
-            mask_exp = query_mask.unsqueeze(1).expand_as(negative_embs)
-            masked_n = F.normalize(negative_embs * mask_exp, p=2, dim=-1)  # [B, N, D]
-            pos_sim = (masked_q * masked_p).sum(dim=-1) / self.temperature
-            neg_sim = torch.bmm(masked_n, masked_q.unsqueeze(-1)).squeeze(-1) / self.temperature
+            full_n = F.normalize(negative_embs, p=2, dim=-1)               # [B, N, D]
+            pos_sim = (masked_q * full_p).sum(dim=-1) / self.temperature
+            neg_sim = torch.bmm(full_n, masked_q.unsqueeze(-1)).squeeze(-1) / self.temperature
             logits = torch.cat([pos_sim.unsqueeze(-1), neg_sim], dim=-1)
             labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
             per_sample_loss = F.cross_entropy(logits, labels, reduction="none")
         else:
-            sim = torch.mm(masked_q, masked_p.t()) / self.temperature
+            sim = torch.mm(masked_q, full_p.t()) / self.temperature
             labels = torch.arange(sim.size(0), device=sim.device)
             per_sample_loss = F.cross_entropy(sim, labels, reduction="none")
 
@@ -92,45 +92,30 @@ class BloomMaskedContrastiveLoss(nn.Module):
 
 class BloomTwoFactorEfficiencyLoss(nn.Module):
     """
-    Two-factor efficiency penalty: cognitive load × sample frequency.
+    Cognitive-load efficiency penalty with per-class averaging.
 
-    L = (1/C) Σ_b [ combined_weight(b) * mean_{i: bloom_i=b}(dim_i / D) ]
+    L = (1/C) Σ_b [ cognitive(b) * mean_{i: bloom_i=b}(dim_i / D) ]
 
-    combined_weight(b) = cognitive(b) × sqrt(freq(b)), normalized to mean=1.
+    cognitive(b) = (1 - b/6): compression pressure decreases with cognitive level.
+      Remember=1.0, Understand=0.833, Apply=0.667, Analyze=0.500,
+      Evaluate=0.333, Create=0.167.
 
-    Factor 1 — cognitive load:  cognitive(b) = (1 - b/6)
-      Lower Bloom levels are cognitively simpler → can use fewer dims.
-      Remember=1.0, Understand=0.833, ..., Create=0.167.
+    Per-class averaging ensures each Bloom level contributes equal gradient weight
+    regardless of batch frequency — rare levels (Understand=1.4%) get the same
+    gradient update opportunity as common ones (Remember=63.7%).
 
-    Factor 2 — sample frequency:  freq_weight(b) = sqrt(freq(b))
-      More training samples → model has learned better representations
-      → can afford more compression without losing retrieval quality.
-      Fewer samples → model needs more dims to compensate for sparse signal.
-      sqrt dampens extreme imbalance (Remember=63% vs Understand=1.4%).
-
-    Combined effect (with actual frequencies):
-      Remember   (freq=63.7%, cog=1.000): pressure ≈ 2.32  → fewest dims
-      Apply      (freq=16.1%, cog=0.667): pressure ≈ 0.78
-      Analyze    (freq= 5.9%, cog=0.500): pressure ≈ 0.35
-      Understand (freq= 1.4%, cog=0.833): pressure ≈ 0.29
-      Evaluate   (freq= 4.6%, cog=0.333): pressure ≈ 0.21
-      Create     (freq= 8.3%, cog=0.167): pressure ≈ 0.14  → most dims
-
-    Per-class averaging ensures each Bloom level contributes equal gradient
-    weight regardless of batch frequency (rare levels still get trained).
+    bloom_frequencies accepted for API compatibility but unused — frequency
+    imbalance is handled by per-class averaging, not per-sample weighting.
+    The two-factor (cognitive × freq) approach was tried but caused Understand
+    to get too few updates (rare + low combined weight → stuck near init dims).
     """
 
     EMBEDDING_DIM = 768.0
 
     def __init__(self, bloom_frequencies: List[float]):
         super().__init__()
-        import math
-        f = torch.tensor(bloom_frequencies, dtype=torch.float).clamp(min=1e-6)
         cognitive = torch.tensor([1.0 - b / 6.0 for b in range(6)], dtype=torch.float)
-        freq_weight = f.sqrt()                          # sqrt(freq): dampen extreme imbalance
-        combined = cognitive * freq_weight
-        combined = combined / combined.mean()           # normalize to mean=1
-        self.register_buffer("combined_weights", combined)
+        self.register_buffer("cognitive_weights", cognitive)
 
     def forward(
         self,
@@ -145,7 +130,7 @@ class BloomTwoFactorEfficiencyLoss(nn.Module):
             mask = (bloom_labels == b)
             if mask.sum() == 0:
                 continue
-            cw = self.combined_weights[b]
+            cw = self.cognitive_weights[b]
             class_mean_dim = continuous_dim[mask].mean()
             total = total + cw * (class_mean_dim / self.EMBEDDING_DIM)
             n_classes += 1

@@ -43,8 +43,10 @@ training:
                                 # 0.3 over-compressed (dims hit ~242 by epoch 8, NDCG dropped to 0.528).
                                 # with frozen encoder (encoder can't adapt to resist compression).
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
-    diversity_weight: 0.0       # REMOVED. RouterDiversityLoss was always a workaround for the
-                                # zero-init trap (dim_head[2].weight=0 blocked bloom_emb gradients).
+    diversity_weight: 0.1       # Spreading force: pushes 6 Bloom levels apart in dim space.
+                                # Required alongside efficiency to get per-level differentiation.
+                                # Working v8 used diversity=0.2, efficiency=0.05 (ratio 4:1).
+                                # Here efficiency=0.1 so diversity=0.1 keeps ratio ~1:1 as a start.
                                 # With Kaiming init fix, gradients flow properly. Diversity applies to
                                 # ALL 6 levels every step (via _all_dims()), but efficiency only to
                                 # levels in the batch — rare levels (Understand 1.4%, Evaluate ~5%)
