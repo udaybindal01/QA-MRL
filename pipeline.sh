@@ -189,9 +189,13 @@ run_train_bam() {
     [[ -f "$MRL_BEST/checkpoint.pt" ]] \
         || die "MRL best checkpoint not found at $MRL_BEST. Run find_mrl first."
 
+    [[ -f "$DATA_DIR/train_curriculum.jsonl" ]] \
+        || die "train_curriculum.jsonl not found. Run: ./pipeline.sh --step data first."
+
     python3 scripts/train_bam.py \
         --config       "$BAM_CONFIG" \
         --init_encoder "$MRL_BEST" \
+        --train_path   "$DATA_DIR/train_curriculum.jsonl" \
         || die "train_bam.py (Option A) failed"
 
     echo "BAM Option A checkpoints at $BAM_CKPT_DIR/"
@@ -207,9 +211,13 @@ run_train_v4() {
     [[ -f "$MRL_BEST/checkpoint.pt" ]] \
         || die "MRL best checkpoint not found at $MRL_BEST. Run find_mrl first."
 
+    [[ -f "$DATA_DIR/train_curriculum.jsonl" ]] \
+        || die "train_curriculum.jsonl not found. Run: ./pipeline.sh --step data first."
+
     python3 scripts/train_bam.py \
         --config       "$BAM_V4_CONFIG" \
         --init_encoder "$MRL_BEST" \
+        --train_path   "$DATA_DIR/train_curriculum.jsonl" \
         || die "train_bam.py (Option B) failed"
 
     echo "BAM Option B checkpoints at $BAM_V4_CKPT_DIR/"
