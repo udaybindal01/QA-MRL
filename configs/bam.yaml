@@ -39,8 +39,8 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.3      # Two-factor loss (cognitive × frequency) with Kaiming init +
-                                # encoder freeze creates per-level differentiation. 0.3 is safe
+    efficiency_weight: 0.1      # Two-factor loss (cognitive × frequency) with Kaiming init.
+                                # 0.3 over-compressed (dims hit ~242 by epoch 8, NDCG dropped to 0.528).
                                 # with frozen encoder (encoder can't adapt to resist compression).
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
     diversity_weight: 0.0       # REMOVED. RouterDiversityLoss was always a workaround for the
