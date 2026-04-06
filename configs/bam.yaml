@@ -39,20 +39,16 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.1      # Two-factor loss (cognitive × frequency) with Kaiming init.
-                                # 0.3 over-compressed (dims hit ~242 by epoch 8, NDCG dropped to 0.528).
-                                # with frozen encoder (encoder can't adapt to resist compression).
+    efficiency_weight: 0.05     # Cognitive-only efficiency (1-b/6). v8 working condition.
+                                # 4:1 diversity/efficiency ratio drives level spread without
+                                # over-compressing. 0.1 compressed too fast (Remember→242 by epoch 8).
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
-    diversity_weight: 0.1       # Spreading force: pushes 6 Bloom levels apart in dim space.
-                                # Required alongside efficiency to get per-level differentiation.
-                                # Working v8 used diversity=0.2, efficiency=0.05 (ratio 4:1).
-                                # Here efficiency=0.1 so diversity=0.1 keeps ratio ~1:1 as a start.
-                                # With Kaiming init fix, gradients flow properly. Diversity applies to
-                                # ALL 6 levels every step (via _all_dims()), but efficiency only to
-                                # levels in the batch — rare levels (Understand 1.4%, Evaluate ~5%)
-                                # were governed entirely by diversity → wrong ordering by random init
-                                # (Understand→463, Evaluate→429 was backwards). Efficiency alone with
-                                # cognitive weights gives the correct ordering: Remember↓, Create↑.
+    diversity_weight: 0.2       # Spreading force: pushes 6 Bloom levels apart in dim space.
+                                # v8 working condition: diversity=0.2, efficiency=0.05 (4:1 ratio).
+                                # Diversity fires on all 6 levels every step via _all_dims();
+                                # efficiency fires only on levels present in batch. High diversity
+                                # relative to efficiency ensures rare levels (Understand=1.4%) get
+                                # strong spreading signal even when absent from most batches.
     mask_sparsity_weight: 0.1   # Sparsity loss weight (Option B only)
     mask_diversity_weight: 0.05 # Mask diversity loss weight (Option B only)
     encoder_warmup_epochs: 5    # Restored to 5. Without diversity there is no warmup anchoring at 768,
