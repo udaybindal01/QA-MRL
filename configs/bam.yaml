@@ -41,12 +41,7 @@ training:
     contrastive_weight: 1.0
     efficiency_weight: 0.1      # Cognitive-only efficiency (1-b/6).
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
-    diversity_weight: 0.2       # Spreading force: pushes 6 Bloom levels apart in dim space.
-                                # v8 working condition: diversity=0.2, efficiency=0.05 (4:1 ratio).
-                                # Diversity fires on all 6 levels every step via _all_dims();
-                                # efficiency fires only on levels present in batch. High diversity
-                                # relative to efficiency ensures rare levels (Understand=1.4%) get
-                                # strong spreading signal even when absent from most batches.
+    diversity_weight: 0.05      # Penalize all Bloom levels collapsing to same dim.
     mask_sparsity_weight: 0.1   # Sparsity loss weight (Option B only)
     mask_diversity_weight: 0.05 # Mask diversity loss weight (Option B only)
     encoder_warmup_epochs: 5    # Restored to 5. Without diversity there is no warmup anchoring at 768,
