@@ -62,11 +62,12 @@ training:
       end: 0.02                 # Cold end — sharp distribution that specifically improves R@1
     # bloom_frequencies injected at runtime by train_bam.py from training data
   use_pcgrad: false                 # PCGrad gradient surgery — off by default
-  encoder_freeze_after_epochs: 4    # Freeze encoder after warmup so router can learn per-level
-                                    # dims without the encoder adapting to resist compression.
-                                    # Stage 1 (0-4): full model, encoder learns quality.
-                                    # Stage 2 (5-14): frozen encoder, two-factor efficiency
-                                    # drives per-level dim assignment.
+  encoder_freeze_after_epochs: null  # No freeze — encoder trains throughout.
+                                    # Two-factor efficiency creates sufficient gradient differential:
+                                    # Remember pressure=2.32 vs Create pressure=0.14 (ratio 16.6×).
+                                    # Even if encoder resists globally, Remember gets pulled down
+                                    # much harder than Create → natural per-level differentiation
+                                    # without freezing.
                                     # Frozen encoder cannot fight back; router trains in isolation and
                                     # efficiency cleanly controls dim selection per Bloom level.
   bloom_noise_rate: 0.0             # Label noise augmentation (0 = disabled, 0.05 = 5% flip rate)
