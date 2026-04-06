@@ -175,7 +175,8 @@ class FullEvaluator:
         use_prefix_slicing = (query_dims is not None and query_full_embs is not None)
 
         if use_prefix_slicing:
-            # Option A: grouped prefix slicing — normalize(q[:k]) · normalize(d[:k])
+            # Option A: normalize(q[:k]) · normalize(c[:k]) — prefix slicing.
+            # Matches training: masked_q · masked_doc (both sides masked with query mask).
             k_values = query_dims.round().long()
             for k_val in k_values.unique():
                 k = int(k_val.item())

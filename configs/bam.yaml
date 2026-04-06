@@ -39,10 +39,7 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.1      # Cognitive-only efficiency (1-b/6). Actual v8 log condition.
-                                # f827248 config said 0.05 but the working train_bam_v8.log
-                                # shows efficiency_weight=0.100 — the log overrides the committed config.
-                                # 0.05 is too weak: W2 accumulates too slowly → diversity never fires.
+    efficiency_weight: 0.1      # Cognitive-only efficiency (1-b/6).
     mrl_anchor_weight: 0.2      # Keep encoder sharp at MRL anchor dims
     diversity_weight: 0.2       # Spreading force: pushes 6 Bloom levels apart in dim space.
                                 # v8 working condition: diversity=0.2, efficiency=0.05 (4:1 ratio).
