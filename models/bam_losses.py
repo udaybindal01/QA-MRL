@@ -92,20 +92,45 @@ class BloomMaskedContrastiveLoss(nn.Module):
 
 class BloomTwoFactorEfficiencyLoss(nn.Module):
     """
-    Efficiency penalty with per-class averaging to prevent frequency gaming.
+    Two-factor efficiency penalty: cognitive load × sample frequency.
 
-    L = (1/C) Σ_b [ cognitive(b) * mean_{i: bloom_i=b}(dim_i / D) ]
+    L = (1/C) Σ_b [ combined_weight(b) * mean_{i: bloom_i=b}(dim_i / D) ]
 
-    cognitive(b) = (1 - b/6): compression pressure decreases with cognitive level.
-    Per-class averaging ensures equal gradient contribution per Bloom level.
+    combined_weight(b) = cognitive(b) × sqrt(freq(b)), normalized to mean=1.
+
+    Factor 1 — cognitive load:  cognitive(b) = (1 - b/6)
+      Lower Bloom levels are cognitively simpler → can use fewer dims.
+      Remember=1.0, Understand=0.833, ..., Create=0.167.
+
+    Factor 2 — sample frequency:  freq_weight(b) = sqrt(freq(b))
+      More training samples → model has learned better representations
+      → can afford more compression without losing retrieval quality.
+      Fewer samples → model needs more dims to compensate for sparse signal.
+      sqrt dampens extreme imbalance (Remember=63% vs Understand=1.4%).
+
+    Combined effect (with actual frequencies):
+      Remember   (freq=63.7%, cog=1.000): pressure ≈ 2.32  → fewest dims
+      Apply      (freq=16.1%, cog=0.667): pressure ≈ 0.78
+      Analyze    (freq= 5.9%, cog=0.500): pressure ≈ 0.35
+      Understand (freq= 1.4%, cog=0.833): pressure ≈ 0.29
+      Evaluate   (freq= 4.6%, cog=0.333): pressure ≈ 0.21
+      Create     (freq= 8.3%, cog=0.167): pressure ≈ 0.14  → most dims
+
+    Per-class averaging ensures each Bloom level contributes equal gradient
+    weight regardless of batch frequency (rare levels still get trained).
     """
 
     EMBEDDING_DIM = 768.0
 
     def __init__(self, bloom_frequencies: List[float]):
         super().__init__()
+        import math
+        f = torch.tensor(bloom_frequencies, dtype=torch.float).clamp(min=1e-6)
         cognitive = torch.tensor([1.0 - b / 6.0 for b in range(6)], dtype=torch.float)
-        self.register_buffer("cognitive_weights", cognitive)
+        freq_weight = f.sqrt()                          # sqrt(freq): dampen extreme imbalance
+        combined = cognitive * freq_weight
+        combined = combined / combined.mean()           # normalize to mean=1
+        self.register_buffer("combined_weights", combined)
 
     def forward(
         self,
@@ -120,7 +145,7 @@ class BloomTwoFactorEfficiencyLoss(nn.Module):
             mask = (bloom_labels == b)
             if mask.sum() == 0:
                 continue
-            cw = self.cognitive_weights[b]
+            cw = self.combined_weights[b]
             class_mean_dim = continuous_dim[mask].mean()
             total = total + cw * (class_mean_dim / self.EMBEDDING_DIM)
             n_classes += 1
