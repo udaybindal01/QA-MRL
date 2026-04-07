@@ -106,12 +106,13 @@ class BAMTrainer:
             )
             self.model.freeze_encoder()
 
-            # Rebuild optimizer for router/mask-head params only
+            # Rebuild optimizer for active routing mode params only
             oc = self.config["training"]["optimizer"]
             fast_lr = oc.get("router_lr", oc["encoder_lr"] * 10)
-            routing_params = list(self.model.bloom_router.parameters())
-            if hasattr(self.model, "bloom_mask_head"):
-                routing_params += list(self.model.bloom_mask_head.parameters())
+            if self.model.use_mask_routing:
+                routing_params = list(self.model.bloom_mask_head.parameters())
+            else:
+                routing_params = list(self.model.bloom_router.parameters())
 
             self.optimizer = AdamW(
                 [{"params": routing_params, "lr": fast_lr}],

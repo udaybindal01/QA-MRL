@@ -373,10 +373,12 @@ class BloomAlignedMRL(nn.Module):
         oc = config["training"]["optimizer"]
         freeze = config["training"].get("freeze_encoder", False)
         fast_lr = oc.get("router_lr", oc["encoder_lr"] * 10)
-        # Router + mask head params get the fast LR
-        routing_params = list(self.bloom_router.parameters())
-        if hasattr(self, "bloom_mask_head"):
-            routing_params += list(self.bloom_mask_head.parameters())
+        # Only include params for the active routing mode — the other router is not
+        # used in forward() and including it causes AdamW weight decay on dead params.
+        if self.use_mask_routing:
+            routing_params = list(self.bloom_mask_head.parameters())
+        else:
+            routing_params = list(self.bloom_router.parameters())
         groups = [{"params": routing_params, "lr": fast_lr}]
         if not freeze:
             groups.append(
