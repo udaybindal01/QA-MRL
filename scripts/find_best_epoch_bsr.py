@@ -85,7 +85,7 @@ def compute_bsr(metrics: dict, cw: list, alpha: float):
     per_bloom_dim = []
 
     for name in BLOOM_NAMES:
-        r10_key = f"bloom_{name}_recall_10"
+        r10_key = f"bloom_{name}_recall@10"
         dim_key = f"bloom_{name}_avg_dim"
         if r10_key not in metrics or dim_key not in metrics:
             return None
