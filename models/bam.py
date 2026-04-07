@@ -26,74 +26,59 @@ from models.encoder import MRLEncoder
 
 class BloomMaskHead(nn.Module):
     """
-    Option B: Learned scattered soft mask over all 768 dims.
+    Option B: Static learned scattered mask — one mask per Bloom level.
 
     Architecture:
-        shared_mlp: Linear(768 → hidden_dim) → ReLU → Linear(hidden_dim → 768)
-        bloom_bias: Embedding(6, 768) — per-level additive offset in pre-sigmoid space
-        soft_mask  = sigmoid(shared_mlp(CLS) + bloom_bias(bloom_level))
+        bloom_logit: Embedding(6, 768) — one logit vector per Bloom level
+        soft_mask   = sigmoid(bloom_logit[bloom_level])
+        hard_mask   = (soft_mask > 0.5)     [STE binarization]
 
-    The Bloom one-hot used to be concatenated into a 774-dim input and lost in a
-    256-dim bottleneck. Now the Bloom signal acts directly in the 768-dim output
-    space via a learned per-level bias, guaranteeing different levels can select
-    genuinely different dimensions even when CLS tokens are similar.
+    Each Bloom level learns its own fixed set of 768 logits end-to-end. The encoder
+    co-trains so that each level's selected dimensions become maximally informative
+    for that level's retrieval queries.
 
-    STE binarization at 0.5: hard binary in forward, continuous sigmoid in backward.
+    Why static (no shared_mlp):
+        A content-adaptive MLP inevitably learns a shared semantic mask driven by
+        CLS token similarity — all queries compete for the same high-information dims
+        regardless of Bloom level. Without the MLP, the 6 independent embeddings
+        can freely diverge under diversity + variance losses, giving each cognitive
+        level its own specialized dimension subspace.
 
     Initialization:
-        shared_mlp output weight: zeros, bias: +1.0
-            → sigmoid(1) ≈ 0.73, ~561 active dims at init (masks alive from batch 1).
-            DO NOT use bias=0: sigmoid(0)=0.5 and (0.5 > 0.5) is False → hard_mask=0
-            everywhere → STE mask=0 → zero embeddings → instant collapse.
-        bloom_bias: small random N(0, 0.1) per level
-            → breaks symmetry between Bloom levels from the first gradient step,
-            allowing the diversity loss to push levels apart.
+        bloom_logit: N(0, 1.0) per level.
+            sigmoid(0) = 0.5 → (0.5 > 0.5) is False → hard_mask = 0 everywhere.
+            std=1.0 shifts most logits away from 0, giving ~50% active dims at init
+            with strong per-level variation from the first gradient step.
+            Different levels start with uncorrelated random masks (cosine sim ≈ 0),
+            giving diversity/variance losses maximum room to work from step 1.
+
+    STE: hard binary in forward pass, continuous sigmoid gradient in backward pass.
     """
 
     EMBEDDING_DIM = 768
     BLOOM_DIM = 6
 
-    def __init__(self, hidden_dim: int = 256, sparsity_target: float = 0.55):
+    def __init__(self, sparsity_target: float = 0.44):
         super().__init__()
         self.sparsity_target = sparsity_target
-
-        # Shared content-based MLP: takes CLS token only
-        self.shared_mlp = nn.Sequential(
-            nn.Linear(self.EMBEDDING_DIM, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, self.EMBEDDING_DIM),
-        )
-        # Per-Bloom-level additive offset applied in pre-sigmoid space.
-        # Acts directly in 768-dim output space — not bottlenecked through hidden_dim.
-        self.bloom_bias = nn.Embedding(self.BLOOM_DIM, self.EMBEDDING_DIM)
-
+        self.bloom_logit = nn.Embedding(self.BLOOM_DIM, self.EMBEDDING_DIM)
         with torch.no_grad():
-            # Shared MLP output: zero weight, bias=+1 → all levels start at 0.73
-            nn.init.zeros_(self.shared_mlp[2].weight)
-            nn.init.constant_(self.shared_mlp[2].bias, 1.0)
-            # Bloom bias: std=0.3 gives ~±0.07 sigmoid difference at init,
-            # large enough that diversity loss can push levels apart before
-            # contrastive gradients collapse them. std=0.1 was too weak (±0.025).
-            nn.init.normal_(self.bloom_bias.weight, mean=0.0, std=0.3)
+            # std=1.0: sigmoid(N(0,1)) centres ~50% active dims, each level
+            # independently random → pairwise cosine sim ≈ 0 at init.
+            nn.init.normal_(self.bloom_logit.weight, mean=0.0, std=1.0)
 
     def forward(
         self,
-        cls_token: torch.Tensor,
-        bloom_labels: torch.Tensor,
+        cls_token: torch.Tensor,       # [B, 768] — unused, kept for API compatibility
+        bloom_labels: torch.Tensor,    # [B] int 0-indexed Bloom levels
     ) -> Dict[str, torch.Tensor]:
         """
-        Args:
-            cls_token:    [B, 768] CLS token from encoder (hidden_states[:, 0, :])
-            bloom_labels: [B] int 0-indexed Bloom levels
-
         Returns:
             mask:        [B, 768] STE mask — hard binary forward, soft sigmoid backward
             soft_mask:   [B, 768] raw sigmoid output (used by sparsity/diversity losses)
             active_dims: [B] count of active dims per query (from hard mask)
         """
-        content_logit = self.shared_mlp(cls_token)                  # [B, 768]
-        bloom_offset  = self.bloom_bias(bloom_labels)                # [B, 768]
-        soft_mask = torch.sigmoid(content_logit + bloom_offset)      # [B, 768]
+        soft_mask = torch.sigmoid(self.bloom_logit(bloom_labels))    # [B, 768]
         hard_mask = (soft_mask > 0.5).float()
         mask = hard_mask + (soft_mask - soft_mask.detach())          # STE
         return {
@@ -244,7 +229,7 @@ class BloomAlignedMRL(nn.Module):
 
         if self.use_mask_routing:
             self.bloom_mask_head = BloomMaskHead(
-                sparsity_target=mc.get("mask_sparsity_target", 0.44)
+                sparsity_target=mc.get("mask_sparsity_target", 0.44),
             )
 
         self.embedding_dim = mc["embedding_dim"]

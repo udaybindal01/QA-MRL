@@ -1,6 +1,8 @@
-# BAM Option B: Bloom Scattered Mask (BloomMaskHead)
+# BAM Option B: Bloom Static Scattered Mask (BloomMaskHead)
 #
-# Routing: shared MLP(CLS) + per-level bloom_bias → sigmoid → scattered binary mask (STE)
+# Routing: Embedding(6, 768) → sigmoid → static binary mask per Bloom level (STE)
+# One fixed mask per Bloom level — no content-adaptive MLP. The encoder co-trains
+# so each level's selected dims become maximally informative for that cognitive level.
 # Active dims are scattered (not prefix-contiguous) — NOT FAISS sub-index compatible.
 # Retrieval: masked_query · full_doc (zero dims ignored naturally in dot product).
 #
@@ -10,11 +12,13 @@
 #
 # Loss stack (Option B):
 #   contrastive     (1.0) — InfoNCE: masked_q · full_doc
-#   efficiency      (0.05)— cognitive-weighted compression (lower than A — sparsity handles targets)
-#   mrl_anchor      (0.2) — keeps encoder sharp at MRL prefix dims
-#   mask_sparsity   (0.3) — pulls each level toward its cognitive dim target (stronger signal)
-#   mask_diversity  (0.1) — pairwise cosine similarity penalty between level mean masks
-#   mask_variance   (0.5) — per-dim variance across levels (768 gradient signals vs 15 pairs)
+#   efficiency      (0.05)— cognitive-weighted compression
+#   mrl_anchor      (0.0) — OFF: prefix structure conflicts with static scattered masks.
+#                           The encoder must freely learn per-level dim clusters, not
+#                           be constrained to prefix-hierarchical organization.
+#   mask_sparsity   (0.3) — global sparsity target (0.44 → ~338 active dims)
+#   mask_diversity  (0.3) — pairwise cosine penalty; static masks → stronger signal needed
+#   mask_variance   (1.0) — per-dim variance across levels; primary differentiation signal
 #   diversity       (0.0) — RouterDiversityLoss is Option A only (prefix dim spread)
 
 model:
@@ -56,12 +60,12 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.05        # Lower than Option A: sparsity loss controls per-level dims
-    mrl_anchor_weight: 0.2
+    efficiency_weight: 0.05        # Cognitive-weighted compression (Remember↓, Create↑)
+    mrl_anchor_weight: 0.0         # OFF: static scattered masks need free encoder structure
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
-    mask_sparsity_weight: 0.3      # Per-level targets (cognitive defaults: Remember→307, Create→499)
-    mask_diversity_weight: 0.1     # Pairwise cosine penalty (margin=0.3) — keeps levels distinct
-    mask_variance_weight: 0.5      # Per-dim variance across Bloom levels (768 gradient signals)
+    mask_sparsity_weight: 0.3      # Global sparsity toward mask_sparsity_target (0.44)
+    mask_diversity_weight: 0.3     # Pairwise cosine penalty; stronger for static masks
+    mask_variance_weight: 1.0      # Per-dim variance across levels; primary signal
     encoder_warmup_epochs: 5       # Efficiency gate: sparsity/diversity/variance fire from epoch 0
     temperature_schedule:
       start: 0.1
