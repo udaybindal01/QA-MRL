@@ -301,16 +301,16 @@ class FullEvaluator:
                         metrics[f"bloom_{name}_recall@10_ci_hi"] = hi
                         metrics[f"bloom_{name}_n"] = n_level
 
-            # bloom_consistent_recall@10: counts hit if any top-10 doc has same
-            # Bloom level as the query's positive (addresses single-positive noise).
-            if has_bloom_in_corpus and k == 10:
-                pos_blooms_level = query_positive_blooms[mask]
-                consistent_hits = np.array([
-                    any(corpus_bloom[level_rankings[i, j]] == pos_blooms_level[i]
-                        for j in range(10))
-                    for i in range(n_level)
-                ])
-                metrics[f"bloom_{name}_consistent_recall@10"] = float(consistent_hits.mean())
+                    # bloom_consistent_recall@10: counts hit if any top-10 doc has same
+                    # Bloom level as the query's positive (addresses single-positive noise).
+                    if has_bloom_in_corpus:
+                        pos_blooms_level = query_positive_blooms[mask]
+                        consistent_hits = np.array([
+                            any(corpus_bloom[level_rankings[i, j]] == pos_blooms_level[i]
+                                for j in range(10))
+                            for i in range(n_level)
+                        ])
+                        metrics[f"bloom_{name}_consistent_recall@10"] = float(consistent_hits.mean())
 
             if bloom_entropies is not None:
                 metrics[f"bloom_{name}_routing_entropy"] = float(bloom_entropies[mask].mean())
