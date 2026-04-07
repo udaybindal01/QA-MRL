@@ -7,10 +7,11 @@
 #            /tmp/mrl-ckpts/best/  (MRL baseline encoder warm-start)
 #
 # Steps:
-#   1. train_bam_b   — train BAM Option B (BloomMaskHead, scattered mask)
-#   2. find_bam_a    — BSR selection on Option A checkpoints (for comparison)
-#   3. find_bam_b    — BSR selection on Option B checkpoints
-#   4. eval_compare  — full eval: Option B vs Option A vs MRL baseline
+#   1. remine_negatives — re-mine hard negatives (num_neg from bam_optionb.yaml, default 7)
+#   2. train_bam_b      — train BAM Option B (BloomMaskHead, scattered mask)
+#   3. find_bam_a       — BSR selection on Option A checkpoints (for comparison)
+#   4. find_bam_b       — BSR selection on Option B checkpoints
+#   5. eval_compare     — full eval: Option B vs Option A vs MRL baseline
 #
 # Usage:
 #   chmod +x optionB-pipeline.sh
@@ -41,7 +42,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-ALL_STEPS=(train_bam_b find_bam_a find_bam_b eval_compare)
+ALL_STEPS=(remine_negatives train_bam_b find_bam_a find_bam_b eval_compare)
 
 SKIP_STEPS=()
 if [[ -n "$FROM_STEP" ]]; then
@@ -92,10 +93,36 @@ echo "  Data           : ./data/real/train_curriculum.jsonl"
 mkdir -p "$BAM_B_CKPT_DIR" "$RESULTS_DIR"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 1 — TRAIN BAM OPTION B
+# STEP 1 — RE-MINE HARD NEGATIVES
+# ─────────────────────────────────────────────────────────────────────────────
+if should_run remine_negatives; then
+    log "STEP 1/5 — RE-MINE HARD NEGATIVES (num_neg from $BAM_B_CONFIG)"
+
+    NUM_NEG=$(python3 -c "
+import yaml
+with open('$BAM_B_CONFIG') as f:
+    cfg = yaml.safe_load(f)
+print(cfg['data']['num_hard_negatives'])
+")
+    echo "  num_hard_negatives : $NUM_NEG"
+    echo "  Input/Output       : ./data/real/train_curriculum.jsonl (overwrite in-place)"
+
+    python3 data/curriculum_negatives.py \
+        --pairs  "./data/real/train_curriculum.jsonl" \
+        --corpus "./data/real/corpus.jsonl" \
+        --output "./data/real/train_curriculum.jsonl" \
+        --num_neg "$NUM_NEG" \
+        --stage  0.7 \
+        || die "curriculum_negatives.py failed"
+
+    echo "  Re-mined $NUM_NEG negatives → ./data/real/train_curriculum.jsonl"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 2 — TRAIN BAM OPTION B (was STEP 1)
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run train_bam_b; then
-    log "STEP 1/4 — TRAIN BAM OPTION B (BloomMaskHead, scattered mask)"
+    log "STEP 2/5 — TRAIN BAM OPTION B (BloomMaskHead, scattered mask)"
     echo "  Config      : $BAM_B_CONFIG"
     echo "  Init encoder: $MRL_BEST"
     echo "  Output      : $BAM_B_CKPT_DIR/"
@@ -109,10 +136,10 @@ if should_run train_bam_b; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 2 — FIND BEST OPTION A EPOCH (for comparison in eval)
+# STEP 3 — FIND BEST OPTION A EPOCH (for comparison in eval)
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run find_bam_a; then
-    log "STEP 2/4 — FIND BEST BAM OPTION A EPOCH (BSR)"
+    log "STEP 3/5 — FIND BEST BAM OPTION A EPOCH (BSR)"
     [[ -d "$BAM_A_CKPT_DIR/epoch_0" ]] \
         || die "No BAM-A epoch checkpoints at $BAM_A_CKPT_DIR — run optionA-working_pipeline.sh first"
 
@@ -128,10 +155,10 @@ if should_run find_bam_a; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3 — FIND BEST OPTION B EPOCH
+# STEP 4 — FIND BEST OPTION B EPOCH
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run find_bam_b; then
-    log "STEP 3/4 — FIND BEST BAM OPTION B EPOCH (BSR)"
+    log "STEP 4/5 — FIND BEST BAM OPTION B EPOCH (BSR)"
     [[ -d "$BAM_B_CKPT_DIR/epoch_0" ]] \
         || die "No BAM-B epoch checkpoints at $BAM_B_CKPT_DIR — run train_bam_b first"
 
@@ -147,10 +174,10 @@ if should_run find_bam_b; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 4 — FULL EVAL: Option B vs Option A vs MRL Baseline
+# STEP 5 — FULL EVAL: Option B vs Option A vs MRL Baseline
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run eval_compare; then
-    log "STEP 4/4 — FULL EVALUATION (Option B vs Option A vs MRL)"
+    log "STEP 5/5 — FULL EVALUATION (Option B vs Option A vs MRL)"
 
     BAM_A_BEST="$BAM_A_CKPT_DIR/best_bsr"
     BAM_B_BEST="$BAM_B_CKPT_DIR/best_bsr"
