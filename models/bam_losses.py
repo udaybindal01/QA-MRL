@@ -459,28 +459,74 @@ class PCGradOptimizer:
 
 
 # ---------------------------------------------------------------------------
+# Unsupervised distillation loss (SMEC §3.4 / eq 7)
+# ---------------------------------------------------------------------------
+
+class BloomMaskDistillationLoss(nn.Module):
+    """
+    Teacher-student distillation: masked embedding preserves the in-batch
+    similarity structure of the full embedding (SMEC eq 7).
+
+    L = mean_{i≠j} |Sim(full_i, full_j) − Sim(masked_i, masked_j)|
+
+    The full 768-dim encoder is the "teacher". The masked (compressed) encoder
+    output is the "student". The loss forces the student to rank in-batch samples
+    in the same order as the teacher — preserving semantic neighbourhoods under
+    dimension selection. No positives/negatives needed; purely unsupervised.
+
+    Fires from epoch 0 (before sparsity pressure is applied) so the mask head
+    learns which dims preserve similarity before being forced to compress.
+    Gradient flows through both the encoder (via full_emb) and the mask head
+    (via query_mask → STE backward), giving both components an early signal.
+    """
+
+    def forward(
+        self,
+        full_emb: torch.Tensor,    # [B, D] normalized full encoder output
+        query_mask: torch.Tensor,  # [B, D] STE mask (binary fwd, sigmoid bwd)
+    ) -> tuple:
+        # Teacher: full embedding (already normalized by encoder)
+        full_norm   = full_emb
+        # Student: normalized masked embedding
+        masked_norm = F.normalize(full_emb * query_mask, p=2, dim=-1)  # [B, D]
+
+        sim_full   = torch.mm(full_norm,   full_norm.t())    # [B, B]
+        sim_masked = torch.mm(masked_norm, masked_norm.t())  # [B, B]
+
+        # Off-diagonal only — diagonal is always 1 for normalized vectors (no gradient)
+        B = full_emb.size(0)
+        off_diag = ~torch.eye(B, dtype=torch.bool, device=full_emb.device)
+        loss = (sim_full - sim_masked).abs()[off_diag].mean()
+        return loss, {"mask_distill": loss.item()}
+
+
+# ---------------------------------------------------------------------------
 # Combined loss (orchestrates everything)
 # ---------------------------------------------------------------------------
 
 class BAMCombinedLoss(nn.Module):
     """
-    BAM combined loss v8.
+    BAM combined loss v9.
+
+    3-stage training schedule (SMEC SMRL insight — sequential not parallel):
+      Stage 1 (0 .. encoder_warmup_epochs):
+        contrastive + MRL anchor + distillation (unsupervised)
+        — encoder + mask head build stable representations without compression pressure
+      Stage 2 (encoder_warmup_epochs .. mask_differentiation_epochs):
+        + efficiency + sparsity  (compression pressure added)
+        — mask learns to compress; levels share a global sparsity target initially
+      Stage 3 (mask_differentiation_epochs .. end):
+        + diversity + variance   (level-differentiation pressure added)
+        — mask learns to give each Bloom level its own specialized dimension subspace
 
     Option A (use_mask_routing=False):
-      total = contrastive_weight * L_contrastive
-            + efficiency_weight  * L_efficiency
-            + mrl_anchor_weight  * L_mrl_anchor
-            + diversity_weight   * L_router_diversity   (pairwise prefix-dim spread)
+      All mask-specific losses are skipped (soft_mask=None).
 
     Option B (use_mask_routing=True, when soft_mask provided):
-      total = contrastive_weight    * L_contrastive
-            + efficiency_weight     * L_efficiency       (using active_dims count)
-            + mrl_anchor_weight     * L_mrl_anchor
-            + mask_sparsity_weight  * L_mask_sparsity
-            + mask_diversity_weight * L_mask_diversity
+      Full 3-stage schedule as above.
 
     Call set_epoch() at the start of each training epoch.
-    bloom_frequencies: list of 6 floats, computed from training data by train_bam.py.
+    bloom_frequencies: list of 6 floats, injected at runtime by train_bam.py.
     """
 
     def __init__(self, config: dict):
@@ -488,13 +534,14 @@ class BAMCombinedLoss(nn.Module):
         mc = config["model"]
         lc = config["training"]["loss"]
 
-        self.contrastive_weight   = lc.get("contrastive_weight", 1.0)
-        self.efficiency_weight    = lc.get("efficiency_weight", 0.3)
-        self.mrl_anchor_weight    = lc.get("mrl_anchor_weight", 0.2)
-        self.diversity_weight     = lc.get("diversity_weight", 0.05)
+        self.contrastive_weight    = lc.get("contrastive_weight", 1.0)
+        self.efficiency_weight     = lc.get("efficiency_weight", 0.3)
+        self.mrl_anchor_weight     = lc.get("mrl_anchor_weight", 0.2)
+        self.diversity_weight      = lc.get("diversity_weight", 0.05)
         self.mask_sparsity_weight  = lc.get("mask_sparsity_weight", 0.1)
         self.mask_diversity_weight = lc.get("mask_diversity_weight", 0.05)
         self.mask_variance_weight  = lc.get("mask_variance_weight", 0.0)
+        self.mask_distill_weight   = lc.get("mask_distill_weight", 0.0)
 
         freqs = lc.get("bloom_frequencies")
         if freqs is None:
@@ -509,7 +556,8 @@ class BAMCombinedLoss(nn.Module):
         ts = lc.get("temperature_schedule", {})
         self.temp_start = ts.get("start", 0.1)
         self.temp_end   = ts.get("end", 0.02)
-        self.encoder_warmup_epochs = lc.get("encoder_warmup_epochs", 0)
+        self.encoder_warmup_epochs       = lc.get("encoder_warmup_epochs", 0)
+        self.mask_differentiation_epochs = lc.get("mask_differentiation_epochs", 0)
 
         self.contrastive = BloomMaskedContrastiveLoss(
             temperature=self.temp_start,
@@ -534,20 +582,28 @@ class BAMCombinedLoss(nn.Module):
             level_targets=level_targets,
         )
         diversity_margin = lc.get("mask_diversity_margin", 0.3)
-        self.mask_diversity = BloomMaskDiversityLoss(margin=diversity_margin)
-        self.mask_variance  = BloomMaskVarianceLoss()
+        self.mask_diversity    = BloomMaskDiversityLoss(margin=diversity_margin)
+        self.mask_variance     = BloomMaskVarianceLoss()
+        self.mask_distillation = BloomMaskDistillationLoss()
 
     def set_epoch(self, epoch: int, total_epochs: int, freeze_encoder: bool = False):
         """
-        Update temperature (cosine anneal) and loss gates at start of each epoch.
+        3-stage loss gating (SMEC SMRL insight — sequential not parallel).
 
-        freeze_encoder=True: use fixed temp_end (annealing with frozen encoder causes
-        loss-scale instability that parks the router at a fixed equilibrium).
+        Stage 1 [0, encoder_warmup_epochs):
+            contrastive + MRL anchor + distillation (from epoch 0).
+            No compression or differentiation pressure yet.
 
-        All non-contrastive losses (efficiency, mask-sparsity/diversity/variance) are
-        gated off for the first encoder_warmup_epochs epochs. This lets the encoder and
-        mask co-train on pure contrastive + MRL-anchor signal first, building a stable
-        representation before compression and differentiation pressure is applied.
+        Stage 2 [encoder_warmup_epochs, mask_differentiation_epochs):
+            + efficiency + sparsity.
+            Encoder has stable representations; now add compression pressure.
+
+        Stage 3 [mask_differentiation_epochs, end):
+            + diversity + variance.
+            Compression is converging; now force per-Bloom-level differentiation.
+
+        This sequential activation reduces gradient variance from simultaneous
+        conflicting objectives (the primary cause of loss stagnation in MRL).
         """
         if freeze_encoder:
             t = self.temp_end
@@ -559,11 +615,17 @@ class BAMCombinedLoss(nn.Module):
         self.contrastive.set_temperature(t)
         self.mrl_anchor.temperature = t
 
-        past_warmup = epoch >= self.encoder_warmup_epochs
-        self._active_efficiency_weight = self.efficiency_weight if past_warmup else 0.0
-        self._active_mask_sparsity_weight  = self.mask_sparsity_weight  if past_warmup else 0.0
-        self._active_mask_diversity_weight = self.mask_diversity_weight if past_warmup else 0.0
-        self._active_mask_variance_weight  = self.mask_variance_weight  if past_warmup else 0.0
+        past_stage1 = epoch >= self.encoder_warmup_epochs
+        past_stage2 = epoch >= self.mask_differentiation_epochs
+
+        # Stage 1 → 2: compression losses activate
+        self._active_efficiency_weight     = self.efficiency_weight     if past_stage1 else 0.0
+        self._active_mask_sparsity_weight  = self.mask_sparsity_weight  if past_stage1 else 0.0
+        # Stage 2 → 3: differentiation losses activate
+        self._active_mask_diversity_weight = self.mask_diversity_weight if past_stage2 else 0.0
+        self._active_mask_variance_weight  = self.mask_variance_weight  if past_stage2 else 0.0
+        # Distillation fires from epoch 0 — no gate
+        self._active_mask_distill_weight   = self.mask_distill_weight
 
     def forward(
         self,
@@ -618,8 +680,15 @@ class BAMCombinedLoss(nn.Module):
             d_stats["diversity"] = l_d.item()
             d_stats["dim_variance"] = float(all_bloom_dims.var().item())
 
-        # Option B: mask sparsity + diversity + variance (gated behind warmup)
+        # Option B: distillation + sparsity + diversity + variance
         if soft_mask is not None:
+            # Distillation (Stage 1, fires from epoch 0): teacher=full_emb, student=masked_emb
+            dist_w = getattr(self, "_active_mask_distill_weight", self.mask_distill_weight)
+            l_dist, dist_stats = self.mask_distillation(query_emb, query_mask)
+            total = total + dist_w * l_dist
+            d_stats.update(dist_stats)
+
+            # Sparsity (Stage 2) + diversity + variance (Stage 3)
             l_sp, sp_stats = self.mask_sparsity(soft_mask, bloom_labels)
             l_md, md_stats = self.mask_diversity(soft_mask, bloom_labels)
             l_mv, mv_stats = self.mask_variance(soft_mask, bloom_labels)
@@ -687,6 +756,10 @@ class BAMCombinedLoss(nn.Module):
             routing = routing + self.diversity_weight * l_d
 
         if soft_mask is not None:
+            dist_w = getattr(self, "_active_mask_distill_weight", self.mask_distill_weight)
+            l_dist, _ = self.mask_distillation(query_emb, query_mask)
+            routing = routing + dist_w * l_dist
+
             l_sp, _ = self.mask_sparsity(soft_mask, bloom_labels)
             l_md, _ = self.mask_diversity(soft_mask, bloom_labels)
             l_mv, _ = self.mask_variance(soft_mask, bloom_labels)

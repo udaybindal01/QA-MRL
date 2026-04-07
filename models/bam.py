@@ -30,42 +30,41 @@ class BloomMaskHead(nn.Module):
 
     Architecture:
         bloom_logit: Embedding(6, 768) — one logit vector per Bloom level
-        soft_mask   = sigmoid(bloom_logit[bloom_level])
-        hard_mask   = (soft_mask > 0.5)     [STE binarization]
+        soft_mask   = sigmoid((logit + Gumbel_noise) / τ)   [training]
+                    = sigmoid(logit)                          [inference]
+        hard_mask   = (soft_mask > 0.5)
+        mask        = hard_mask + (soft_mask − soft_mask.detach())   [STE backward]
 
-    Each Bloom level learns its own fixed set of 768 logits end-to-end. The encoder
-    co-trains so that each level's selected dimensions become maximally informative
-    for that level's retrieval queries.
+    Gumbel-Softmax reparameterization (SMEC §3.3, eq 6):
+        G ~ Gumbel(0,1): G = −log(−log(U)),  U ~ Uniform(0,1)
+        z = sigmoid((logit + G) / τ)
 
-    Why static (no shared_mlp):
-        A content-adaptive MLP inevitably learns a shared semantic mask driven by
-        CLS token similarity — all queries compete for the same high-information dims
-        regardless of Bloom level. Without the MLP, the 6 independent embeddings
-        can freely diverge under diversity + variance losses, giving each cognitive
-        level its own specialized dimension subspace.
+        Compared to plain STE (sigmoid gradient only), Gumbel-Softmax is a proper
+        differentiable relaxation of the discrete selection problem. The injected
+        Gumbel noise gives each forward pass a slightly different mask, acting as a
+        stochastic exploration of the discrete space. As τ → 0 the distribution
+        concentrates on the hard mask; at τ = 1.0 it is close to Bernoulli(sigmoid).
+        Temperature τ is annealed 1.0 → 0.1 over training (call set_temperature()).
 
     Initialization:
-        bloom_logit: N(0, 1.0) per level.
-            sigmoid(0) = 0.5 → (0.5 > 0.5) is False → hard_mask = 0 everywhere.
-            std=1.0 shifts most logits away from 0, giving ~50% active dims at init
-            with strong per-level variation from the first gradient step.
-            Different levels start with uncorrelated random masks (cosine sim ≈ 0),
-            giving diversity/variance losses maximum room to work from step 1.
-
-    STE: hard binary in forward pass, continuous sigmoid gradient in backward pass.
+        bloom_logit: N(0, 1.0) — ~50% active dims per level with uncorrelated
+        random masks (cosine sim ≈ 0), giving max room for diversity/variance losses.
     """
 
     EMBEDDING_DIM = 768
     BLOOM_DIM = 6
 
-    def __init__(self, sparsity_target: float = 0.44):
+    def __init__(self, sparsity_target: float = 0.44, gumbel_temperature: float = 1.0):
         super().__init__()
         self.sparsity_target = sparsity_target
+        self.gumbel_temperature = gumbel_temperature
         self.bloom_logit = nn.Embedding(self.BLOOM_DIM, self.EMBEDDING_DIM)
         with torch.no_grad():
-            # std=1.0: sigmoid(N(0,1)) centres ~50% active dims, each level
-            # independently random → pairwise cosine sim ≈ 0 at init.
             nn.init.normal_(self.bloom_logit.weight, mean=0.0, std=1.0)
+
+    def set_temperature(self, temperature: float):
+        """Anneal Gumbel temperature each epoch (start=1.0 → end=0.1)."""
+        self.gumbel_temperature = max(temperature, 1e-3)
 
     def forward(
         self,
@@ -74,17 +73,28 @@ class BloomMaskHead(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """
         Returns:
-            mask:        [B, 768] STE mask — hard binary forward, soft sigmoid backward
-            soft_mask:   [B, 768] raw sigmoid output (used by sparsity/diversity losses)
+            mask:        [B, 768] STE mask — hard binary forward, Gumbel-sigmoid backward
+            soft_mask:   [B, 768] Gumbel-perturbed sigmoid (used by sparsity/diversity losses)
             active_dims: [B] count of active dims per query (from hard mask)
         """
-        soft_mask = torch.sigmoid(self.bloom_logit(bloom_labels))    # [B, 768]
+        logits = self.bloom_logit(bloom_labels)  # [B, 768]
+
+        if self.training:
+            # Gumbel noise: G = -log(-log(U)),  U ~ Uniform(0, 1)
+            U = torch.rand_like(logits).clamp(min=1e-10, max=1.0 - 1e-10)
+            gumbel_noise = -torch.log(-torch.log(U))
+            soft_mask = torch.sigmoid(
+                (logits + gumbel_noise) / self.gumbel_temperature
+            )
+        else:
+            soft_mask = torch.sigmoid(logits)
+
         hard_mask = (soft_mask > 0.5).float()
-        mask = hard_mask + (soft_mask - soft_mask.detach())          # STE
+        mask = hard_mask + (soft_mask - soft_mask.detach())  # STE
         return {
             "mask": mask,
             "soft_mask": soft_mask,
-            "active_dims": hard_mask.sum(dim=-1),                    # [B]
+            "active_dims": hard_mask.sum(dim=-1),            # [B]
         }
 
 

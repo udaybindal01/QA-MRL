@@ -17,6 +17,7 @@ v4 features retained:
 """
 
 import os
+import math
 import torch
 import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
@@ -443,6 +444,21 @@ class BAMTrainer:
             )
 
             self.criterion.set_epoch(epoch, self.num_epochs, freeze_encoder=freeze_encoder)
+
+            # Anneal Gumbel temperature for BloomMaskHead (Option B only)
+            if self.model.use_mask_routing:
+                gts = self.config["training"]["loss"].get("gumbel_temperature_schedule", {})
+                gt_start = gts.get("start", 1.0)
+                gt_end   = gts.get("end",   0.1)
+                if freeze_encoder:
+                    gt = gt_end
+                else:
+                    progress = epoch / max(self.num_epochs - 1, 1)
+                    gt = gt_end + 0.5 * (gt_start - gt_end) * (
+                        1 + math.cos(math.pi * progress)
+                    )
+                self.model.bloom_mask_head.set_temperature(gt)
+
             t = self.criterion.contrastive.temperature
             ew = getattr(
                 self.criterion, "_active_efficiency_weight",

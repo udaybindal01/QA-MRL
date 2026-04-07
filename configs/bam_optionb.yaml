@@ -1,25 +1,21 @@
 # BAM Option B: Bloom Static Scattered Mask (BloomMaskHead)
 #
-# Routing: Embedding(6, 768) → sigmoid → static binary mask per Bloom level (STE)
-# One fixed mask per Bloom level — no content-adaptive MLP. The encoder co-trains
-# so each level's selected dims become maximally informative for that cognitive level.
-# Active dims are scattered (not prefix-contiguous) — NOT FAISS sub-index compatible.
-# Retrieval: masked_query · full_doc (zero dims ignored naturally in dot product).
+# Routing: Embedding(6, 768) → Gumbel-Softmax → scattered binary mask per Bloom level
+# One fixed mask per Bloom level. Active dims are scattered — NOT FAISS sub-index compatible.
+# Retrieval: normalize(q * mask_b) · normalize(corpus * mask_b) (pre-masked per level).
+#
+# SMEC-inspired improvements (arXiv 2510.12474):
+#   1. Gumbel-Softmax replaces STE for discrete dimension selection (§3.3 ADS module)
+#   2. 3-stage sequential loss schedule reduces gradient variance (§3.2 SMRL)
+#   3. Unsupervised distillation loss forces masked embedding to preserve full-dim similarity (§3.4)
+#   4. Increased hard negatives for stronger contrastive signal
 #
 # Prerequisite: optionA-working_pipeline.sh must have been run first.
-#   - Reuses: ./data/real/train_curriculum.jsonl, val, test, corpus
-#   - Reuses: /tmp/mrl-ckpts/best/  (MRL baseline encoder warm-start)
 #
-# Loss stack (Option B):
-#   contrastive     (1.0) — InfoNCE: masked_q · full_doc
-#   efficiency      (0.05)— cognitive-weighted compression
-#   mrl_anchor      (0.0) — OFF: prefix structure conflicts with static scattered masks.
-#                           The encoder must freely learn per-level dim clusters, not
-#                           be constrained to prefix-hierarchical organization.
-#   mask_sparsity   (0.3) — global sparsity target (0.44 → ~338 active dims)
-#   mask_diversity  (0.3) — pairwise cosine penalty; static masks → stronger signal needed
-#   mask_variance   (1.0) — per-dim variance across levels; primary differentiation signal
-#   diversity       (0.0) — RouterDiversityLoss is Option A only (prefix dim spread)
+# Loss schedule (3 stages, SMEC SMRL insight):
+#   Stage 1 (epochs 0-4):  contrastive + mrl_anchor + distillation
+#   Stage 2 (epochs 5-9):  + efficiency + mask_sparsity
+#   Stage 3 (epochs 10+):  + mask_diversity + mask_variance
 
 model:
   backbone: "BAAI/bge-base-en-v1.5"
@@ -27,9 +23,9 @@ model:
   pooling: "cls"
   normalize_embeddings: true
   mrl_dims: [64, 128, 256, 384, 512, 768]
-  use_mask_routing: true             # Option B: BloomMaskHead scattered soft mask
-  mask_sparsity_target: 0.44         # global fallback; per-level targets come from loss config
-  use_soft_bloom_routing: false      # N/A for Option B (no scalar dim to average)
+  use_mask_routing: true             # Option B: BloomMaskHead scattered mask
+  mask_sparsity_target: 0.44         # global fallback; per-level targets from loss config
+  use_soft_bloom_routing: false      # N/A for Option B
 
 data:
   train_path: "./data/real/train_curriculum.jsonl"
@@ -40,7 +36,9 @@ data:
   subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
   max_query_length: 128
   max_passage_length: 256
-  num_hard_negatives: 3
+  num_hard_negatives: 7              # Was 3. More diverse negatives per SMEC S-XBM insight.
+                                     # NOTE: re-run data/curriculum_negatives.py if data was
+                                     # mined with 3 negatives (it will pad/truncate otherwise).
 
 training:
   seed: 42
@@ -54,30 +52,28 @@ training:
     lr: 2.0e-5
     weight_decay: 0.01
     encoder_lr: 2.0e-5
-    router_lr: 2.0e-4              # BloomMaskHead MLP + bloom_bias — 10x encoder LR
+    router_lr: 2.0e-4              # BloomMaskHead bloom_logit — 10x encoder LR
   scheduler:
     type: "cosine"
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.2         # Was 0.05. With query-only masking, more active dims always
-                                   # improves contrastive, so stronger efficiency pressure is needed
-                                   # to prevent mask collapsing to all-ones.
-    mrl_anchor_weight: 0.2         # Was 0.0. Keeps encoder from drifting from its MRL structure
-                                   # while the scattered mask is learning which dims to select.
+    efficiency_weight: 0.2         # Cognitive-weighted compression (Remember↓, Create↑)
+    mrl_anchor_weight: 0.2         # Keeps encoder from drifting from MRL structure
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
-    mask_sparsity_weight: 0.5      # Per-level sparsity targets (Remember→40%, Create→65%)
-    mask_diversity_weight: 0.3     # Pairwise cosine penalty between level mean masks
-    mask_variance_weight: 0.3      # Was 1.0. Reduces to avoid negative total loss domination
-                                   # (variance loss is always ≤ 0; high weight could let optimizer
-                                   # game variance without improving retrieval quality).
-    encoder_warmup_epochs: 5       # Gates ALL non-contrastive losses (efficiency + sparsity +
-                                   # diversity + variance). First 5 epochs: pure contrastive +
-                                   # MRL anchor only. Then compression/differentiation pressure
-                                   # kicks in once encoder has built stable representations.
+    mask_sparsity_weight: 0.5      # Per-level sparsity: Remember→40%, Create→65%
+    mask_diversity_weight: 0.3     # Pairwise cosine penalty between Bloom-level mean masks
+    mask_variance_weight: 0.3      # Per-dim variance across levels (always ≤ 0; keep weight low)
+    mask_distill_weight: 0.3       # SMEC eq 7: |Sim(full_i,full_j) - Sim(masked_i,masked_j)|
+                                   # Fires from epoch 0 — unsupervised, no gradient conflict.
+    encoder_warmup_epochs: 5       # Stage 1 end / Stage 2 start: add efficiency + sparsity
+    mask_differentiation_epochs: 10  # Stage 2 end / Stage 3 start: add diversity + variance
     temperature_schedule:
       start: 0.1
       end: 0.02
+    gumbel_temperature_schedule:   # Anneals BloomMaskHead.gumbel_temperature each epoch
+      start: 1.0                   # High τ: smoother/more exploratory discrete selection
+      end: 0.1                     # Low τ: sharper, more deterministic (closer to hard mask)
     # bloom_frequencies injected at runtime by train_bam.py
   use_pcgrad: false
   encoder_freeze_after_epochs: null
