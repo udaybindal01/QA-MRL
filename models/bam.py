@@ -71,8 +71,10 @@ class BloomMaskHead(nn.Module):
             # Shared MLP output: zero weight, bias=+1 → all levels start at 0.73
             nn.init.zeros_(self.shared_mlp[2].weight)
             nn.init.constant_(self.shared_mlp[2].bias, 1.0)
-            # Bloom bias: small random init breaks level symmetry from step 1
-            nn.init.normal_(self.bloom_bias.weight, mean=0.0, std=0.1)
+            # Bloom bias: std=0.3 gives ~±0.07 sigmoid difference at init,
+            # large enough that diversity loss can push levels apart before
+            # contrastive gradients collapse them. std=0.1 was too weak (±0.025).
+            nn.init.normal_(self.bloom_bias.weight, mean=0.0, std=0.3)
 
     def forward(
         self,

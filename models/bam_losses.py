@@ -26,6 +26,22 @@ import torch.nn.functional as F
 from typing import List, Optional
 
 
+def _is_prefix_mask(mask: torch.Tensor) -> bool:
+    """
+    Return True if every row of mask is a contiguous prefix of 1s followed by 0s.
+    Option A (prefix mask): True  → mask document too (matches eval prefix slicing).
+    Option B (scattered mask): False → use full document (matches eval unmasked corpus).
+    """
+    # cumsum trick: a row is a valid prefix mask iff it never goes [0, ..., 1]
+    # i.e. (1 - mask) cumsum then mask dot (1-mask).cumsum has all zeros
+    with torch.no_grad():
+        # For each row: check if any 1 appears after a 0
+        flip = (mask < 0.5).float()                     # 1 where mask=0
+        flip_cumsum = flip.cumsum(dim=-1)               # counts zeros seen so far
+        violations = (mask > 0.5).float() * flip_cumsum # 1 where mask=1 but a 0 came before
+        return (violations.sum() == 0).item()
+
+
 # ---------------------------------------------------------------------------
 # Existing losses (v7, unchanged)
 # ---------------------------------------------------------------------------
@@ -53,14 +69,29 @@ class BloomMaskedContrastiveLoss(nn.Module):
         negative_embs: Optional[torch.Tensor] = None,
         bloom_labels: Optional[torch.Tensor] = None,
     ):
-        # Both query and documents masked with query mask.
-        # Matches eval: normalize(q[:k]) · normalize(d[:k]) — prefix slicing.
+        # Option A (prefix mask): masked_q · masked_p — both sides prefix-sliced.
+        #   Matches eval: normalize(q[:k]) · normalize(c[:k]) — equivalent for prefix masks.
+        # Option B (scattered mask): masked_q · full_doc — only query is masked.
+        #   Matches eval: masked_query_emb · full_corpus_emb (corpus never masked at eval).
+        #   Masking the doc with the query's scattered mask at training has no semantic
+        #   justification and creates a train/eval mismatch that collapses all masks.
+        # Option A masks are prefix-contiguous (all 1s at start, 0s at end).
+        # Option B masks are scattered. Detect this to apply correct eval-matching strategy.
+        is_prefix_mask = _is_prefix_mask(query_mask)
         masked_q = F.normalize(query_emb * query_mask, p=2, dim=-1)
-        masked_p = F.normalize(positive_emb * query_mask, p=2, dim=-1)
+        if is_prefix_mask:
+            # Option A: mask document too (equivalent to prefix slicing at eval)
+            masked_p = F.normalize(positive_emb * query_mask, p=2, dim=-1)
+        else:
+            # Option B: full document (matches eval where corpus is stored unmasked)
+            masked_p = F.normalize(positive_emb, p=2, dim=-1)
 
         if negative_embs is not None:
-            mask_exp = query_mask.unsqueeze(1).expand_as(negative_embs)
-            masked_n = F.normalize(negative_embs * mask_exp, p=2, dim=-1)
+            if is_prefix_mask:
+                mask_exp = query_mask.unsqueeze(1).expand_as(negative_embs)
+                masked_n = F.normalize(negative_embs * mask_exp, p=2, dim=-1)
+            else:
+                masked_n = F.normalize(negative_embs, p=2, dim=-1)
             pos_sim = (masked_q * masked_p).sum(dim=-1) / self.temperature
             neg_sim = torch.bmm(masked_n, masked_q.unsqueeze(-1)).squeeze(-1) / self.temperature
             logits = torch.cat([pos_sim.unsqueeze(-1), neg_sim], dim=-1)
