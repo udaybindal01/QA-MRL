@@ -63,7 +63,8 @@ training:
     efficiency_weight: 0.05        # Cognitive-weighted compression (Remember↓, Create↑)
     mrl_anchor_weight: 0.0         # OFF: static scattered masks need free encoder structure
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
-    mask_sparsity_weight: 0.3      # Global sparsity toward mask_sparsity_target (0.44)
+    mask_sparsity_weight: 0.5      # Global sparsity toward mask_sparsity_target (0.44)
+                                   # Higher now that contrastive no longer fights it (both sides masked)
     mask_diversity_weight: 0.3     # Pairwise cosine penalty; stronger for static masks
     mask_variance_weight: 1.0      # Per-dim variance across levels; primary signal
     encoder_warmup_epochs: 5       # Efficiency gate: sparsity/diversity/variance fire from epoch 0
