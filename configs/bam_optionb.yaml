@@ -60,14 +60,21 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.05        # Cognitive-weighted compression (Remember↓, Create↑)
-    mrl_anchor_weight: 0.0         # OFF: static scattered masks need free encoder structure
+    efficiency_weight: 0.2         # Was 0.05. With query-only masking, more active dims always
+                                   # improves contrastive, so stronger efficiency pressure is needed
+                                   # to prevent mask collapsing to all-ones.
+    mrl_anchor_weight: 0.2         # Was 0.0. Keeps encoder from drifting from its MRL structure
+                                   # while the scattered mask is learning which dims to select.
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
-    mask_sparsity_weight: 0.5      # Global sparsity toward mask_sparsity_target (0.44)
-                                   # Higher now that contrastive no longer fights it (both sides masked)
-    mask_diversity_weight: 0.3     # Pairwise cosine penalty; stronger for static masks
-    mask_variance_weight: 1.0      # Per-dim variance across levels; primary signal
-    encoder_warmup_epochs: 5       # Efficiency gate: sparsity/diversity/variance fire from epoch 0
+    mask_sparsity_weight: 0.5      # Per-level sparsity targets (Remember→40%, Create→65%)
+    mask_diversity_weight: 0.3     # Pairwise cosine penalty between level mean masks
+    mask_variance_weight: 0.3      # Was 1.0. Reduces to avoid negative total loss domination
+                                   # (variance loss is always ≤ 0; high weight could let optimizer
+                                   # game variance without improving retrieval quality).
+    encoder_warmup_epochs: 5       # Gates ALL non-contrastive losses (efficiency + sparsity +
+                                   # diversity + variance). First 5 epochs: pure contrastive +
+                                   # MRL anchor only. Then compression/differentiation pressure
+                                   # kicks in once encoder has built stable representations.
     temperature_schedule:
       start: 0.1
       end: 0.02

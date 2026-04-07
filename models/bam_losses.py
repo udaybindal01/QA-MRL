@@ -34,24 +34,34 @@ class BloomMaskedContrastiveLoss(nn.Module):
     """
     InfoNCE in query-masked subspace with inverse-sqrt class weighting.
 
-    Masking strategy (both Option A and B):
-        masked_q = normalize(query_emb * mask)
-        masked_p = normalize(positive_emb * mask)   ← same mask applied to document
+    Masking strategy differs by routing mode:
+        Option A (prefix mask, mask_documents=True):
+            masked_q = normalize(query_emb * prefix_mask)
+            masked_p = normalize(positive_emb * prefix_mask)
+            eval: normalize(q[:k]) · normalize(c[:k]) — both sides prefix-sliced.
+            Correct because MRL training packs max information in the first k dims,
+            so prefix-masking the document is a meaningful (lossless) compression.
 
-    Option A (prefix mask): equivalent to normalize(q[:k]) · normalize(c[:k]) at eval.
-    Option B (static scattered mask): eval applies the same per-level mask to the corpus
-        (normalize(corpus * mask_b) precomputed per level — see evaluator.py).
-        Masking both sides keeps contrastive operating within the masked subspace,
-        preventing the gradient from always rewarding more active dims.
+        Option B (scattered mask, mask_documents=False):
+            masked_q = normalize(query_emb * scattered_mask)
+            full_p   = normalize(positive_emb)                ← document NOT masked
+            eval: normalize(q * mask_b) · normalize(corpus_full).
+            Masking docs with a randomly-initialized scattered mask degrades the
+            document representation unpredictably — the encoder was not trained to
+            pack Bloom-level information into arbitrary scattered dims. Query-only
+            masking gives a clean gradient: "which query dims help identify the
+            correct document from the full corpus?"
 
     class_weights: [6] tensor, one weight per Bloom level (0-indexed).
     Computed from training data as 1/sqrt(freq), normalized to mean=1.
     """
 
     def __init__(self, temperature: float = 0.05,
-                 class_weights: Optional[List[float]] = None):
+                 class_weights: Optional[List[float]] = None,
+                 mask_documents: bool = True):
         super().__init__()
         self.temperature = temperature
+        self.mask_documents = mask_documents
         w = torch.tensor(class_weights, dtype=torch.float) if class_weights else torch.ones(6)
         self.register_buffer("class_weights", w)
 
@@ -63,24 +73,28 @@ class BloomMaskedContrastiveLoss(nn.Module):
         negative_embs: Optional[torch.Tensor] = None,
         bloom_labels: Optional[torch.Tensor] = None,
     ):
-        # Mask both query and document with the same mask.
-        # This is the correct strategy for both Option A and Option B:
-        #   Option A: prefix mask → normalize(q[:k]) · normalize(c[:k]) at eval
-        #   Option B: static scattered mask → normalize(q*mask_b) · normalize(corpus*mask_b)
-        #             at eval (evaluator pre-applies level mask to corpus per level)
         masked_q = F.normalize(query_emb * query_mask, p=2, dim=-1)
-        masked_p = F.normalize(positive_emb * query_mask, p=2, dim=-1)
+
+        if self.mask_documents:
+            # Option A: mask both sides (consistent with prefix-sliced eval)
+            doc_p = F.normalize(positive_emb * query_mask, p=2, dim=-1)
+        else:
+            # Option B: query only — docs stay at full 768 dims
+            doc_p = F.normalize(positive_emb, p=2, dim=-1)
 
         if negative_embs is not None:
-            mask_exp = query_mask.unsqueeze(1).expand_as(negative_embs)
-            masked_n = F.normalize(negative_embs * mask_exp, p=2, dim=-1)
-            pos_sim = (masked_q * masked_p).sum(dim=-1) / self.temperature
-            neg_sim = torch.bmm(masked_n, masked_q.unsqueeze(-1)).squeeze(-1) / self.temperature
+            if self.mask_documents:
+                mask_exp = query_mask.unsqueeze(1).expand_as(negative_embs)
+                doc_n = F.normalize(negative_embs * mask_exp, p=2, dim=-1)
+            else:
+                doc_n = F.normalize(negative_embs, p=2, dim=-1)
+            pos_sim = (masked_q * doc_p).sum(dim=-1) / self.temperature
+            neg_sim = torch.bmm(doc_n, masked_q.unsqueeze(-1)).squeeze(-1) / self.temperature
             logits = torch.cat([pos_sim.unsqueeze(-1), neg_sim], dim=-1)
             labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
             per_sample_loss = F.cross_entropy(logits, labels, reduction="none")
         else:
-            sim = torch.mm(masked_q, masked_p.t()) / self.temperature
+            sim = torch.mm(masked_q, doc_p.t()) / self.temperature
             labels = torch.arange(sim.size(0), device=sim.device)
             per_sample_loss = F.cross_entropy(sim, labels, reduction="none")
 
@@ -518,9 +532,12 @@ class BAMCombinedLoss(nn.Module):
         self.temp_end   = ts.get("end", 0.02)
         self.encoder_warmup_epochs = lc.get("encoder_warmup_epochs", 0)
 
+        # Option B uses query-only masking; Option A masks both sides.
+        use_mask_routing = mc.get("use_mask_routing", False)
         self.contrastive = BloomMaskedContrastiveLoss(
             temperature=self.temp_start,
             class_weights=cw,
+            mask_documents=not use_mask_routing,
         )
         self.efficiency = BloomTwoFactorEfficiencyLoss(bloom_frequencies=freqs)
         self.mrl_anchor = MRLAnchorRegularizationLoss(
@@ -546,10 +563,15 @@ class BAMCombinedLoss(nn.Module):
 
     def set_epoch(self, epoch: int, total_epochs: int, freeze_encoder: bool = False):
         """
-        Update temperature (cosine anneal) and efficiency gate at start of each epoch.
+        Update temperature (cosine anneal) and loss gates at start of each epoch.
 
         freeze_encoder=True: use fixed temp_end (annealing with frozen encoder causes
         loss-scale instability that parks the router at a fixed equilibrium).
+
+        All non-contrastive losses (efficiency, mask-sparsity/diversity/variance) are
+        gated off for the first encoder_warmup_epochs epochs. This lets the encoder and
+        mask co-train on pure contrastive + MRL-anchor signal first, building a stable
+        representation before compression and differentiation pressure is applied.
         """
         if freeze_encoder:
             t = self.temp_end
@@ -561,9 +583,11 @@ class BAMCombinedLoss(nn.Module):
         self.contrastive.set_temperature(t)
         self.mrl_anchor.temperature = t
 
-        self._active_efficiency_weight = (
-            0.0 if epoch < self.encoder_warmup_epochs else self.efficiency_weight
-        )
+        past_warmup = epoch >= self.encoder_warmup_epochs
+        self._active_efficiency_weight = self.efficiency_weight if past_warmup else 0.0
+        self._active_mask_sparsity_weight  = self.mask_sparsity_weight  if past_warmup else 0.0
+        self._active_mask_diversity_weight = self.mask_diversity_weight if past_warmup else 0.0
+        self._active_mask_variance_weight  = self.mask_variance_weight  if past_warmup else 0.0
 
     def forward(
         self,
@@ -618,14 +642,17 @@ class BAMCombinedLoss(nn.Module):
             d_stats["diversity"] = l_d.item()
             d_stats["dim_variance"] = float(all_bloom_dims.var().item())
 
-        # Option B: mask sparsity + diversity + variance
+        # Option B: mask sparsity + diversity + variance (gated behind warmup)
         if soft_mask is not None:
             l_sp, sp_stats = self.mask_sparsity(soft_mask, bloom_labels)
             l_md, md_stats = self.mask_diversity(soft_mask, bloom_labels)
             l_mv, mv_stats = self.mask_variance(soft_mask, bloom_labels)
-            total = total + self.mask_sparsity_weight  * l_sp
-            total = total + self.mask_diversity_weight * l_md
-            total = total + self.mask_variance_weight  * l_mv
+            sp_w = getattr(self, "_active_mask_sparsity_weight",  self.mask_sparsity_weight)
+            md_w = getattr(self, "_active_mask_diversity_weight", self.mask_diversity_weight)
+            mv_w = getattr(self, "_active_mask_variance_weight",  self.mask_variance_weight)
+            total = total + sp_w * l_sp
+            total = total + md_w * l_md
+            total = total + mv_w * l_mv
             d_stats.update(sp_stats)
             d_stats.update(md_stats)
             d_stats.update(mv_stats)
@@ -687,8 +714,11 @@ class BAMCombinedLoss(nn.Module):
             l_sp, _ = self.mask_sparsity(soft_mask, bloom_labels)
             l_md, _ = self.mask_diversity(soft_mask, bloom_labels)
             l_mv, _ = self.mask_variance(soft_mask, bloom_labels)
-            routing = routing + self.mask_sparsity_weight  * l_sp
-            routing = routing + self.mask_diversity_weight * l_md
-            routing = routing + self.mask_variance_weight  * l_mv
+            sp_w = getattr(self, "_active_mask_sparsity_weight",  self.mask_sparsity_weight)
+            md_w = getattr(self, "_active_mask_diversity_weight", self.mask_diversity_weight)
+            mv_w = getattr(self, "_active_mask_variance_weight",  self.mask_variance_weight)
+            routing = routing + sp_w * l_sp
+            routing = routing + md_w * l_md
+            routing = routing + mv_w * l_mv
 
         return self.contrastive_weight * l_c, routing
