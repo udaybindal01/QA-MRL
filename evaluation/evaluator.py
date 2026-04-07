@@ -173,6 +173,14 @@ class FullEvaluator:
         rankings = np.zeros((N, max(self.ks)), dtype=np.int64)
 
         use_prefix_slicing = (query_dims is not None and query_full_embs is not None)
+        # Option B: static scattered mask — corpus pre-masked per Bloom level.
+        # Both training and eval use normalize(q * mask_b) · normalize(corpus * mask_b),
+        # matching the masked-both-sides training objective.
+        use_static_mask = (
+            query_full_embs is not None and
+            hasattr(model, "bloom_mask_head") and
+            hasattr(model.bloom_mask_head, "bloom_logit")
+        )
 
         if use_prefix_slicing:
             # Option A: normalize(q[:k]) · normalize(c[:k]) — prefix slicing.
@@ -192,17 +200,34 @@ class FullEvaluator:
                 del c_k
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
+        elif use_static_mask:
+            # Option B: per-level masked corpus.
+            # normalize(q * mask_b) · normalize(corpus * mask_b) for each Bloom level b.
+            bloom_logit_w = model.bloom_mask_head.bloom_logit.weight.detach().cpu()  # [6, 768]
+            bloom_masks_bin = (torch.sigmoid(bloom_logit_w) > 0.5).float()           # [6, 768]
+            routing_labels = torch.tensor(learner_blooms_0idx, dtype=torch.long)      # [N]
+            for b in range(6):
+                level_idx = (routing_labels == b).nonzero(as_tuple=True)[0]
+                if len(level_idx) == 0:
+                    continue
+                mask_b = bloom_masks_bin[b].to(device)                                # [768]
+                c_b = F.normalize(corpus_embs.to(device) * mask_b, p=2, dim=-1)      # [C, 768]
+                for i in range(0, len(level_idx), chunk_size):
+                    chunk = level_idx[i:i + chunk_size]
+                    q_b = F.normalize(
+                        query_full_embs[chunk].to(device) * mask_b, p=2, dim=-1
+                    )
+                    sim = torch.mm(q_b, c_b.t())
+                    topk = sim.topk(max(self.ks), dim=-1).indices.cpu().numpy()
+                    rankings[chunk.numpy()] = topk
+                del c_b
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
         else:
-            # Option B (scattered mask) and MRL baseline: full-dim corpus dot product.
-            # Option B: query_embs = normalize(q * mask_b) (masked embedding from encode_queries)
-            #           corpus_embs = normalize(corpus_full) (encode_documents returns full emb)
-            #           sim = normalize(q * mask_b) · normalize(corpus_full)
-            #           Matches training: masked_q · full_doc (query-only masking).
-            # MRL baseline: full-dim dot product (both sides full).
-            corpus_norm = corpus_embs.to(device)
+            # MRL baseline: full-dim dot product.
             for i in range(0, N, chunk_size):
                 q_chunk = query_embs[i:i + chunk_size].to(device)
-                sim = torch.mm(q_chunk, corpus_norm.t())
+                sim = torch.mm(q_chunk, corpus_embs.to(device).t())
                 topk = sim.topk(max(self.ks), dim=-1).indices.cpu().numpy()
                 rankings[i:i + chunk_size] = topk
                 del sim
