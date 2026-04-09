@@ -48,18 +48,14 @@ class BloomMaskHead(nn.Module):
         Temperature τ is annealed 1.0 → 0.1 over training (call set_temperature()).
 
     Initialization:
-        Cognitive-gradient init: level b targets active fraction 0.20 + 0.20*(b/5),
-        linearly from Remember=0.20 (154 dims) to Create=0.40 (307 dims). Average = 0.30
-        = 230 dims, matching Option A's avg_active_dims.
+        Cognitive-ordered init via normal quantile: active fraction = P(logit > 0)
+        = Φ(μ/σ), so μ = Φ^{-1}(target_frac) with σ=1.0.
+        Target fracs: Remember=0.20 (154 dims) → Create=0.40 (307 dims), avg=0.30=230.
 
-        Why not N(0, 1.0)? At mean=0, sigmoid(0)=0.50 → 384 dims. Training would
-        need to fight ~154 dims of excess against contrastive dominance (contrastive
-        accumulates 7.5× more gradient updates for Remember vs Create due to class
-        imbalance, causing inverted ordering). Cognitive init encodes the target
-        ordering from epoch 0 — efficiency only needs to maintain it.
-
-        std=0.5 (vs 1.0): keeps more logits near the sigmoid decision boundary
-        → larger sigmoid gradient → better gradient flow during early training.
+        Why not N(0,1)? At μ=0, P(logit>0)=0.50 → 384 active dims. Contrastive gets
+        7.5× more gradient updates for Remember (n=1198) vs Create (n=159), pushing
+        Remember logits up fastest → dims invert (Remember highest, Create lowest).
+        Cognitive-ordered init encodes the right ordering from epoch 0.
     """
 
     EMBEDDING_DIM = 768
@@ -71,16 +67,26 @@ class BloomMaskHead(nn.Module):
         self.gumbel_temperature = gumbel_temperature
         self.bloom_logit = nn.Embedding(self.BLOOM_DIM, self.EMBEDDING_DIM)
         with torch.no_grad():
-            # Cognitive-ordered init: Remember → 154 dims, Create → 307 dims.
-            # target_frac linearly from 0.20 (b=0) to 0.40 (b=5).
-            # logit_mean = sigmoid^{-1}(target_frac) = log(p / (1-p)).
+            # Cognitive-ordered init: Remember → 154 active dims, Create → 307.
+            #
+            # Key: hard_mask = (logit > 0), so active fraction = P(N(μ,σ) > 0) = Φ(μ/σ).
+            # To get P=target_frac with σ=1: μ = Φ^{-1}(target_frac)  [normal quantile].
+            # NOT sigmoid^{-1}(target_frac) — that controls soft_mask value, not active count.
+            #
+            # Normal quantile (ppf) values: Φ^{-1}(target_frac) for fracs 0.20→0.40
+            #   b=0 Remember:   Φ^{-1}(0.20) = -0.842  → 154 active dims (20% of 768)
+            #   b=1 Understand: Φ^{-1}(0.24) = -0.706  → 184 active dims
+            #   b=2 Apply:      Φ^{-1}(0.28) = -0.583  → 215 active dims
+            #   b=3 Analyze:    Φ^{-1}(0.32) = -0.468  → 246 active dims
+            #   b=4 Evaluate:   Φ^{-1}(0.36) = -0.358  → 277 active dims
+            #   b=5 Create:     Φ^{-1}(0.40) = -0.253  → 307 active dims  (40% of 768)
+            #   Average: 0.30 × 768 = 230 dims — matches Option A avg_active_dims.
+            _INIT_MEANS = [-0.842, -0.706, -0.583, -0.468, -0.358, -0.253]
             for b in range(self.BLOOM_DIM):
-                target_frac = 0.20 + 0.20 * (b / (self.BLOOM_DIM - 1))
-                logit_mean = math.log(target_frac / (1.0 - target_frac))
                 nn.init.normal_(
                     self.bloom_logit.weight[b : b + 1],
-                    mean=logit_mean,
-                    std=0.5,
+                    mean=_INIT_MEANS[b],
+                    std=1.0,
                 )
 
     def set_temperature(self, temperature: float):
