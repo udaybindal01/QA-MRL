@@ -16,6 +16,7 @@ Two routing modes (config: model.use_mask_routing):
     Needs BloomMaskSparsityLoss + BloomMaskDiversityLoss to prevent all-ones collapse.
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -47,8 +48,18 @@ class BloomMaskHead(nn.Module):
         Temperature τ is annealed 1.0 → 0.1 over training (call set_temperature()).
 
     Initialization:
-        bloom_logit: N(0, 1.0) — ~50% active dims per level with uncorrelated
-        random masks (cosine sim ≈ 0), giving max room for diversity/variance losses.
+        Cognitive-gradient init: level b targets active fraction 0.20 + 0.20*(b/5),
+        linearly from Remember=0.20 (154 dims) to Create=0.40 (307 dims). Average = 0.30
+        = 230 dims, matching Option A's avg_active_dims.
+
+        Why not N(0, 1.0)? At mean=0, sigmoid(0)=0.50 → 384 dims. Training would
+        need to fight ~154 dims of excess against contrastive dominance (contrastive
+        accumulates 7.5× more gradient updates for Remember vs Create due to class
+        imbalance, causing inverted ordering). Cognitive init encodes the target
+        ordering from epoch 0 — efficiency only needs to maintain it.
+
+        std=0.5 (vs 1.0): keeps more logits near the sigmoid decision boundary
+        → larger sigmoid gradient → better gradient flow during early training.
     """
 
     EMBEDDING_DIM = 768
@@ -60,7 +71,17 @@ class BloomMaskHead(nn.Module):
         self.gumbel_temperature = gumbel_temperature
         self.bloom_logit = nn.Embedding(self.BLOOM_DIM, self.EMBEDDING_DIM)
         with torch.no_grad():
-            nn.init.normal_(self.bloom_logit.weight, mean=0.0, std=1.0)
+            # Cognitive-ordered init: Remember → 154 dims, Create → 307 dims.
+            # target_frac linearly from 0.20 (b=0) to 0.40 (b=5).
+            # logit_mean = sigmoid^{-1}(target_frac) = log(p / (1-p)).
+            for b in range(self.BLOOM_DIM):
+                target_frac = 0.20 + 0.20 * (b / (self.BLOOM_DIM - 1))
+                logit_mean = math.log(target_frac / (1.0 - target_frac))
+                nn.init.normal_(
+                    self.bloom_logit.weight[b : b + 1],
+                    mean=logit_mean,
+                    std=0.5,
+                )
 
     def set_temperature(self, temperature: float):
         """Anneal Gumbel temperature each epoch (start=1.0 → end=0.1)."""
