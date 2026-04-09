@@ -30,9 +30,11 @@ model:
   normalize_embeddings: true
   mrl_dims: [64, 128, 256, 384, 512, 768]
   use_mask_routing: true             # Option B: BloomMaskHead scattered mask
-  mask_sparsity_target: 0.30         # Global anchor at 230/768 dims — matches Option A's avg 234.
-                                     # BloomMaskSparsityLoss gets global_target=0.30 (all levels same
-                                     # target), then efficiency cognitive weights create the spread.
+  mask_sparsity_target: 0.38         # Global anchor at ~292/768 dims avg.
+                                     # 0.30 (230 dims) was too aggressive for scattered mask on MRL
+                                     # encoder — scattered mask needs ~290 dims to capture core
+                                     # semantics; prefix mask can work at 230 because it keeps the
+                                     # best (first) dims by MRL design. Efficiency creates the spread.
   use_soft_bloom_routing: false      # N/A for Option B
 
 data:

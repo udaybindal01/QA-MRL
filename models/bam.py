@@ -50,7 +50,7 @@ class BloomMaskHead(nn.Module):
     Initialization:
         Cognitive-ordered init via normal quantile: active fraction = P(logit > 0)
         = Φ(μ/σ), so μ = Φ^{-1}(target_frac) with σ=1.0.
-        Target fracs: Remember=0.20 (154 dims) → Create=0.40 (307 dims), avg=0.30=230.
+        Target fracs: Remember=0.28 (215 dims) → Create=0.48 (369 dims), avg=0.38=292.
 
         Why not N(0,1)? At μ=0, P(logit>0)=0.50 → 384 active dims. Contrastive gets
         7.5× more gradient updates for Remember (n=1198) vs Create (n=159), pushing
@@ -73,15 +73,19 @@ class BloomMaskHead(nn.Module):
             # To get P=target_frac with σ=1: μ = Φ^{-1}(target_frac)  [normal quantile].
             # NOT sigmoid^{-1}(target_frac) — that controls soft_mask value, not active count.
             #
-            # Normal quantile (ppf) values: Φ^{-1}(target_frac) for fracs 0.20→0.40
-            #   b=0 Remember:   Φ^{-1}(0.20) = -0.842  → 154 active dims (20% of 768)
-            #   b=1 Understand: Φ^{-1}(0.24) = -0.706  → 184 active dims
-            #   b=2 Apply:      Φ^{-1}(0.28) = -0.583  → 215 active dims
-            #   b=3 Analyze:    Φ^{-1}(0.32) = -0.468  → 246 active dims
-            #   b=4 Evaluate:   Φ^{-1}(0.36) = -0.358  → 277 active dims
-            #   b=5 Create:     Φ^{-1}(0.40) = -0.253  → 307 active dims  (40% of 768)
-            #   Average: 0.30 × 768 = 230 dims — matches Option A avg_active_dims.
-            _INIT_MEANS = [-0.842, -0.706, -0.583, -0.468, -0.358, -0.253]
+            # Normal quantile (ppf) values: Φ^{-1}(target_frac) for fracs 0.28→0.48
+            # Range 0.28-0.48 (215-369 dims, avg 0.38=292) chosen because:
+            #   - 0.20-0.40 (229 avg) was too compressed: scattered mask at 162 dims
+            #     misses core semantics (MRL prefix mask owns those dims by design)
+            #   - 0.38-0.50 avg gives enough dims for quality while maintaining ordering
+            #   b=0 Remember:   Φ^{-1}(0.28) = -0.583  → 215 active dims
+            #   b=1 Understand: Φ^{-1}(0.32) = -0.468  → 246 active dims
+            #   b=2 Apply:      Φ^{-1}(0.36) = -0.358  → 277 active dims
+            #   b=3 Analyze:    Φ^{-1}(0.40) = -0.253  → 307 active dims
+            #   b=4 Evaluate:   Φ^{-1}(0.44) = -0.151  → 338 active dims
+            #   b=5 Create:     Φ^{-1}(0.48) = -0.050  → 369 active dims
+            #   Average: 0.38 × 768 = 292 dims
+            _INIT_MEANS = [-0.583, -0.468, -0.358, -0.253, -0.151, -0.050]
             for b in range(self.BLOOM_DIM):
                 nn.init.normal_(
                     self.bloom_logit.weight[b : b + 1],
