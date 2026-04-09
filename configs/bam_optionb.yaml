@@ -12,10 +12,12 @@
 #
 # Prerequisite: optionA-working_pipeline.sh must have been run first.
 #
-# Loss schedule (3 stages, SMEC SMRL insight):
+# Loss schedule (2 stages):
 #   Stage 1 (epochs 0-4):  contrastive + mrl_anchor + distillation
-#   Stage 2 (epochs 5-9):  + efficiency + mask_sparsity
-#   Stage 3 (epochs 10+):  + mask_diversity + mask_variance
+#   Stage 2 (epochs 5-14): + efficiency + mask_diversity + mask_variance
+#   No sparsity loss: efficiency (cognitive weights 1.0→0.167) provides both
+#   compression and per-level differentiation. Sparsity targets conflict with
+#   efficiency direction (sparsity wants Create at 499; efficiency wants it compressed too).
 
 model:
   backbone: "BAAI/bge-base-en-v1.5"
@@ -24,7 +26,10 @@ model:
   normalize_embeddings: true
   mrl_dims: [64, 128, 256, 384, 512, 768]
   use_mask_routing: true             # Option B: BloomMaskHead scattered mask
-  mask_sparsity_target: 0.44         # global fallback; per-level targets from loss config
+  mask_sparsity_target: null         # null → BloomMaskSparsityLoss uses cognitive defaults
+                                     # (Remember=0.40 → Create=0.65) for built-in differentiation.
+                                     # Was 0.44 (uniform), which overrode per-level defaults and
+                                     # gave no differentiation signal — all levels converged to ~380.
   use_soft_bloom_routing: false      # N/A for Option B
 
 data:
@@ -58,16 +63,21 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.2         # Cognitive-weighted compression (Remember↓, Create↑)
+    efficiency_weight: 0.5         # Cognitive compression: cognitive(b)=(1-b/6) weights create
+                                   # 6:1 ratio between Remember and Create — both compression
+                                   # AND level differentiation in one loss. Increased from 0.3
+                                   # so equilibrium with contrastive (1.0) gives real spread.
     mrl_anchor_weight: 0.2         # Keeps encoder from drifting from MRL structure
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
-    mask_sparsity_weight: 0.5      # Per-level sparsity: Remember→40%, Create→65%
+    mask_sparsity_weight: 0.0      # Removed: conflicts with efficiency (sparsity wants Create↑,
+                                   # efficiency wants Create compressed too, just less). Let
+                                   # efficiency+contrastive equilibrium determine active dims per level.
     mask_diversity_weight: 0.3     # Pairwise cosine penalty between Bloom-level mean masks
     mask_variance_weight: 0.3      # Per-dim variance across levels (always ≤ 0; keep weight low)
     mask_distill_weight: 0.3       # SMEC eq 7: |Sim(full_i,full_j) - Sim(masked_i,masked_j)|
                                    # Fires from epoch 0 — unsupervised, no gradient conflict.
-    encoder_warmup_epochs: 5       # Stage 1 end / Stage 2 start: add efficiency + sparsity
-    mask_differentiation_epochs: 10  # Stage 2 end / Stage 3 start: add diversity + variance
+    encoder_warmup_epochs: 5       # Stage 1 end: add efficiency + diversity + variance simultaneously
+    mask_differentiation_epochs: 5 # Same as encoder_warmup_epochs → Stage 2 adds all losses at once
     temperature_schedule:
       start: 0.1
       end: 0.02
