@@ -14,10 +14,14 @@
 #
 # Loss schedule (2 stages):
 #   Stage 1 (epochs 0-4):  contrastive + mrl_anchor + distillation
-#   Stage 2 (epochs 5-14): + efficiency + mask_diversity + mask_variance
-#   No sparsity loss: efficiency (cognitive weights 1.0→0.167) provides both
-#   compression and per-level differentiation. Sparsity targets conflict with
-#   efficiency direction (sparsity wants Create at 499; efficiency wants it compressed too).
+#   Stage 2 (epochs 5-14): + sparsity + efficiency + mask_diversity + mask_variance
+#
+# Compression design: global sparsity target (0.30 = 230 dims) anchors the average;
+# efficiency (cognitive weights 1-b/6) spreads levels around that anchor:
+#   sparsity pulls all levels toward 230
+#   efficiency pushes Remember more → lands below 230
+#   efficiency pushes Create less  → lands above 230
+# These do NOT conflict: sparsity sets the center, efficiency sets the ordering.
 
 model:
   backbone: "BAAI/bge-base-en-v1.5"
@@ -26,10 +30,9 @@ model:
   normalize_embeddings: true
   mrl_dims: [64, 128, 256, 384, 512, 768]
   use_mask_routing: true             # Option B: BloomMaskHead scattered mask
-  mask_sparsity_target: null         # null → BloomMaskSparsityLoss uses cognitive defaults
-                                     # (Remember=0.40 → Create=0.65) for built-in differentiation.
-                                     # Was 0.44 (uniform), which overrode per-level defaults and
-                                     # gave no differentiation signal — all levels converged to ~380.
+  mask_sparsity_target: 0.30         # Global anchor at 230/768 dims — matches Option A's avg 234.
+                                     # BloomMaskSparsityLoss gets global_target=0.30 (all levels same
+                                     # target), then efficiency cognitive weights create the spread.
   use_soft_bloom_routing: false      # N/A for Option B
 
 data:
@@ -63,15 +66,14 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.5         # Cognitive compression: cognitive(b)=(1-b/6) weights create
-                                   # 6:1 ratio between Remember and Create — both compression
-                                   # AND level differentiation in one loss. Increased from 0.3
-                                   # so equilibrium with contrastive (1.0) gives real spread.
+    efficiency_weight: 0.5         # Cognitive ordering: (1-b/6) weights spread levels around
+                                   # sparsity anchor. Remember gets 6x more downward pressure than
+                                   # Create → should settle well below 230, Create above 230.
     mrl_anchor_weight: 0.2         # Keeps encoder from drifting from MRL structure
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
-    mask_sparsity_weight: 0.0      # Removed: conflicts with efficiency (sparsity wants Create↑,
-                                   # efficiency wants Create compressed too, just less). Let
-                                   # efficiency+contrastive equilibrium determine active dims per level.
+    mask_sparsity_weight: 0.5      # Global anchor at 0.30 = 230 dims. Pulls avg toward Option A's
+                                   # 234-dim level. Efficiency then creates the cognitive spread.
+                                   # Previously 0.0 (removed); was pulling toward wrong targets.
     mask_diversity_weight: 0.3     # Pairwise cosine penalty between Bloom-level mean masks
     mask_variance_weight: 0.3      # Per-dim variance across levels (always ≤ 0; keep weight low)
     mask_distill_weight: 0.3       # SMEC eq 7: |Sim(full_i,full_j) - Sim(masked_i,masked_j)|
