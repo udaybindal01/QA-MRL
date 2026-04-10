@@ -64,8 +64,9 @@ training:
     type: "adamw"
     lr: 2.0e-5
     weight_decay: 0.01
-    encoder_lr: 5.0e-5             # Was 2e-5. Higher LR needed for encoder to reorganize
-                                   # dim-space away from MRL-prefix structure for scattered masks.
+    encoder_lr: 2.0e-5             # Restored to 2e-5. 5e-5 caused encoder quality collapse:
+                                   # Apply at 236 dims → 0.3103, worse than unrouted BAM at 256 dims
+                                   # (0.4443). Higher LR hypothesis was wrong — encoder degraded.
     router_lr: 2.0e-4              # BloomMaskHead bloom_logit — 10x encoder LR
   scheduler:
     type: "cosine"
@@ -77,12 +78,11 @@ training:
     efficiency_uniform_weights: true  # true = equal weight for all levels (no cognitive ordering).
                                    # Cognitive weights (1-b/6) were wrong: Option A learned
                                    # Understand/Evaluate → 432 dims, others → 205-230 — not monotone.
-    mrl_anchor_weight: 0.0         # Was 0.2. REMOVED: MRL anchor explicitly forces encoder to keep
-                                   # prefix dims sharp (InfoNCE at d=64,128,256,384,512,768).
-                                   # This locks the encoder in MRL-prefix-optimized structure and
-                                   # prevents it from redistributing information to the scattered
-                                   # dims Option B selects. Apply: 365 dims → 0.3414 WORSE than
-                                   # Option A's 205 prefix dims proves the encoder isn't reorganizing.
+    mrl_anchor_weight: 0.1         # Restored (was 0.0). Removing anchor entirely caused encoder
+                                   # collapse: Apply 236 dims → 0.3103 < unrouted encoder 0.4443.
+                                   # Anchor keeps the encoder from catastrophically forgetting its
+                                   # pre-trained retrieval quality. Reduced 0.2→0.1 to give encoder
+                                   # slightly more freedom to adapt to scatter masks.
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
     mask_sparsity_weight: 1.5      # Was 0.5. Increased: at 0.5, contrastive gradient dominates
                                    # and dims drift up during Stage 1 before sparsity activates.
@@ -99,10 +99,10 @@ training:
     mask_diversity_weight: 0.4     # Was 0.3. Slightly stronger — masks are well-differentiated
                                    # (cosine 0.40-0.51) but Apply is still regressing vs Option A.
     mask_variance_weight: 0.3      # Per-dim variance across levels. Keep at 0.3 (working).
-    mask_distill_weight: 0.15      # Was 0.3. Reduced: distillation teacher is the full MRL embedding,
-                                   # which biases masks toward selecting prefix-correlated dims.
-                                   # At weight 0.3 it fights encoder reorganization. At 0.15 it
-                                   # still provides semantic signal without dominating.
+    mask_distill_weight: 0.3       # Restored to 0.3. At 0.15, quality dropped further. The
+                                   # "fights encoder reorganization" concern is moot since we
+                                   # now know encoder reorganization itself degraded quality.
+                                   # Distillation is a net quality positive.
     encoder_warmup_epochs: 3       # Was 5. Shorter Stage 1: encoder starts from MRL checkpoint
                                    # (already pre-trained), doesn't need 5 epochs of free-form
                                    # contrastive drift before sparsity kicks in. Logit init is
