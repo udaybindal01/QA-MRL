@@ -76,8 +76,11 @@ training:
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
     mask_sparsity_weight: 0.0      # Disabled — no global target. Cognitive init + efficiency
                                    # handles compression and ordering without conflicting targets.
-    mask_diversity_weight: 0.3     # Pairwise cosine penalty between Bloom-level mean masks
-    mask_variance_weight: 0.3      # Per-dim variance across levels
+    mask_diversity_weight: 0.0     # Redundant with variance (both push masks apart); dropped.
+                                   # Variance gives 768 gradient signals vs 15 from diversity.
+    mask_variance_weight: 0.2      # Per-dim variance across levels — the only differentiation
+                                   # signal needed. Reduced 0.3→0.2 so distillation (0.3) is
+                                   # the dominant mask-shaping force (semantic quality first).
     mask_distill_weight: 0.3       # SMEC eq 7: fires ALL 15 epochs (not gated to Stage 1).
                                    # Critical for quality: forces masks to select semantically
                                    # informative dims. Gating to Stage 1 killed quality.
