@@ -624,12 +624,13 @@ class BAMCombinedLoss(nn.Module):
         # Stage 2 → 3: differentiation losses activate
         self._active_mask_diversity_weight = self.mask_diversity_weight if past_stage2 else 0.0
         self._active_mask_variance_weight  = self.mask_variance_weight  if past_stage2 else 0.0
-        # Distillation fires in Stage 1 only — stops when diversity activates.
-        # Distillation teaches every mask to preserve the same full-dim similarity
-        # structure; this directly conflicts with diversity forcing masks to diverge.
-        # Gating it to Stage 1 lets the mask head anchor to informative dims early,
-        # then frees it to specialise per Bloom level from Stage 2 onward.
-        self._active_mask_distill_weight = self.mask_distill_weight if not past_stage1 else 0.0
+        # Distillation fires ALL epochs — it is the key quality signal for Option B.
+        # It forces the mask to select semantically informative dims by minimizing
+        # |Sim(full_i,full_j) - Sim(masked_i,masked_j)|. Gating it to Stage 1 caused
+        # quality drops because masks then optimized diversity/sparsity at the expense
+        # of semantic content. The diversity+variance losses provide sufficient
+        # differentiation pressure without removing distillation.
+        self._active_mask_distill_weight = self.mask_distill_weight
 
     def forward(
         self,

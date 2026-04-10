@@ -14,14 +14,17 @@
 #
 # Loss schedule (2 stages):
 #   Stage 1 (epochs 0-4):  contrastive + mrl_anchor + distillation
-#   Stage 2 (epochs 5-14): + sparsity + efficiency + mask_diversity + mask_variance
+#   Stage 2 (epochs 5-14): + efficiency + mask_diversity + mask_variance
+#                            distillation continues all 15 epochs (quality signal)
 #
-# Compression design: global sparsity target (0.30 = 230 dims) anchors the average;
-# efficiency (cognitive weights 1-b/6) spreads levels around that anchor:
-#   sparsity pulls all levels toward 230
-#   efficiency pushes Remember more → lands below 230
-#   efficiency pushes Create less  → lands above 230
-# These do NOT conflict: sparsity sets the center, efficiency sets the ordering.
+# Distillation is ON throughout: it forces the mask to select semantically informative
+# dims (|Sim(full_i,j) - Sim(masked_i,j)| ≈ 0), which is the key quality signal.
+# Gating it to Stage 1 only caused quality drops — masks picked dims satisfying
+# diversity/sparsity but not semantic content.
+#
+# No sparsity loss: efficiency (cognitive weights 1-b/6) handles compression and ordering.
+# With cognitive init at 215-369 dims, equilibrium without sparsity lands ~280-350
+# (lower than 370 from N(0,1) init) while maintaining cognitive ordering.
 
 model:
   backbone: "BAAI/bge-base-en-v1.5"
@@ -30,11 +33,9 @@ model:
   normalize_embeddings: true
   mrl_dims: [64, 128, 256, 384, 512, 768]
   use_mask_routing: true             # Option B: BloomMaskHead scattered mask
-  mask_sparsity_target: 0.38         # Global anchor at ~292/768 dims avg.
-                                     # 0.30 (230 dims) was too aggressive for scattered mask on MRL
-                                     # encoder — scattered mask needs ~290 dims to capture core
-                                     # semantics; prefix mask can work at 230 because it keeps the
-                                     # best (first) dims by MRL design. Efficiency creates the spread.
+  mask_sparsity_target: null          # No sparsity target. Efficiency + contrastive equilibrium
+                                     # determines dim count; cognitive init (0.28-0.48) ensures
+                                     # cognitive ordering from the start.
   use_soft_bloom_routing: false      # N/A for Option B
 
 data:
@@ -73,13 +74,13 @@ training:
                                    # Create → should settle well below 230, Create above 230.
     mrl_anchor_weight: 0.2         # Keeps encoder from drifting from MRL structure
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
-    mask_sparsity_weight: 0.5      # Global anchor at 0.30 = 230 dims. Pulls avg toward Option A's
-                                   # 234-dim level. Efficiency then creates the cognitive spread.
-                                   # Previously 0.0 (removed); was pulling toward wrong targets.
+    mask_sparsity_weight: 0.0      # Disabled — no global target. Cognitive init + efficiency
+                                   # handles compression and ordering without conflicting targets.
     mask_diversity_weight: 0.3     # Pairwise cosine penalty between Bloom-level mean masks
-    mask_variance_weight: 0.3      # Per-dim variance across levels (always ≤ 0; keep weight low)
-    mask_distill_weight: 0.3       # SMEC eq 7: |Sim(full_i,full_j) - Sim(masked_i,masked_j)|
-                                   # Fires from epoch 0 — unsupervised, no gradient conflict.
+    mask_variance_weight: 0.3      # Per-dim variance across levels
+    mask_distill_weight: 0.3       # SMEC eq 7: fires ALL 15 epochs (not gated to Stage 1).
+                                   # Critical for quality: forces masks to select semantically
+                                   # informative dims. Gating to Stage 1 killed quality.
     encoder_warmup_epochs: 5       # Stage 1 end: add efficiency + diversity + variance simultaneously
     mask_differentiation_epochs: 5 # Same as encoder_warmup_epochs → Stage 2 adds all losses at once
     temperature_schedule:
