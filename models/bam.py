@@ -71,31 +71,35 @@ class BloomMaskHead(nn.Module):
         self.gumbel_temperature = gumbel_temperature
         self.bloom_logit = nn.Embedding(self.BLOOM_DIM, self.EMBEDDING_DIM)
         with torch.no_grad():
-            # Gumbel-calibrated per-level init.
+            # Per-level inference-calibrated init using the Gaussian quantile.
             #
-            # hard_mask[d] = (soft_mask[d] > 0.5)
-            #              = (sigmoid((logit[d] + G) / τ) > 0.5)   where G ~ Gumbel(0,1)
-            #              = (logit[d] + G > 0)                     at τ=1
+            # At inference (eval mode), no Gumbel noise is added:
+            #   soft_mask = sigmoid(logit)
+            #   hard_mask = (sigmoid(logit) > 0.5) = (logit > 0)
             #
-            # P(hard=1 | logit=μ) = P(G > -μ) = 1 − exp(−exp(μ))  [Gumbel CDF]
+            # So P(hard_mask[d] = 1) = P(logit_d > 0) for logit_d ~ N(μ, σ²)
+            #                        = Φ(μ/σ)                [Gaussian CDF]
             #
-            # Solving for μ given target active fraction f:
-            #   1 − exp(−exp(μ)) = f
-            #   μ = log(−log(1 − f))
+            # Solving for μ given inference target active fraction f and σ=1:
+            #   Φ(μ) = f  →  μ = Φ⁻¹(f) = sqrt(2) × erfinv(2f − 1)
             #
-            # This ensures each Bloom level STARTS at its target dim count even under
-            # Gumbel noise in Stage 1, preventing the upward logit drift that occurs
-            # when initializing near 0 (where contrastive pressure dominates before
-            # sparsity activates).
+            # The Gumbel formula is WRONG here — Gumbel calibrates training-time
+            # P(logit+G > 0) under noise, but eval has no noise. Using the Gumbel
+            # formula gives logits like -1.20 for 26% target, where nearly all dims
+            # are inactive at inference (P(N(-1.2,1)>0)≈0.8%), collapsing quality.
+            #
+            # std=1.0 preserves good per-dim variance so the within-level mask is
+            # a clean mix of strong-on and strong-off dims (cosine ≈ 0 across levels).
             if level_targets:
                 for b in range(self.BLOOM_DIM):
                     f = level_targets.get(b, sparsity_target if sparsity_target else 0.46)
                     f = max(1e-4, min(1.0 - 1e-4, f))
-                    mu = math.log(-math.log(1.0 - f))   # Gumbel quantile
-                    nn.init.normal_(self.bloom_logit.weight[b], mean=mu, std=0.5)
+                    # mu = Φ⁻¹(f) = sqrt(2) × erfinv(2f − 1)
+                    mu = (torch.erfinv(torch.tensor(2.0 * f - 1.0)) * math.sqrt(2)).item()
+                    nn.init.normal_(self.bloom_logit.weight[b], mean=mu, std=1.0)
             else:
-                # Uniform init: all levels at Gumbel-calibrated logit for 0.46 active → -0.100
-                # std=1.0 ensures masks start uncorrelated (cosine ≈ 0) across dims.
+                # Uniform init: Φ⁻¹(0.46) = -0.100 → 46% active at inference → 354 dims.
+                # std=1.0 gives healthy variance so masks start uncorrelated (cosine ≈ 0).
                 nn.init.normal_(self.bloom_logit.weight, mean=-0.100, std=1.0)
 
     def set_temperature(self, temperature: float):
