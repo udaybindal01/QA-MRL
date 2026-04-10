@@ -31,20 +31,25 @@ class BloomMaskHead(nn.Module):
 
     Architecture:
         bloom_logit: Embedding(6, 768) — one logit vector per Bloom level
-        soft_mask   = sigmoid((logit + Gumbel_noise) / τ)   [training]
-                    = sigmoid(logit)                          [inference]
-        hard_mask   = (soft_mask > 0.5)
-        mask        = hard_mask + (soft_mask − soft_mask.detach())   [STE backward]
 
-    Gumbel-Softmax reparameterization (SMEC §3.3, eq 6):
-        G ~ Gumbel(0,1): G = −log(−log(U)),  U ~ Uniform(0,1)
-        z = sigmoid((logit + G) / τ)
+        Training (soft mask, SMEC §3.3):
+            soft_mask = sigmoid((logit + Gumbel_noise) / τ)   ← continuous [0,1]
+            mask      = soft_mask                              ← NO hard mask, NO STE
 
-        Compared to plain STE (sigmoid gradient only), Gumbel-Softmax is a proper
-        differentiable relaxation of the discrete selection problem. The injected
-        Gumbel noise gives each forward pass a slightly different mask, acting as a
-        stochastic exploration of the discrete space. As τ → 0 the distribution
-        concentrates on the hard mask; at τ = 1.0 it is close to Bernoulli(sigmoid).
+        Eval (hard mask for corpus pre-masking):
+            soft_mask = sigmoid(logit)
+            mask      = (soft_mask > 0.5).float()              ← binary for efficiency
+
+    Why soft mask during training (SMEC §3.3 insight):
+        SMEC ADS uses z = softmax_τ(ẑ + G) — purely continuous weights throughout
+        training. Paper: "rather than enforcing a deterministic selection of top-k
+        dimensions". With hard binary mask + STE, dims with logit < 0 are zeroed out
+        in the forward pass, completely blocking gradient flow to those dimensions.
+        Soft mask ensures ALL dims receive gradient signal, allowing the model to
+        continuously re-evaluate dimension importance.
+
+        Gumbel noise adds stochastic exploration of the discrete space. As τ → 0
+        the sigmoid sharpens toward binary; at τ = 1.0 it is close to Bernoulli(sigmoid).
         Temperature τ is annealed 1.0 → 0.1 over training (call set_temperature()).
 
     Initialization:
@@ -113,9 +118,9 @@ class BloomMaskHead(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """
         Returns:
-            mask:        [B, 768] STE mask — hard binary forward, Gumbel-sigmoid backward
+            mask:        [B, 768] soft sigmoid during training; hard binary at eval
             soft_mask:   [B, 768] Gumbel-perturbed sigmoid (used by sparsity/diversity losses)
-            active_dims: [B] count of active dims per query (from hard mask)
+            active_dims: [B] count of active dims per query (from hard_mask > 0.5)
         """
         logits = self.bloom_logit(bloom_labels)  # [B, 768]
 
@@ -126,11 +131,19 @@ class BloomMaskHead(nn.Module):
             soft_mask = torch.sigmoid(
                 (logits + gumbel_noise) / self.gumbel_temperature
             )
+            # SMEC ADS (§3.3): use soft continuous weights during training — no hard
+            # binary mask, no STE. Paper: "rather than enforcing a deterministic
+            # selection of top-k dimensions". Soft mask lets gradients flow to ALL
+            # dims (even low-importance ones), avoiding blocked gradient paths.
+            mask = soft_mask
+            hard_mask = (soft_mask > 0.5).float()
         else:
+            # Eval: hard binary mask for corpus pre-masking and dim counting.
+            # No Gumbel noise at eval — use raw logits for deterministic selection.
             soft_mask = torch.sigmoid(logits)
+            hard_mask = (soft_mask > 0.5).float()
+            mask = hard_mask
 
-        hard_mask = (soft_mask > 0.5).float()
-        mask = hard_mask + (soft_mask - soft_mask.detach())  # STE
         return {
             "mask": mask,
             "soft_mask": soft_mask,
