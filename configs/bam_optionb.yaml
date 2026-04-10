@@ -69,18 +69,17 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.5         # Cognitive ordering: (1-b/6) weights spread levels around
-                                   # sparsity anchor. Remember gets 6x more downward pressure than
-                                   # Create → should settle well below 230, Create above 230.
+    efficiency_weight: 0.0         # Removed. Cognitive ordering hypothesis was wrong for this data:
+                                   # Option A learned Understand/Evaluate → 432 dims, others → 205-230.
+                                   # NOT monotone with bloom level. Efficiency loss was enforcing the
+                                   # wrong ordering. Let contrastive+distillation find natural dim dist.
     mrl_anchor_weight: 0.2         # Keeps encoder from drifting from MRL structure
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
     mask_sparsity_weight: 0.0      # Disabled — no global target. Cognitive init + efficiency
                                    # handles compression and ordering without conflicting targets.
-    mask_diversity_weight: 0.0     # Redundant with variance (both push masks apart); dropped.
-                                   # Variance gives 768 gradient signals vs 15 from diversity.
-    mask_variance_weight: 0.2      # Per-dim variance across levels — the only differentiation
-                                   # signal needed. Reduced 0.3→0.2 so distillation (0.3) is
-                                   # the dominant mask-shaping force (semantic quality first).
+    mask_diversity_weight: 0.3     # Pairwise cosine penalty between Bloom-level mean masks.
+                                   # Restored — was present in best quality run (NDCG=0.4308).
+    mask_variance_weight: 0.3      # Per-dim variance across levels. Restored to 0.3 (best run).
     mask_distill_weight: 0.3       # SMEC eq 7: fires ALL 15 epochs (not gated to Stage 1).
                                    # Critical for quality: forces masks to select semantically
                                    # informative dims. Gating to Stage 1 killed quality.

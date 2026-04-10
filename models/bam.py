@@ -48,9 +48,12 @@ class BloomMaskHead(nn.Module):
         Temperature τ is annealed 1.0 → 0.1 over training (call set_temperature()).
 
     Initialization:
-        Cognitive-ordered init via normal quantile: active fraction = P(logit > 0)
-        = Φ(μ/σ), so μ = Φ^{-1}(target_frac) with σ=1.0.
-        Target fracs: Remember=0.28 (215 dims) → Create=0.48 (369 dims), avg=0.38=292.
+        Uniform init at Φ^{-1}(0.46) = -0.100 → 354 active dims per level.
+        Why uniform (not cognitive): Option A learned Understand/Evaluate → 432 dims,
+        others → 205-230. NOT monotone with cognitive level. Cognitive init enforced
+        wrong ordering. Uniform start lets contrastive+distillation find the natural
+        per-level equilibrium. Offset -0.100 (vs 0.0=384 dims) avoids frequency
+        imbalance: Remember (n=1198) would otherwise float highest fastest.
 
         Why not N(0,1)? At μ=0, P(logit>0)=0.50 → 384 active dims. Contrastive gets
         7.5× more gradient updates for Remember (n=1198) vs Create (n=159), pushing
@@ -73,25 +76,9 @@ class BloomMaskHead(nn.Module):
             # To get P=target_frac with σ=1: μ = Φ^{-1}(target_frac)  [normal quantile].
             # NOT sigmoid^{-1}(target_frac) — that controls soft_mask value, not active count.
             #
-            # Normal quantile (ppf) values: Φ^{-1}(target_frac) for fracs 0.28→0.48
-            # Range 0.28-0.48 (215-369 dims, avg 0.38=292) chosen because:
-            #   - 0.20-0.40 (229 avg) was too compressed: scattered mask at 162 dims
-            #     misses core semantics (MRL prefix mask owns those dims by design)
-            #   - 0.38-0.50 avg gives enough dims for quality while maintaining ordering
-            #   b=0 Remember:   Φ^{-1}(0.28) = -0.583  → 215 active dims
-            #   b=1 Understand: Φ^{-1}(0.32) = -0.468  → 246 active dims
-            #   b=2 Apply:      Φ^{-1}(0.36) = -0.358  → 277 active dims
-            #   b=3 Analyze:    Φ^{-1}(0.40) = -0.253  → 307 active dims
-            #   b=4 Evaluate:   Φ^{-1}(0.44) = -0.151  → 338 active dims
-            #   b=5 Create:     Φ^{-1}(0.48) = -0.050  → 369 active dims
-            #   Average: 0.38 × 768 = 292 dims
-            _INIT_MEANS = [-0.583, -0.468, -0.358, -0.253, -0.151, -0.050]
-            for b in range(self.BLOOM_DIM):
-                nn.init.normal_(
-                    self.bloom_logit.weight[b : b + 1],
-                    mean=_INIT_MEANS[b],
-                    std=1.0,
-                )
+            # Uniform init: all 6 levels start at Φ^{-1}(0.46) = -0.100 → 354 active dims.
+            # std=1.0 gives healthy variance so masks start uncorrelated (cosine ≈ 0).
+            nn.init.normal_(self.bloom_logit.weight, mean=-0.100, std=1.0)
 
     def set_temperature(self, temperature: float):
         """Anneal Gumbel temperature each epoch (start=1.0 → end=0.1)."""
