@@ -69,10 +69,11 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.0         # Removed. Cognitive ordering hypothesis was wrong for this data:
-                                   # Option A learned Understand/Evaluate → 432 dims, others → 205-230.
-                                   # NOT monotone with bloom level. Efficiency loss was enforcing the
-                                   # wrong ordering. Let contrastive+distillation find natural dim dist.
+    efficiency_weight: 0.3         # Uniform compression pressure on all Bloom levels.
+                                   # Provides downward pressure so dims don't float to 768.
+    efficiency_uniform_weights: true  # true = equal weight for all levels (no cognitive ordering).
+                                   # Cognitive weights (1-b/6) were wrong: Option A learned
+                                   # Understand/Evaluate → 432 dims, others → 205-230 — not monotone.
     mrl_anchor_weight: 0.2         # Keeps encoder from drifting from MRL structure
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
     mask_sparsity_weight: 0.0      # Disabled — no global target. Cognitive init + efficiency

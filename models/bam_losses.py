@@ -116,10 +116,18 @@ class BloomTwoFactorEfficiencyLoss(nn.Module):
 
     EMBEDDING_DIM = 768.0
 
-    def __init__(self, bloom_frequencies: List[float]):
+    def __init__(self, bloom_frequencies: List[float], uniform_weights: bool = False):
         super().__init__()
-        cognitive = torch.tensor([1.0 - b / 6.0 for b in range(6)], dtype=torch.float)
-        self.register_buffer("cognitive_weights", cognitive)
+        if uniform_weights:
+            # Equal compression pressure on all Bloom levels. Use when the cognitive
+            # ordering hypothesis (lower levels need fewer dims) is not supported by
+            # the data — e.g. Option A learned Understand/Evaluate → 432 dims (high),
+            # others → 205-230 dims (low), which is NOT monotone with cognitive level.
+            # Uniform weights provide compression without enforcing the wrong ordering.
+            weights = torch.ones(6, dtype=torch.float)
+        else:
+            weights = torch.tensor([1.0 - b / 6.0 for b in range(6)], dtype=torch.float)
+        self.register_buffer("cognitive_weights", weights)
 
     def forward(
         self,
@@ -563,7 +571,10 @@ class BAMCombinedLoss(nn.Module):
             temperature=self.temp_start,
             class_weights=cw,
         )
-        self.efficiency = BloomTwoFactorEfficiencyLoss(bloom_frequencies=freqs)
+        self.efficiency = BloomTwoFactorEfficiencyLoss(
+            bloom_frequencies=freqs,
+            uniform_weights=lc.get("efficiency_uniform_weights", False),
+        )
         self.mrl_anchor = MRLAnchorRegularizationLoss(
             mrl_dims=mc["mrl_dims"],
             temperature=self.temp_start,
