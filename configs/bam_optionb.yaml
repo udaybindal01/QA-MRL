@@ -73,21 +73,20 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.3         # Uniform compression pressure on all Bloom levels.
-                                   # Provides downward pressure so dims don't float to 768.
-    efficiency_uniform_weights: true  # true = equal weight for all levels (no cognitive ordering).
-                                   # Cognitive weights (1-b/6) were wrong: Option A learned
-                                   # Understand/Evaluate → 432 dims, others → 205-230 — not monotone.
+    efficiency_weight: 0.0         # Removed — per-level sparsity targets already control the
+                                   # distribution. Dual compression (efficiency + sparsity) was
+                                   # pushing dims too aggressively, harming quality.
+    efficiency_uniform_weights: true  # kept for Option A compatibility
     mrl_anchor_weight: 0.1         # Restored (was 0.0). Removing anchor entirely caused encoder
                                    # collapse: Apply 236 dims → 0.3103 < unrouted encoder 0.4443.
                                    # Anchor keeps the encoder from catastrophically forgetting its
                                    # pre-trained retrieval quality. Reduced 0.2→0.1 to give encoder
                                    # slightly more freedom to adapt to scatter masks.
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
-    mask_sparsity_weight: 1.5      # Was 0.5. Increased: at 0.5, contrastive gradient dominates
-                                   # and dims drift up during Stage 1 before sparsity activates.
-                                   # At 1.5, sparsity gradient is competitive with contrastive
-                                   # (loss ~1.0) once Stage 2 fires, pulling dims to targets.
+    mask_sparsity_weight: 0.3      # Was 1.5 → caused quality collapse (epoch 0 NDCG=0.536,
+                                   # never recovered past 0.497 despite 15 epochs). 1.5 beats
+                                   # contrastive (1.0) and destroys retrieval quality to force
+                                   # compression. 0.3 is directional guidance, not domination.
     mask_level_targets:            # Per-level sparsity targets (fraction of 768 dims to keep active).
       0: 0.26                      # Remember (n=1198, 63.7%): simple factual → ~200 dims
       1: 0.50                      # Understand (n=28, 1.4%): complex conceptual → ~384 dims
