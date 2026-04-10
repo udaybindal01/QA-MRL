@@ -64,21 +64,39 @@ class BloomMaskHead(nn.Module):
     EMBEDDING_DIM = 768
     BLOOM_DIM = 6
 
-    def __init__(self, sparsity_target: float = 0.44, gumbel_temperature: float = 1.0):
+    def __init__(self, sparsity_target: float = 0.44, gumbel_temperature: float = 1.0,
+                 level_targets: Optional[dict] = None):
         super().__init__()
         self.sparsity_target = sparsity_target
         self.gumbel_temperature = gumbel_temperature
         self.bloom_logit = nn.Embedding(self.BLOOM_DIM, self.EMBEDDING_DIM)
         with torch.no_grad():
-            # Cognitive-ordered init: Remember → 154 active dims, Create → 307.
+            # Gumbel-calibrated per-level init.
             #
-            # Key: hard_mask = (logit > 0), so active fraction = P(N(μ,σ) > 0) = Φ(μ/σ).
-            # To get P=target_frac with σ=1: μ = Φ^{-1}(target_frac)  [normal quantile].
-            # NOT sigmoid^{-1}(target_frac) — that controls soft_mask value, not active count.
+            # hard_mask[d] = (soft_mask[d] > 0.5)
+            #              = (sigmoid((logit[d] + G) / τ) > 0.5)   where G ~ Gumbel(0,1)
+            #              = (logit[d] + G > 0)                     at τ=1
             #
-            # Uniform init: all 6 levels start at Φ^{-1}(0.46) = -0.100 → 354 active dims.
-            # std=1.0 gives healthy variance so masks start uncorrelated (cosine ≈ 0).
-            nn.init.normal_(self.bloom_logit.weight, mean=-0.100, std=1.0)
+            # P(hard=1 | logit=μ) = P(G > -μ) = 1 − exp(−exp(μ))  [Gumbel CDF]
+            #
+            # Solving for μ given target active fraction f:
+            #   1 − exp(−exp(μ)) = f
+            #   μ = log(−log(1 − f))
+            #
+            # This ensures each Bloom level STARTS at its target dim count even under
+            # Gumbel noise in Stage 1, preventing the upward logit drift that occurs
+            # when initializing near 0 (where contrastive pressure dominates before
+            # sparsity activates).
+            if level_targets:
+                for b in range(self.BLOOM_DIM):
+                    f = level_targets.get(b, sparsity_target if sparsity_target else 0.46)
+                    f = max(1e-4, min(1.0 - 1e-4, f))
+                    mu = math.log(-math.log(1.0 - f))   # Gumbel quantile
+                    nn.init.normal_(self.bloom_logit.weight[b], mean=mu, std=0.5)
+            else:
+                # Uniform init: all levels at Gumbel-calibrated logit for 0.46 active → -0.100
+                # std=1.0 ensures masks start uncorrelated (cosine ≈ 0) across dims.
+                nn.init.normal_(self.bloom_logit.weight, mean=-0.100, std=1.0)
 
     def set_temperature(self, temperature: float):
         """Anneal Gumbel temperature each epoch (start=1.0 → end=0.1)."""
@@ -256,8 +274,15 @@ class BloomAlignedMRL(nn.Module):
         self.use_soft_bloom_routing = mc.get("use_soft_bloom_routing", False)
 
         if self.use_mask_routing:
+            lc = config.get("training", {}).get("loss", {})
+            level_targets_cfg = lc.get("mask_level_targets", None)
+            level_targets = (
+                {int(k): float(v) for k, v in level_targets_cfg.items()}
+                if level_targets_cfg else None
+            )
             self.bloom_mask_head = BloomMaskHead(
-                sparsity_target=mc.get("mask_sparsity_target", 0.44),
+                sparsity_target=mc.get("mask_sparsity_target", None),
+                level_targets=level_targets,
             )
 
         self.embedding_dim = mc["embedding_dim"]

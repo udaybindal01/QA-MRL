@@ -84,10 +84,10 @@ training:
                                    # dims Option B selects. Apply: 365 dims → 0.3414 WORSE than
                                    # Option A's 205 prefix dims proves the encoder isn't reorganizing.
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
-    mask_sparsity_weight: 0.5      # Re-enabled with per-level targets below. Active dims (338-370)
-                                   # are too high — Option A achieves same quality at 234 dims.
-                                   # Per-level targets force different dim counts per Bloom level,
-                                   # creating structural specialization independent of diversity loss.
+    mask_sparsity_weight: 1.5      # Was 0.5. Increased: at 0.5, contrastive gradient dominates
+                                   # and dims drift up during Stage 1 before sparsity activates.
+                                   # At 1.5, sparsity gradient is competitive with contrastive
+                                   # (loss ~1.0) once Stage 2 fires, pulling dims to targets.
     mask_level_targets:            # Per-level sparsity targets (fraction of 768 dims to keep active).
       0: 0.26                      # Remember (n=1198, 63.7%): simple factual → ~200 dims
       1: 0.50                      # Understand (n=28, 1.4%): complex conceptual → ~384 dims
@@ -103,8 +103,12 @@ training:
                                    # which biases masks toward selecting prefix-correlated dims.
                                    # At weight 0.3 it fights encoder reorganization. At 0.15 it
                                    # still provides semantic signal without dominating.
-    encoder_warmup_epochs: 5       # Stage 1 end: add efficiency + diversity + variance simultaneously
-    mask_differentiation_epochs: 5 # Same as encoder_warmup_epochs → Stage 2 adds all losses at once
+    encoder_warmup_epochs: 3       # Was 5. Shorter Stage 1: encoder starts from MRL checkpoint
+                                   # (already pre-trained), doesn't need 5 epochs of free-form
+                                   # contrastive drift before sparsity kicks in. Logit init is
+                                   # now Gumbel-calibrated so it starts at target and we want
+                                   # sparsity to anchor it there ASAP.
+    mask_differentiation_epochs: 3 # Same as encoder_warmup_epochs → Stage 2 adds all losses at once
     temperature_schedule:
       start: 0.1
       end: 0.02
@@ -116,7 +120,7 @@ training:
   encoder_freeze_after_epochs: null
   bloom_noise_rate: 0.0
   hard_neg_refresh_epochs: null
-  checkpoint_dir: "/tmp/bam-b-ckpts2/"
+  checkpoint_dir: "/tmp/bam-b-ckpts3/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
 
