@@ -26,8 +26,8 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 MRL_CKPT_DIR="/tmp/mrl-ckpts"
 BAM_A_CKPT_DIR="/tmp/bam-ckpts"
-BAM_B_CKPT_DIR="/tmp/bam-b-ckpts"
-RESULTS_DIR="./results/bam_optionb"
+BAM_B_CKPT_DIR="/tmp/bam-b-ckpts2"
+RESULTS_DIR="./results/bam_optionb2"
 BAM_A_CONFIG="configs/bam.yaml"
 BAM_B_CONFIG="configs/bam_optionb.yaml"
 BSR_ALPHA="0.5"
@@ -119,7 +119,7 @@ print(cfg['data']['num_hard_negatives'])
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 2 — TRAIN BAM OPTION B (was STEP 1)
+# STEP 2 — TRAIN BAM OPTION B
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run train_bam_b; then
     log "STEP 2/5 — TRAIN BAM OPTION B (BloomMaskHead, scattered mask)"
@@ -136,10 +136,10 @@ if should_run train_bam_b; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3 — FIND BEST OPTION A EPOCH (for comparison in eval)
+# STEP 2 — FIND BEST OPTION A EPOCH (for comparison in eval)
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run find_bam_a; then
-    log "STEP 3/5 — FIND BEST BAM OPTION A EPOCH (BSR)"
+    log "STEP 2/4 — FIND BEST BAM OPTION A EPOCH (BSR)"
     [[ -d "$BAM_A_CKPT_DIR/epoch_0" ]] \
         || die "No BAM-A epoch checkpoints at $BAM_A_CKPT_DIR — run optionA-working_pipeline.sh first"
 
@@ -155,10 +155,10 @@ if should_run find_bam_a; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 4 — FIND BEST OPTION B EPOCH
+# STEP 3 — FIND BEST OPTION B EPOCH
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run find_bam_b; then
-    log "STEP 4/5 — FIND BEST BAM OPTION B EPOCH (BSR)"
+    log "STEP 3/4 — FIND BEST BAM OPTION B EPOCH (BSR)"
     [[ -d "$BAM_B_CKPT_DIR/epoch_0" ]] \
         || die "No BAM-B epoch checkpoints at $BAM_B_CKPT_DIR — run train_bam_b first"
 
@@ -174,10 +174,10 @@ if should_run find_bam_b; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 5 — FULL EVAL: Option B vs Option A vs MRL Baseline
+# STEP 4 — FULL EVAL: Option B vs Option A vs MRL Baseline
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run eval_compare; then
-    log "STEP 5/5 — FULL EVALUATION (Option B vs Option A vs MRL)"
+    log "STEP 4/4 — FULL EVALUATION (Option B vs Option A vs MRL)"
 
     BAM_A_BEST="$BAM_A_CKPT_DIR/best_bsr"
     BAM_B_BEST="$BAM_B_CKPT_DIR/best_bsr"
