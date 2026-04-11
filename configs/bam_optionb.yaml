@@ -91,7 +91,8 @@ training:
       end: 0.02
     gumbel_temperature_schedule:   # Anneals BloomMaskHead.gumbel_temperature each epoch
       start: 1.0                   # High τ: smoother/more exploratory discrete selection
-      end: 0.1                     # Low τ: sharper, more deterministic (closer to hard mask)
+      end: 0.01                    # Near-zero τ: soft mask → hard binary by end of training,
+                                   # eliminating training-eval gap (SMEC approach: τ → 0)
     # bloom_frequencies injected at runtime by train_bam.py
   use_pcgrad: false
   encoder_freeze_after_epochs: null
