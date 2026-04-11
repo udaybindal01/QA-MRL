@@ -49,7 +49,8 @@ data:
 
 training:
   seed: 42
-  num_epochs: 15
+  num_epochs: 25                   # Increased from 15. Training from base (no MRL init) needs
+                                   # more epochs to achieve domain adaptation from scratch.
   batch_size: 16
   gradient_accumulation_steps: 8
   fp16: true
@@ -58,9 +59,8 @@ training:
     type: "adamw"
     lr: 2.0e-5
     weight_decay: 0.01
-    encoder_lr: 2.0e-5             # Restored to 2e-5. 5e-5 caused encoder quality collapse:
-                                   # Apply at 236 dims → 0.3103, worse than unrouted BAM at 256 dims
-                                   # (0.4443). Higher LR hypothesis was wrong — encoder degraded.
+    encoder_lr: 2.0e-5             # 2e-5 for controlled fine-tuning from base BAAI/bge-base-en-v1.5.
+                                   # Previous collapse at 5e-5 was with MRL init + no anchor — different context.
     router_lr: 2.0e-4              # BloomMaskHead bloom_logit — 10x encoder LR
   scheduler:
     type: "cosine"
@@ -82,12 +82,10 @@ training:
     mask_variance_weight: 0.0      # Removed — redundant with diversity loss. Both push mask
                                    # differentiation; variance adds complexity without clear gain.
     mask_distill_weight: 0.3       # Distillation (quality signal): always on, replaces mrl_anchor.
-    encoder_warmup_epochs: 3       # Was 5. Shorter Stage 1: encoder starts from MRL checkpoint
-                                   # (already pre-trained), doesn't need 5 epochs of free-form
-                                   # contrastive drift before sparsity kicks in. Logit init is
-                                   # now Gumbel-calibrated so it starts at target and we want
-                                   # sparsity to anchor it there ASAP.
-    mask_differentiation_epochs: 3 # Same as encoder_warmup_epochs → Stage 2 adds all losses at once
+    encoder_warmup_epochs: 5       # Restored to 5. Starting from base (not MRL checkpoint),
+                                   # encoder needs more free-form contrastive learning before
+                                   # compression pressure is applied.
+    mask_differentiation_epochs: 5 # Same as encoder_warmup_epochs.
     temperature_schedule:
       start: 0.1
       end: 0.02
