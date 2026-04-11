@@ -36,9 +36,10 @@ class BloomMaskHead(nn.Module):
             soft_mask = sigmoid((logit + Gumbel_noise) / τ)   ← continuous [0,1]
             mask      = soft_mask                              ← NO hard mask, NO STE
 
-        Eval (hard mask for corpus pre-masking):
+        Eval (top-k, learned k):
             soft_mask = sigmoid(logit)
-            mask      = (soft_mask > 0.5).float()              ← binary for efficiency
+            k         = round(mean(soft_mask) * 768)           ← learned from efficiency equilibrium
+            mask      = top-k dims by soft_mask score          ← binary, exactly k ones
 
     Why soft mask during training (SMEC §3.3 insight):
         SMEC ADS uses z = softmax_τ(ẑ + G) — purely continuous weights throughout
@@ -118,9 +119,9 @@ class BloomMaskHead(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """
         Returns:
-            mask:        [B, 768] soft sigmoid during training; hard binary at eval
+            mask:        [B, 768] soft sigmoid during training; top-k binary at eval
             soft_mask:   [B, 768] Gumbel-perturbed sigmoid (used by sparsity/diversity losses)
-            active_dims: [B] count of active dims per query (from hard_mask > 0.5)
+            active_dims: [B] count of active dims per query (top-k count at eval, hard>0.5 at train)
         """
         logits = self.bloom_logit(bloom_labels)  # [B, 768]
 
@@ -138,10 +139,30 @@ class BloomMaskHead(nn.Module):
             mask = soft_mask
             hard_mask = (soft_mask > 0.5).float()
         else:
-            # Eval: hard binary mask for corpus pre-masking and dim counting.
-            # No Gumbel noise at eval — use raw logits for deterministic selection.
-            soft_mask = torch.sigmoid(logits)
-            hard_mask = (soft_mask > 0.5).float()
+            # Eval: top-k selection where k is learned from training dynamics.
+            #
+            # k = round(mean(sigmoid(logits_b)) * 768)
+            #   ↑ encodes the efficiency↔contrastive equilibrium from training.
+            #   Efficiency pushes mean(soft_mask) down → smaller k.
+            #   Contrastive pushes quality up → resists smaller k.
+            #   The converged mean IS the optimal learned k fraction.
+            #
+            # Then select the TOP-k dims by sigmoid score (importance ranking),
+            # not threshold at 0.5. Threshold is brittle — if contrastive shifts
+            # all logits up by +0.5, threshold k jumps wildly. Top-k with learned
+            # k is stable: only dim ranking and mean activation level matter.
+            #
+            # All queries of the same Bloom level share identical logits (Embedding),
+            # so they get the same k and the same mask — correct for static scatter mask.
+            soft_mask = torch.sigmoid(logits)                          # [B, 768]
+            k_per_sample = (soft_mask.mean(dim=-1) * self.EMBEDDING_DIM).round().long()
+            k_per_sample = k_per_sample.clamp(min=1, max=self.EMBEDDING_DIM)
+
+            hard_mask = torch.zeros_like(soft_mask)
+            for i in range(soft_mask.size(0)):
+                ki = k_per_sample[i].item()
+                topk_idx = soft_mask[i].topk(int(ki)).indices
+                hard_mask[i, topk_idx] = 1.0
             mask = hard_mask
 
         return {
