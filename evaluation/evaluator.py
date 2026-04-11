@@ -455,17 +455,28 @@ class FullEvaluator:
             enc = {k: v.to(device) for k, v in enc.items()}
 
             lf = None
-            if learner_blooms_0idx and hasattr(model, "query_router"):
+            bloom_labels_batch = None
+            if learner_blooms_0idx:
                 blooms_0 = learner_blooms_0idx[i:i + len(batch)]
-                lf = torch.zeros(len(batch), 6)
-                for j, bl in enumerate(blooms_0):
-                    assert 0 <= bl <= 5, f"Bloom level must be 0-5 (0-indexed), got {bl}."
-                    lf[j, bl] = 1.0
-                lf = lf.to(device)
+                if hasattr(model, "query_router"):
+                    # Option A: one-hot learner_features for soft routing
+                    lf = torch.zeros(len(batch), 6)
+                    for j, bl in enumerate(blooms_0):
+                        assert 0 <= bl <= 5, f"Bloom level must be 0-5 (0-indexed), got {bl}."
+                        lf[j, bl] = 1.0
+                    lf = lf.to(device)
+                elif hasattr(model, "bloom_mask_head"):
+                    # Option B: pass bloom_labels directly so each query uses its own
+                    # Bloom-level mask. Without this, encode_queries defaults all queries
+                    # to bloom=5 (Create), giving wrong active_dims for per-level reporting.
+                    bloom_labels_batch = torch.tensor(
+                        blooms_0, dtype=torch.long, device=device
+                    )
 
             t0 = time.time()
             if hasattr(model, "encode_queries"):
                 out = model.encode_queries(enc["input_ids"], enc["attention_mask"],
+                                           bloom_labels=bloom_labels_batch,
                                            learner_features=lf)
                 all_embs.append(out["masked_embedding"].cpu())
                 all_masks.append(out["mask"].cpu())

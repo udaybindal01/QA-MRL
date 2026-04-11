@@ -5,24 +5,33 @@
 # Retrieval: normalize(q * mask_b) · normalize(corpus * mask_b) (pre-masked per level).
 #
 # SMEC-inspired improvements (arXiv 2510.12474):
-#   1. Gumbel-Softmax replaces STE for discrete dimension selection (§3.3 ADS module)
-#   2. 3-stage sequential loss schedule reduces gradient variance (§3.2 SMRL)
-#   3. Unsupervised distillation loss forces masked embedding to preserve full-dim similarity (§3.4)
-#   4. Increased hard negatives for stronger contrastive signal
+#   1. Soft mask during training (no STE): SMEC §3.3 — gradients flow to all dims
+#   2. Top-k eval with learned k: k = round(mean(sigmoid(logits)) * 768)
+#   3. Gumbel temperature τ→0.1: soft mask approaches binary by end of training
+#   4. Unsupervised distillation loss preserves full-dim similarity structure (§3.4)
 #
-# Prerequisite: optionA-working_pipeline.sh must have been run first.
+# Prerequisite: optionA-working_pipeline.sh must have been run first (provides MRL init).
 #
 # Loss schedule (2 stages):
-#   Stage 1 (epochs 0-2):  contrastive + mrl_anchor + distillation
-#   Stage 2 (epochs 3+):   + efficiency (cognitive weights) + mask_diversity + mask_variance + sparsity
-#                            distillation continues all 15 epochs (quality signal)
+#   Stage 1 (epochs 0-2):  contrastive + distillation
+#   Stage 2 (epochs 3+):   + efficiency + sparsity + mask_diversity
+#                            distillation continues all epochs (quality signal)
 #
-# Run 5 (current):
-#   - Soft mask training + efficiency only (no sparsity budget, no anchor, no variance)
-#   - Removed mask_variance: redundant with mask_diversity
-#   - Removed mrl_anchor: distillation covers quality signal; anchor collapse risk low at lr=2e-5
-#   - Removed global sparsity budget: arbitrary uniform constraint replaced by efficiency at 0.5
-#   - Efficiency 0.2→0.5 to compensate for no sparsity (must beat contrastive soft-mask push alone)
+# Run 8 (current) — back to MRL init, tighter config:
+#   - MRL init restored: base init failed (lost domain adaptation, Apply 0.3724→0.3241)
+#   - mrl_anchor kept at 0.0: anchor runs InfoNCE at prefix dims [64,128,...,768], which
+#     REINFORCES prefix structure in encoder — exactly wrong for scatter masks. Distillation
+#     covers quality without this prefix bias.
+#   - Sparsity budget restored (0.4, target=0.33): efficiency alone can't overcome contrastive
+#     with soft mask (dims grew 443→458). Need explicit budget constraint.
+#   - Uniform efficiency weights: cognitive weights (1-b/6) don't match data
+#     (Option A learned Understand/Evaluate=432, not monotone with cognitive level)
+#   - Diversity margin 0.0 → 0.0: penalize full cosine similarity (was 0.3, only 0.14-0.22 effective)
+#   - Diversity weight 0.3 → 0.5: stronger differentiation signal
+#   - encoder_warmup 5 → 3: MRL init already domain-adapted, 3 epochs enough before compression
+#   - τ_end 0.01 → 0.1: 0.01 caused Gumbel noise to dominate (high variance late training);
+#     0.1 was best empirically (run 4 got R@10=0.5767)
+#   - num_epochs 25 → 15: MRL init doesn't need extra epochs
 
 model:
   backbone: "BAAI/bge-base-en-v1.5"
@@ -31,7 +40,8 @@ model:
   normalize_embeddings: true
   mrl_dims: [64, 128, 256, 384, 512, 768]
   use_mask_routing: true             # Option B: BloomMaskHead scattered mask
-  mask_sparsity_target: null          # No global budget — efficiency handles compression.
+  mask_sparsity_target: 0.33         # Global budget: 0.33 × 768 ≈ 254 dims ≈ Option A avg=234.
+                                     # Passed to BloomMaskSparsityLoss as uniform target.
   use_soft_bloom_routing: false      # N/A for Option B
 
 data:
@@ -43,14 +53,11 @@ data:
   subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
   max_query_length: 128
   max_passage_length: 256
-  num_hard_negatives: 7              # Was 3. More diverse negatives per SMEC S-XBM insight.
-                                     # NOTE: re-run data/curriculum_negatives.py if data was
-                                     # mined with 3 negatives (it will pad/truncate otherwise).
+  num_hard_negatives: 7
 
 training:
   seed: 42
-  num_epochs: 25                   # Increased from 15. Training from base (no MRL init) needs
-                                   # more epochs to achieve domain adaptation from scratch.
+  num_epochs: 15
   batch_size: 16
   gradient_accumulation_steps: 8
   fp16: true
@@ -59,40 +66,44 @@ training:
     type: "adamw"
     lr: 2.0e-5
     weight_decay: 0.01
-    encoder_lr: 2.0e-5             # 2e-5 for controlled fine-tuning from base BAAI/bge-base-en-v1.5.
-                                   # Previous collapse at 5e-5 was with MRL init + no anchor — different context.
+    encoder_lr: 2.0e-5
     router_lr: 2.0e-4              # BloomMaskHead bloom_logit — 10x encoder LR
   scheduler:
     type: "cosine"
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.5         # Increased 0.2→0.5. Without sparsity budget, efficiency must
-                                   # overcome contrastive's soft-mask upward push alone.
-                                   # At 0.2, dims grew 443→458; 0.5 provides stronger downward signal.
-    efficiency_uniform_weights: false  # Cognitive weights (1-b/6): Remember=1.0 … Create=0.167.
-    mrl_anchor_weight: 0.0         # Removed. Previous collapse was with encoder_lr=5e-5 (now 2e-5).
-                                   # Distillation (0.3) provides quality signal instead.
-                                   # Risk: encoder may drift; add back at 0.1 if quality collapses.
+    efficiency_weight: 0.5         # Enough to compress with soft mask (0.2 was insufficient).
+    efficiency_uniform_weights: true   # Uniform weights — cognitive ordering (1-b/6) doesn't
+                                       # match data (Option A: Understand/Evaluate=432, not monotone).
+    mrl_anchor_weight: 0.0         # Intentionally 0. MRL anchor runs InfoNCE at prefix dims
+                                   # [64,128,256,...], reinforcing prefix structure in encoder.
+                                   # This is exactly wrong for scattered masks. Distillation
+                                   # (0.3) provides quality signal without prefix bias.
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
-    mask_sparsity_weight: 0.0      # Removed — per-level/global targets are arbitrary constraints.
-                                   # Efficiency at 0.5 handles compression without a hard budget.
-    mask_level_targets: null       # No fixed targets.
-    mask_diversity_weight: 0.3     # Penalize identical masks across Bloom levels.
-    mask_variance_weight: 0.0      # Removed — redundant with diversity loss. Both push mask
-                                   # differentiation; variance adds complexity without clear gain.
-    mask_distill_weight: 0.3       # Distillation (quality signal): always on, replaces mrl_anchor.
-    encoder_warmup_epochs: 5       # Restored to 5. Starting from base (not MRL checkpoint),
-                                   # encoder needs more free-form contrastive learning before
-                                   # compression pressure is applied.
-    mask_differentiation_epochs: 5 # Same as encoder_warmup_epochs.
+    mask_sparsity_weight: 0.4      # Budget enforcer: |mean(soft_mask) - 0.33| ≈ 0.
+                                   # Without this, contrastive inflates dims to 450+ despite
+                                   # efficiency at 0.5.
+    mask_level_targets: null       # Global uniform target (mask_sparsity_target=0.33).
+    mask_diversity_weight: 0.5     # Increased 0.3→0.5. Masks are too similar (0.44-0.52).
+                                   # Diversity is the only signal pushing 6 embedding vectors apart.
+    mask_diversity_margin: 0.0     # Penalize full cosine similarity. With margin=0.3 (old default),
+                                   # effective penalty was only 0.14-0.22 per pair. At 0.0:
+                                   # full 0.44-0.52 is penalized — ~3x stronger gradient.
+    mask_variance_weight: 0.0      # Redundant with diversity.
+    mask_distill_weight: 0.3       # Always-on quality signal. Replaces mrl_anchor without
+                                   # introducing prefix bias.
+    encoder_warmup_epochs: 3       # MRL init already domain-adapted — 3 epochs enough before
+                                   # compression activates (was 5 for base init).
+    mask_differentiation_epochs: 3 # Same as encoder_warmup_epochs.
     temperature_schedule:
       start: 0.1
       end: 0.02
     gumbel_temperature_schedule:   # Anneals BloomMaskHead.gumbel_temperature each epoch
-      start: 1.0                   # High τ: smoother/more exploratory discrete selection
-      end: 0.01                    # Near-zero τ: soft mask → hard binary by end of training,
-                                   # eliminating training-eval gap (SMEC approach: τ → 0)
+      start: 1.0                   # High τ: exploratory
+      end: 0.1                     # τ=0.01 was too aggressive (Gumbel noise dominated logits,
+                                   # high variance late training). τ=0.1 was best empirically
+                                   # (run 4: R@10=0.5767).
     # bloom_frequencies injected at runtime by train_bam.py
   use_pcgrad: false
   encoder_freeze_after_epochs: null

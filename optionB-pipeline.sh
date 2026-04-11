@@ -127,12 +127,14 @@ if should_run train_bam_b; then
     echo "  Init encoder: $MRL_BEST"
     echo "  Output      : $BAM_B_CKPT_DIR/"
 
-    # No --init_encoder: start from BAAI/bge-base-en-v1.5 base model directly.
-    # MRL checkpoint has prefix-biased encoder (dims 1-k most informative by MRL design).
-    # Scatter masks fight that bias — they select arbitrary dims, not prefix-contiguous ones.
-    # Starting from base lets encoder learn dim organization suited to scatter masks.
+    # MRL init: start from Option A's best MRL checkpoint.
+    # Base init was tried and failed — domain adaptation benefit outweighs prefix bias cost.
+    # mrl_anchor_weight=0.0 in config means the encoder won't be pulled back toward prefix
+    # structure during Option B training. MRL init only provides the domain-adapted starting
+    # point; scatter mask training then reorganizes dims freely.
     python3 scripts/train_bam.py \
-        --config "$BAM_B_CONFIG" \
+        --config       "$BAM_B_CONFIG" \
+        --init_encoder "$MRL_BEST" \
         || die "train_bam.py (Option B) failed"
 
     echo "  BAM Option B checkpoints → $BAM_B_CKPT_DIR/"
