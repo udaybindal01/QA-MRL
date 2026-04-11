@@ -204,7 +204,15 @@ class FullEvaluator:
             # Option B: per-level masked corpus.
             # normalize(q * mask_b) · normalize(corpus * mask_b) for each Bloom level b.
             bloom_logit_w = model.bloom_mask_head.bloom_logit.weight.detach().cpu()  # [6, 768]
-            bloom_masks_bin = (torch.sigmoid(bloom_logit_w) > 0.5).float()           # [6, 768]
+            # Top-k with learned k — mirrors BloomMaskHead.forward() eval branch exactly.
+            # k = round(mean(sigmoid(logits_b)) * 768): learned from efficiency equilibrium.
+            # Top-k by sigmoid score, not threshold at 0.5 (threshold is brittle to logit shifts).
+            soft_w = torch.sigmoid(bloom_logit_w)                                    # [6, 768]
+            bloom_masks_bin = torch.zeros_like(soft_w)
+            for b in range(6):
+                k_b = int((soft_w[b].mean() * soft_w.size(1)).round().clamp(1, soft_w.size(1)).item())
+                topk_idx = soft_w[b].topk(k_b).indices
+                bloom_masks_bin[b, topk_idx] = 1.0                                   # [6, 768]
             routing_labels = torch.tensor(learner_blooms_0idx, dtype=torch.long)      # [N]
             for b in range(6):
                 level_idx = (routing_labels == b).nonzero(as_tuple=True)[0]
