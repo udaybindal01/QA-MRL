@@ -494,12 +494,31 @@ class BloomMaskDistillationLoss(nn.Module):
         query_mask: torch.Tensor,  # [B, D] STE mask (binary fwd, sigmoid bwd)
     ) -> tuple:
         # Teacher: full embedding (already normalized by encoder)
-        full_norm   = full_emb
-        # Student: normalized masked embedding
-        masked_norm = F.normalize(full_emb * query_mask, p=2, dim=-1)  # [B, D]
+        full_norm = full_emb
+        sim_full  = torch.mm(full_norm, full_norm.t())  # [B, B]
 
-        sim_full   = torch.mm(full_norm,   full_norm.t())    # [B, B]
-        sim_masked = torch.mm(masked_norm, masked_norm.t())  # [B, B]
+        # Student: sim_masked[i,j] = normalize(emb_i * mask_i) · normalize(emb_j * mask_i)
+        #
+        # BUG FIX: apply mask_i to BOTH emb_i and emb_j when computing sim_masked[i,j].
+        # Old code: sim_masked[i,j] = normalize(emb_i * mask_i) · normalize(emb_j * mask_j)
+        # Problem: when diversity pushes masks to be different/disjoint, cross-mask dot
+        # products → 0 even when full-space similarity is high. Distillation then penalizes
+        # the low cross-mask similarity → directly forces all masks identical, fighting diversity.
+        #
+        # Fix: both embeddings use mask_i so the comparison is within a single consistent subspace.
+        # sim_masked[i,j] answers "in query i's subspace, how similar are i and j?" — matching
+        # the retrieval setting where query i uses mask_i against all documents.
+        #
+        # Memory: [B, B, D] intermediate, ~750KB at B=16, D=768 — acceptable.
+        emb_i_masked = F.normalize(full_emb * query_mask, p=2, dim=-1)        # [B, D]
+
+        # [B, 1, D] * [1, B, D] → [B, B, D]: mask_i applied to every emb_j
+        emb_j_masked_by_i = F.normalize(
+            full_emb.unsqueeze(0) * query_mask.unsqueeze(1), p=2, dim=-1
+        )  # [B, B, D]  — [B, B, D][i,j,:] = normalize(emb_j * mask_i)
+
+        # sim_masked[i,j] = emb_i_masked[i] · emb_j_masked_by_i[i,j]
+        sim_masked = (emb_i_masked.unsqueeze(1) * emb_j_masked_by_i).sum(dim=-1)  # [B, B]
 
         # Off-diagonal only — diagonal is always 1 for normalized vectors (no gradient)
         B = full_emb.size(0)

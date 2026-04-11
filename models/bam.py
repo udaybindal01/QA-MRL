@@ -32,26 +32,26 @@ class BloomMaskHead(nn.Module):
     Architecture:
         bloom_logit: Embedding(6, 768) — one logit vector per Bloom level
 
-        Training (soft mask, SMEC §3.3):
+        Training (STE: hard binary forward, soft sigmoid backward):
             soft_mask = sigmoid((logit + Gumbel_noise) / τ)   ← continuous [0,1]
-            mask      = soft_mask                              ← NO hard mask, NO STE
+            hard_mask = (soft_mask > 0.5)                      ← binary
+            mask      = hard_mask + (soft_mask - soft_mask.detach())  ← STE
 
         Eval (top-k, learned k):
             soft_mask = sigmoid(logit)
             k         = round(mean(soft_mask) * 768)           ← learned from efficiency equilibrium
             mask      = top-k dims by soft_mask score          ← binary, exactly k ones
 
-    Why soft mask during training (SMEC §3.3 insight):
-        SMEC ADS uses z = softmax_τ(ẑ + G) — purely continuous weights throughout
-        training. Paper: "rather than enforcing a deterministic selection of top-k
-        dimensions". With hard binary mask + STE, dims with logit < 0 are zeroed out
-        in the forward pass, completely blocking gradient flow to those dimensions.
-        Soft mask ensures ALL dims receive gradient signal, allowing the model to
-        continuously re-evaluate dimension importance.
+    Why STE during training (train-test consistency):
+        Without STE (old: mask = soft_mask), the encoder adapts to fractional weights
+        (0.2, 0.7, etc.) during training. At eval, top-k snaps these to 0/1 — violently
+        shifting the L2-normalized hypersphere. STE ensures the encoder trains with the
+        same binary activations it sees at eval, eliminating this train-test gap.
 
-        Gumbel noise adds stochastic exploration of the discrete space. As τ → 0
-        the sigmoid sharpens toward binary; at τ = 1.0 it is close to Bernoulli(sigmoid).
-        Temperature τ is annealed 1.0 → 0.1 over training (call set_temperature()).
+        Gradients still flow through ALL dims via the soft sigmoid backward, so
+        low-importance dims retain gradient signal for re-evaluation. Gumbel noise
+        adds stochastic exploration. Temperature τ is annealed 1.0 → 0.1 over training
+        (call set_temperature()).
 
     Initialization:
         Uniform init at Φ^{-1}(0.46) = -0.100 → 354 active dims per level.
@@ -119,7 +119,7 @@ class BloomMaskHead(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """
         Returns:
-            mask:        [B, 768] soft sigmoid during training; top-k binary at eval
+            mask:        [B, 768] STE (hard binary forward, soft backward) during training; top-k binary at eval
             soft_mask:   [B, 768] Gumbel-perturbed sigmoid (used by sparsity/diversity losses)
             active_dims: [B] count of active dims per query (top-k count at eval, hard>0.5 at train)
         """
@@ -132,12 +132,19 @@ class BloomMaskHead(nn.Module):
             soft_mask = torch.sigmoid(
                 (logits + gumbel_noise) / self.gumbel_temperature
             )
-            # SMEC ADS (§3.3): use soft continuous weights during training — no hard
-            # binary mask, no STE. Paper: "rather than enforcing a deterministic
-            # selection of top-k dimensions". Soft mask lets gradients flow to ALL
-            # dims (even low-importance ones), avoiding blocked gradient paths.
-            mask = soft_mask
+            # STE (BUG FIX): use hard binary forward pass, soft sigmoid backward.
+            #
+            # Previous: mask = soft_mask (no STE). Problem: encoder adapts to soft
+            # fractional weights (0.2, 0.7, etc.) during training. At eval, top-k snaps
+            # these to 0/1 → dimensions that contributed 0.3 during training suddenly
+            # vanish → violent shift in the L2-normalized hypersphere → train-test gap.
+            #
+            # Fix: hard binary mask in the forward pass so the encoder trains with the
+            # same 0/1 activations it will see at eval. STE passes gradients through the
+            # hard step via the soft sigmoid, preserving gradient flow to all dims.
+            # This matches SMEC's "hard mask + STE" formulation for training.
             hard_mask = (soft_mask > 0.5).float()
+            mask = hard_mask + (soft_mask - soft_mask.detach())  # STE
         else:
             # Eval: top-k selection where k is learned from training dynamics.
             #
