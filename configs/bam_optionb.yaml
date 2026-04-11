@@ -13,20 +13,17 @@
 # Prerequisite: optionA-working_pipeline.sh must have been run first.
 #
 # Loss schedule (2 stages):
-#   Stage 1 (epochs 0-4):  contrastive + mrl_anchor + distillation
-#   Stage 2 (epochs 5-14): + efficiency + mask_diversity + mask_variance
+#   Stage 1 (epochs 0-2):  contrastive + mrl_anchor + distillation
+#   Stage 2 (epochs 3+):   + efficiency (cognitive weights) + mask_diversity + mask_variance + sparsity
 #                            distillation continues all 15 epochs (quality signal)
 #
-# Distillation is ON throughout: it forces the mask to select semantically informative
-# dims (|Sim(full_i,j) - Sim(masked_i,j)| ≈ 0), which is the key quality signal.
-# Gating it to Stage 1 only caused quality drops — masks picked dims satisfying
-# diversity/sparsity but not semantic content.
-#
-# Run 2 diagnosis (mask cosine sim 0.40-0.51: diversity working; Apply 365 dims→0.3414 < A's 205→0.3724):
-#   Root cause 1: mrl_anchor_weight=0.2 locked encoder in MRL-prefix structure → fixed: 0.0
-#   Root cause 2: encoder_lr=2e-5 too low to reorganize dim-space → fixed: 5e-5
-#   Root cause 3: dims too high (338-370 avg ~353, no efficiency advantage) → per-level targets
-#   Root cause 4: distillation teacher=full MRL embedding biases masks to prefix-correlated dims → 0.15
+# Run 3 changes vs run 2:
+#   - Soft mask during training (no STE/hard mask): SMEC §3.3 approach — gradients flow to all dims
+#   - Removed per-level sparsity targets: were imposing wrong cognitive ordering
+#     (Option A learned Understand/Evaluate=432 dims, NOT monotone with cognitive level)
+#   - Restored efficiency with cognitive weights (1-b/6): same approach as Option A
+#   - Uniform init N(-0.100, 1.0): 354 dims starting point, let equilibrium determine per-level dims
+#   - Removed dual compression (efficiency was 0.0 while sparsity was 0.3): now efficiency=0.2, sparsity=0.0
 
 model:
   backbone: "BAAI/bge-base-en-v1.5"
@@ -73,35 +70,26 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.0         # Removed — per-level sparsity targets already control the
-                                   # distribution. Dual compression (efficiency + sparsity) was
-                                   # pushing dims too aggressively, harming quality.
-    efficiency_uniform_weights: true  # kept for Option A compatibility
+    efficiency_weight: 0.2         # Restored with cognitive weights (1-b/6). Like Option A:
+                                   # let contrastive + efficiency equilibrium determine natural
+                                   # per-level dims. Per-level targets imposed wrong ordering
+                                   # (Option A learned Understand/Evaluate=432, not cognitive order).
+    efficiency_uniform_weights: false  # Use cognitive weights (1-b/6):
+                                       # Remember=1.0, Understand=0.833, ..., Create=0.167.
+                                       # Same approach as Option A.
     mrl_anchor_weight: 0.1         # Restored (was 0.0). Removing anchor entirely caused encoder
                                    # collapse: Apply 236 dims → 0.3103 < unrouted encoder 0.4443.
                                    # Anchor keeps the encoder from catastrophically forgetting its
                                    # pre-trained retrieval quality. Reduced 0.2→0.1 to give encoder
                                    # slightly more freedom to adapt to scatter masks.
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
-    mask_sparsity_weight: 0.3      # Was 1.5 → caused quality collapse (epoch 0 NDCG=0.536,
-                                   # never recovered past 0.497 despite 15 epochs). 1.5 beats
-                                   # contrastive (1.0) and destroys retrieval quality to force
-                                   # compression. 0.3 is directional guidance, not domination.
-    mask_level_targets:            # Per-level sparsity targets (fraction of 768 dims to keep active).
-      0: 0.26                      # Remember (n=1198, 63.7%): simple factual → ~200 dims
-      1: 0.50                      # Understand (n=28, 1.4%): complex conceptual → ~384 dims
-      2: 0.30                      # Apply (n=290, 15.4%): procedural → ~230 dims
-      3: 0.38                      # Analyze (n=110, 5.9%): structural → ~292 dims
-      4: 0.55                      # Evaluate (n=72, 3.8%): critical → ~422 dims
-      5: 0.32                      # Create (n=159, 8.5%): synthesis → ~246 dims
-                                   # Average: 0.385 → ~296 dims (down from ~353, closer to A's 234)
-    mask_diversity_weight: 0.4     # Was 0.3. Slightly stronger — masks are well-differentiated
-                                   # (cosine 0.40-0.51) but Apply is still regressing vs Option A.
+    mask_sparsity_weight: 0.0      # Removed. Per-level targets removed; efficiency handles compression.
+                                   # Dual compression (efficiency + sparsity) pushed dims too aggressively.
+    mask_level_targets: null       # Removed. Uniform init (-0.100 → 354 dims) + efficiency pressure
+                                   # determines natural per-level equilibrium (same as Option A approach).
+    mask_diversity_weight: 0.3     # Penalize identical masks across Bloom levels.
     mask_variance_weight: 0.3      # Per-dim variance across levels. Keep at 0.3 (working).
-    mask_distill_weight: 0.3       # Restored to 0.3. At 0.15, quality dropped further. The
-                                   # "fights encoder reorganization" concern is moot since we
-                                   # now know encoder reorganization itself degraded quality.
-                                   # Distillation is a net quality positive.
+    mask_distill_weight: 0.3       # Distillation is a net quality positive — always on.
     encoder_warmup_epochs: 3       # Was 5. Shorter Stage 1: encoder starts from MRL checkpoint
                                    # (already pre-trained), doesn't need 5 epochs of free-form
                                    # contrastive drift before sparsity kicks in. Logit init is
