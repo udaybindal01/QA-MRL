@@ -1,17 +1,18 @@
-# BAM Option B — BAAI/bge-large-en-v1.5 backbone, cold start (no MRL pre-training)
+# BAM Option B — intfloat/e5-large-v2 backbone, MRL warm-start
 #
 # Routing: Embedding(6, 1024) → Gumbel-Sigmoid + STE → scattered binary mask per Bloom level
 # One fixed mask per Bloom level. Active dims are scattered — NOT FAISS sub-index compatible.
 #
-# Init encoder: raw BAAI/bge-large-en-v1.5 pretrained weights (no MRL warm-start).
+# Init encoder: /tmp/mrl-e5large-ckpts/best  (run mrl_e5large training first)
+# MRL warm-start: encoder is domain-adapted before scatter-mask training begins.
+# mrl_anchor_weight=0.0 ensures the encoder is NOT re-pulled toward prefix structure
+# during Option B training — scatter mask needs full freedom to select any dims.
 #
-# Key differences from BGE-base Option B (bam_optionb.yaml):
-#   - backbone: BAAI/bge-large-en-v1.5 (1024 hidden dim, encoder-only, CLS pooling)
+# Key differences from BGE-base Option B (configs/bam_optionb.yaml):
+#   - backbone: intfloat/e5-large-v2 (1024 hidden dim)
 #   - embedding_dim: 1024
 #   - mrl_dims: [64, 128, 256, 512, 768, 1024]
 #   - BloomMaskHead Embedding is now (6, 1024) — initialized with Φ⁻¹(target) per level
-#   - num_epochs: 25 (cold start needs ~5 more epochs than MRL warm-start)
-#   - encoder_warmup_epochs: 5 (cold start: more warmup before compression activates)
 #   - Per-level dim targets: same fractions as BGE-base run 10, scaled to 1024:
 #       Remember:   0.30 → ~307 dims  (BGE-base: 230)
 #       Understand: 0.56 → ~573 dims  (BGE-base: 430)
@@ -23,7 +24,7 @@
 # Run 1
 
 model:
-  backbone: "BAAI/bge-large-en-v1.5"
+  backbone: "intfloat/e5-large-v2"
   embedding_dim: 1024
   pooling: "cls"
   normalize_embeddings: true
@@ -45,9 +46,9 @@ data:
 
 training:
   seed: 42
-  num_epochs: 25
+  num_epochs: 20
   batch_size: 16
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 8   # effective batch = 128
   fp16: true
   max_grad_norm: 1.0
   optimizer:
@@ -77,9 +78,8 @@ training:
     mask_diversity_margin: 0.0
     mask_variance_weight: 0.3
     mask_distill_weight: 0.3
-    encoder_warmup_epochs: 5       # Cold start: 5 epochs before compression activates
-                                   # (MRL warm-start only needed 3 — already domain-adapted)
-    mask_differentiation_epochs: 5
+    encoder_warmup_epochs: 3       # MRL warm-start: already domain-adapted, 3 epochs enough
+    mask_differentiation_epochs: 3
     temperature_schedule:
       start: 0.1
       end: 0.02
@@ -91,7 +91,7 @@ training:
   encoder_freeze_after_epochs: null
   bloom_noise_rate: 0.0
   hard_neg_refresh_epochs: null
-  checkpoint_dir: "/tmp/bam-b-bgelarge-ckpts1/"
+  checkpoint_dir: "/tmp/bam-b-e5large-ckpts1/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
 

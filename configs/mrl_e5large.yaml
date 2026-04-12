@@ -1,0 +1,65 @@
+# MRL Baseline — intfloat/e5-large-v2 backbone
+#
+# e5-large is contrastive-trained for dense retrieval but NOT MRL pre-trained.
+# This run learns Matryoshka structure from scratch on top of e5-large weights.
+# The resulting checkpoint is then used to warm-start both BAM Option A and Option B,
+# giving them a domain-adapted encoder that already has good multi-resolution behavior
+# before the routing head is introduced.
+#
+# Key differences from BGE-base MRL (configs/neurips.yaml):
+#   - backbone: intfloat/e5-large-v2 (1024 hidden dim, encoder-only, CLS pooling)
+#   - embedding_dim: 1024
+#   - mrl_dims: [64, 128, 256, 512, 768, 1024]
+#   - Everything else identical — same LR, batch, epochs
+#
+# Note: e5-large was designed with "query: " / "passage: " text prefixes during
+# its original training. Since we fine-tune end-to-end on our data those prefixes
+# are not required, but adding them to the tokenizer call would be a small win.
+#
+# Run 1
+
+model:
+  backbone: "intfloat/e5-large-v2"
+  embedding_dim: 1024
+  pooling: "cls"
+  normalize_embeddings: true
+  mrl_dims: [64, 128, 256, 512, 768, 1024]
+
+data:
+  train_path: "./data/real/train_curriculum.jsonl"
+  val_path: "./data/real/val.jsonl"
+  test_path: "./data/real/test.jsonl"
+  corpus_path: "./data/real/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
+  max_query_length: 128
+  max_passage_length: 256
+  num_hard_negatives: 7
+
+training:
+  seed: 42
+  num_epochs: 15
+  batch_size: 16
+  gradient_accumulation_steps: 8   # effective batch = 128
+  fp16: true
+  max_grad_norm: 1.0
+  optimizer:
+    type: "adamw"
+    lr: 2.0e-5
+    weight_decay: 0.01
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.1
+  checkpoint_dir: "/tmp/mrl-e5large-ckpts/"
+  save_every_n_steps: 1000
+  eval_every_n_steps: 500
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50, 100]
+  bloom_stratified: true
+
+logging:
+  use_wandb: true
+  wandb_project: "bam-emnlp"
+  wandb_entity: null
+  log_every_n_steps: 10
