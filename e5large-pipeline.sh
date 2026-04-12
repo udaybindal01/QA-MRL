@@ -256,27 +256,25 @@ if should_run train_bam_a; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 6 — TRAIN BAM OPTION B  (scattered mask, MRL warm-start)
+# STEP 6 — TRAIN BAM OPTION B  (scattered mask, raw e5-large init)
 # BloomMaskHead learns one scattered binary mask per Bloom level.
-# Uses the same MRL warm-start as Option A. mrl_anchor_weight=0.0 ensures
-# the encoder is NOT pulled back toward prefix structure during B training —
-# scattered masks need all 1024 dims available without prefix ordering enforced.
+#
+# Intentionally NO --init_encoder here. MRL training teaches PREFIX structure
+# (early dims are more important), which is correct for Option A's prefix mask
+# but wrong for Option B's scattered mask. e5-large is already retrieval-tuned
+# (contrastive) with no prefix bias — the best starting point for a model that
+# needs to freely select any subset of 1024 dims per Bloom level.
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run train_bam_b; then
-    log "STEP 6/9 — TRAIN BAM OPTION B (scattered mask, MRL warm-start)"
-
-    MRL_BEST="$MRL_CKPT_DIR/best"
-    [[ -f "$RESULTS_DIR/mrl_best_path.txt" ]] && MRL_BEST=$(cat "$RESULTS_DIR/mrl_best_path.txt")
-    [[ -f "$MRL_BEST/checkpoint.pt" ]] \
-        || die "MRL best checkpoint not found at $MRL_BEST — run find_mrl first"
+    log "STEP 6/9 — TRAIN BAM OPTION B (scattered mask, raw e5-large init)"
 
     echo "  Config     : $BAM_B_CONFIG"
-    echo "  Init       : $MRL_BEST"
+    echo "  Init       : intfloat/e5-large-v2 pretrained weights (no MRL warm-start)"
     echo "  Output     : $BAM_B_CKPT_DIR/"
 
+    # No --init_encoder: BloomAlignedMRL loads raw e5-large HuggingFace weights
     python3 scripts/train_bam.py \
-        --config       "$BAM_B_CONFIG" \
-        --init_encoder "$MRL_BEST" \
+        --config "$BAM_B_CONFIG" \
         || die "train_bam.py (Option B) failed"
 
     echo "  BAM Option B checkpoints → $BAM_B_CKPT_DIR/"

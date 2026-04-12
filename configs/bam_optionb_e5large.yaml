@@ -1,12 +1,19 @@
-# BAM Option B — intfloat/e5-large-v2 backbone, MRL warm-start
+# BAM Option B — intfloat/e5-large-v2 backbone, raw pretrained init (no MRL warm-start)
 #
 # Routing: Embedding(6, 1024) → Gumbel-Sigmoid + STE → scattered binary mask per Bloom level
 # One fixed mask per Bloom level. Active dims are scattered — NOT FAISS sub-index compatible.
 #
-# Init encoder: /tmp/mrl-e5large-ckpts/best  (run mrl_e5large training first)
-# MRL warm-start: encoder is domain-adapted before scatter-mask training begins.
-# mrl_anchor_weight=0.0 ensures the encoder is NOT re-pulled toward prefix structure
-# during Option B training — scatter mask needs full freedom to select any dims.
+# Init encoder: raw intfloat/e5-large-v2 pretrained weights — intentionally NO MRL warm-start.
+#
+# Why not MRL warm-start here (unlike Option A)?
+#   MRL training teaches PREFIX structure: dim[0..64] is a valid embedding, dim[0..128] is better,
+#   etc. Option A (prefix mask) aligns with this — its masks always take the first k dims.
+#   Option B (scattered mask) does NOT — it picks any subset of dims, so prefix bias is wrong.
+#   Starting from MRL-warmed weights plants "early dims matter most" into the encoder before
+#   scatter training even begins. mrl_anchor_weight=0.0 stops re-reinforcement during training,
+#   but the initial bias still resists the scatter mask finding a non-prefix solution.
+#   e5-large is already retrieval-tuned (contrastive) with no prefix structure — the ideal
+#   starting point for a scattered mask that needs full freedom over all 1024 dims.
 #
 # Key differences from BGE-base Option B (configs/bam_optionb.yaml):
 #   - backbone: intfloat/e5-large-v2 (1024 hidden dim)
@@ -46,7 +53,7 @@ data:
 
 training:
   seed: 42
-  num_epochs: 20
+  num_epochs: 25
   batch_size: 16
   gradient_accumulation_steps: 8   # effective batch = 128
   fp16: true
@@ -78,8 +85,10 @@ training:
     mask_diversity_margin: 0.0
     mask_variance_weight: 0.3
     mask_distill_weight: 0.3
-    encoder_warmup_epochs: 3       # MRL warm-start: already domain-adapted, 3 epochs enough
-    mask_differentiation_epochs: 3
+    encoder_warmup_epochs: 5       # Raw e5-large init: 5 epochs before compression activates
+                                   # (no MRL warm-start, so encoder needs more warmup to
+                                   # develop quality embeddings before sparsity kicks in)
+    mask_differentiation_epochs: 5
     temperature_schedule:
       start: 0.1
       end: 0.02
