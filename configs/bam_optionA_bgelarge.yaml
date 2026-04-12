@@ -1,6 +1,6 @@
-# BAM Option A — BAAI/bge-large-en-v1.5 backbone, MRL warm-start
+# BAM Option A — BAAI/bge-large-en-v1.5 backbone, cold start (no MRL pre-training)
 # Routing: BloomDimRouter — learned MLP → scalar dim per Bloom level → prefix binary mask (STE)
-# Init encoder: /tmp/mrl-bgelarge-ckpts/best (run mrl_bgelarge training first)
+# Init encoder: raw BAAI/bge-large-en-v1.5 pretrained weights (no MRL warm-start)
 #
 # Key differences from BGE-base Option A (bam.yaml):
 #   - backbone: BAAI/bge-large-en-v1.5 (1024 hidden dim, encoder-only, CLS pooling)
@@ -8,7 +8,9 @@
 #   - mrl_dims: [64, 128, 256, 512, 768, 1024]
 #   - BloomDimRouter dim range: [170, 1024] (min_dim = 1024//6 = 170)
 #   - MASK_TEMPERATURE scaled: 10.0 * 768/1024 = 7.5 (auto-computed in BloomDimRouter.__init__)
-#   - Everything else same as BGE-base Option A — same LR, batch, loss weights, epochs
+#   - num_epochs: 20 (cold start from raw BGE-large — needs 5 more epochs vs MRL warm-start)
+#   - encoder_warmup_epochs: 8 (cold start: encoder needs more time to build compact
+#     representations at truncated dims before efficiency loss activates)
 #
 # Run 1
 
@@ -34,7 +36,7 @@ data:
 
 training:
   seed: 42
-  num_epochs: 15
+  num_epochs: 20
   batch_size: 16
   gradient_accumulation_steps: 8
   fp16: true
@@ -57,8 +59,9 @@ training:
     mask_diversity_weight: 0.0     # Option B only
     mask_sparsity_weight: 0.0      # Option B only
     mask_level_targets: null       # Option A only
-    encoder_warmup_epochs: 5       # 5 epochs: encoder develops compact representations via MRL
-                                   # anchor loss before efficiency activates.
+    encoder_warmup_epochs: 8       # Cold start: encoder needs 8 epochs to build compact
+                                   # representations at truncated dims before efficiency activates.
+                                   # (MRL warm-start needed only 5 — already domain-adapted)
     temperature_schedule:
       start: 0.1
       end: 0.02
@@ -67,7 +70,7 @@ training:
   encoder_freeze_after_epochs: null
   bloom_noise_rate: 0.0
   hard_neg_refresh_epochs: null
-  checkpoint_dir: "/tmp/bam-a-bgelarge-ckpts/"
+  checkpoint_dir: "/tmp/bam-a-bgelarge-ckpts1/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
 
