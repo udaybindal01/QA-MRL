@@ -1,37 +1,32 @@
 # BAM Option B: Bloom Static Scattered Mask (BloomMaskHead)
 #
-# Routing: Embedding(6, 768) → Gumbel-Softmax → scattered binary mask per Bloom level
+# Routing: Embedding(6, 768) → Gumbel-Softmax + STE → scattered binary mask per Bloom level
 # One fixed mask per Bloom level. Active dims are scattered — NOT FAISS sub-index compatible.
 # Retrieval: normalize(q * mask_b) · normalize(corpus * mask_b) (pre-masked per level).
 #
-# SMEC-inspired improvements (arXiv 2510.12474):
-#   1. Soft mask during training (no STE): SMEC §3.3 — gradients flow to all dims
-#   2. Top-k eval with learned k: k = round(mean(sigmoid(logits)) * 768)
-#   3. Gumbel temperature τ→0.1: soft mask approaches binary by end of training
-#   4. Unsupervised distillation loss preserves full-dim similarity structure (§3.4)
+# Run 9 — per-level dim targets matched to Option A:
 #
-# Prerequisite: optionA-working_pipeline.sh must have been run first (provides MRL init).
+#   Core insight from 8 runs: Option B's masks have good pattern diversity (cosine 0.44-0.52)
+#   but ALL levels converge to ~365 dims (spread: 10). Option A has 205-432 (spread: 227).
+#   With uniform efficiency + no per-level targets, nothing creates dim COUNT differentiation.
+#   Result: B uses 56% more dims than A for similar quality. Apply regresses 8% every run.
 #
-# Loss schedule (2 stages):
-#   Stage 1 (epochs 0-2):  contrastive + distillation
-#   Stage 2 (epochs 3+):   + efficiency + sparsity + mask_diversity
-#                            distillation continues all epochs (quality signal)
+#   Fix: per-level sparsity targets matched to Option A's learned distribution.
+#   This isolates the true scatter-vs-prefix comparison: same dim counts, different selection.
 #
-# Run 8 (current) — back to MRL init, tighter config:
-#   - MRL init restored: base init failed (lost domain adaptation, Apply 0.3724→0.3241)
-#   - mrl_anchor kept at 0.0: anchor runs InfoNCE at prefix dims [64,128,...,768], which
-#     REINFORCES prefix structure in encoder — exactly wrong for scatter masks. Distillation
-#     covers quality without this prefix bias.
-#   - Sparsity budget restored (0.4, target=0.33): efficiency alone can't overcome contrastive
-#     with soft mask (dims grew 443→458). Need explicit budget constraint.
-#   - Uniform efficiency weights: cognitive weights (1-b/6) don't match data
-#     (Option A learned Understand/Evaluate=432, not monotone with cognitive level)
-#   - Diversity margin 0.0 → 0.0: penalize full cosine similarity (was 0.3, only 0.14-0.22 effective)
-#   - Diversity weight 0.3 → 0.5: stronger differentiation signal
-#   - encoder_warmup 5 → 3: MRL init already domain-adapted, 3 epochs enough before compression
-#   - τ_end 0.01 → 0.1: 0.01 caused Gumbel noise to dominate (high variance late training);
-#     0.1 was best empirically (run 4 got R@10=0.5767)
-#   - num_epochs 25 → 15: MRL init doesn't need extra epochs
+#     Remember:   0.30 → 230 dims  (Option A: 230)
+#     Understand: 0.56 → 430 dims  (Option A: 432)
+#     Apply:      0.27 → 207 dims  (Option A: 205)
+#     Analyze:    0.28 → 215 dims  (Option A: 216)
+#     Evaluate:   0.56 → 430 dims  (Option A: 432)
+#     Create:     0.27 → 207 dims  (Option A: 207)
+#     Average:    0.37 → 287 dims  (Option A: 234)
+#
+#   BloomMaskHead init uses Gaussian quantile μ=Φ⁻¹(f) per level, so logits START at
+#   target → no drift in Stage 1. Sparsity loss (weight 1.0) holds them there.
+#
+#   Encoder LR stays at 2e-5 (higher destabilized quality). 20 epochs (more convergence time
+#   for the mask to find the optimal scattered dims within each level's budget).
 
 model:
   backbone: "BAAI/bge-base-en-v1.5"
@@ -40,8 +35,8 @@ model:
   normalize_embeddings: true
   mrl_dims: [64, 128, 256, 384, 512, 768]
   use_mask_routing: true             # Option B: BloomMaskHead scattered mask
-  mask_sparsity_target: 0.33         # Global budget: 0.33 × 768 ≈ 254 dims ≈ Option A avg=234.
-                                     # Passed to BloomMaskSparsityLoss as uniform target.
+  mask_sparsity_target: null          # Using per-level targets (mask_level_targets below).
+                                     # Global target overridden when per-level targets provided.
   use_soft_bloom_routing: false      # N/A for Option B
 
 data:
@@ -57,7 +52,7 @@ data:
 
 training:
   seed: 42
-  num_epochs: 15
+  num_epochs: 20
   batch_size: 16
   gradient_accumulation_steps: 8
   fp16: true
@@ -73,7 +68,7 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.5         # Enough to compress with soft mask (0.2 was insufficient).
+    efficiency_weight: 0.3         # Moderate compression. Per-level targets do the heavy lifting.
     efficiency_uniform_weights: true   # Uniform weights — cognitive ordering (1-b/6) doesn't
                                        # match data (Option A: Understand/Evaluate=432, not monotone).
     mrl_anchor_weight: 0.0         # Intentionally 0. MRL anchor runs InfoNCE at prefix dims
@@ -81,18 +76,21 @@ training:
                                    # This is exactly wrong for scattered masks. Distillation
                                    # (0.3) provides quality signal without prefix bias.
     diversity_weight: 0.0          # RouterDiversityLoss is prefix-dim only (Option A)
-    mask_sparsity_weight: 0.4      # Budget enforcer: |mean(soft_mask) - 0.33| ≈ 0.
-                                   # Without this, contrastive inflates dims to 450+ despite
-                                   # efficiency at 0.5.
-    mask_level_targets: null       # Global uniform target (mask_sparsity_target=0.33).
-    mask_diversity_weight: 0.5     # Increased 0.3→0.5. Masks are too similar (0.44-0.52).
-                                   # Diversity is the only signal pushing 6 embedding vectors apart.
-    mask_diversity_margin: 0.0     # Penalize full cosine similarity. With margin=0.3 (old default),
-                                   # effective penalty was only 0.14-0.22 per pair. At 0.0:
-                                   # full 0.44-0.52 is penalized — ~3x stronger gradient.
-    mask_variance_weight: 0.0      # Redundant with diversity.
-    mask_distill_weight: 0.3       # Always-on quality signal. Replaces mrl_anchor without
-                                   # introducing prefix bias.
+    mask_sparsity_weight: 1.0      # Strong: must overcome contrastive pressure to hold per-level targets.
+                                   # At 0.4-0.5, all levels drifted to ~365 (ignoring targets).
+    mask_level_targets:            # Per-level targets matched to Option A's learned dim distribution.
+      0: 0.30                      # Remember: 230 dims (A: 230)  — 63.7% of queries
+      1: 0.56                      # Understand: 430 dims (A: 432) — 1.4% of queries
+      2: 0.27                      # Apply: 207 dims (A: 205)     — 15.4% of queries
+      3: 0.28                      # Analyze: 215 dims (A: 216)   — 5.9% of queries
+      4: 0.56                      # Evaluate: 430 dims (A: 432)  — 3.8% of queries
+      5: 0.27                      # Create: 207 dims (A: 207)    — 8.5% of queries
+    mask_diversity_weight: 0.5     # Pushes 6 mask patterns apart. With per-level dim COUNT
+                                   # targets, diversity ensures different dim SELECTION too.
+    mask_diversity_margin: 0.0     # Full cosine penalty (margin=0.3 was only 0.14-0.22 effective).
+    mask_variance_weight: 0.3      # Per-dim variance across levels — 768 gradient signals vs 15 pairs.
+                                   # Complements diversity: rewards each dim being "owned" by specific levels.
+    mask_distill_weight: 0.3       # Always-on quality signal without prefix bias.
     encoder_warmup_epochs: 3       # MRL init already domain-adapted — 3 epochs enough before
                                    # compression activates (was 5 for base init).
     mask_differentiation_epochs: 3 # Same as encoder_warmup_epochs.
@@ -109,7 +107,7 @@ training:
   encoder_freeze_after_epochs: null
   bloom_noise_rate: 0.0
   hard_neg_refresh_epochs: null
-  checkpoint_dir: "/tmp/bam-b-ckpts3/"
+  checkpoint_dir: "/tmp/bam-b-ckpts9/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
 
