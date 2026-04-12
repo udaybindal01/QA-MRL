@@ -28,6 +28,9 @@
 
 set -euo pipefail
 
+# Reduce CUDA memory fragmentation — important for 7B model at batch_size=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────

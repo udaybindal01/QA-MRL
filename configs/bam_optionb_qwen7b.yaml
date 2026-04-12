@@ -46,8 +46,8 @@ data:
 training:
   seed: 42
   num_epochs: 25
-  batch_size: 4                    # 7B model in FP16 ~14GB; batch 4 leaves room for activations
-  gradient_accumulation_steps: 32  # effective batch = 4 * 32 = 128 (matches BGE effective batch)
+  batch_size: 1                    # 7B model on 44GB: batch 1 avoids OOM; grad_accum compensates
+  gradient_accumulation_steps: 128 # effective batch = 1 * 128 = 128 (matches BGE effective batch)
   fp16: true
   max_grad_norm: 1.0
   optimizer:
