@@ -1,24 +1,23 @@
-# BAM Option A — Qwen2.5-7B backbone, MRL warm-start
+# BAM Option A — BAAI/bge-large-en-v1.5 backbone, MRL warm-start
 # Routing: BloomDimRouter — learned MLP → scalar dim per Bloom level → prefix binary mask (STE)
-# Init encoder: /tmp/mrl-qwen7b-ckpts/best (run mrl_qwen7b training first)
+# Init encoder: /tmp/mrl-bgelarge-ckpts/best (run mrl_bgelarge training first)
 #
 # Key differences from BGE-base Option A (bam.yaml):
-#   - backbone: Qwen/Qwen2.5-7B (3584 hidden dim, decoder-only)
-#   - pooling: "mean"
-#   - mrl_dims: scaled to 3584
-#   - BloomDimRouter dim range: [597, 3584] (min_dim = 3584//6 = 597)
-#   - num_epochs: 25 (MRL init, but 7B convergence is slower)
-#   - encoder_warmup_epochs: 8 (larger model needs more warmup)
-#   - batch_size: 4 + grad_accum 32 (7B model memory)
-#   - encoder_lr: 1e-5
+#   - backbone: BAAI/bge-large-en-v1.5 (1024 hidden dim, encoder-only, CLS pooling)
+#   - embedding_dim: 1024
+#   - mrl_dims: [64, 128, 256, 512, 768, 1024]
+#   - BloomDimRouter dim range: [170, 1024] (min_dim = 1024//6 = 170)
+#   - MASK_TEMPERATURE scaled: 10.0 * 768/1024 = 7.5 (auto-computed in BloomDimRouter.__init__)
+#   - Everything else same as BGE-base Option A — same LR, batch, loss weights, epochs
+#
+# Run 1
 
 model:
-  backbone: "Qwen/Qwen2.5-7B"
-  embedding_dim: 3584
-  pooling: "mean"
+  backbone: "BAAI/bge-large-en-v1.5"
+  embedding_dim: 1024
+  pooling: "cls"
   normalize_embeddings: true
-  mrl_dims: [256, 512, 1024, 1792, 2560, 3584]
-  torch_dtype: "float16"           # load weights in FP16 — saves 14 GB
+  mrl_dims: [64, 128, 256, 512, 768, 1024]
   use_mask_routing: false          # Option A: BloomDimRouter prefix mask
   use_soft_bloom_routing: false
 
@@ -35,32 +34,31 @@ data:
 
 training:
   seed: 42
-  num_epochs: 25
-  batch_size: 1
-  gradient_accumulation_steps: 128
+  num_epochs: 15
+  batch_size: 16
+  gradient_accumulation_steps: 8
   fp16: true
   max_grad_norm: 1.0
-  gradient_checkpointing: true
-  optim_8bit: true
   optimizer:
     type: "adamw"
-    lr: 1.0e-5
+    lr: 2.0e-5
     weight_decay: 0.01
-    encoder_lr: 1.0e-5
-    router_lr: 1.0e-4              # BloomDimRouter — 10x encoder LR
+    encoder_lr: 2.0e-5
+    router_lr: 2.0e-4              # BloomDimRouter — 10x encoder LR
   scheduler:
     type: "cosine"
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.2         # Doubled from 0.1 — need enough signal for 3584-dim space
+    efficiency_weight: 0.2         # Doubled from 0.1 — need enough signal for 1024-dim space
     efficiency_uniform_weights: false
     mrl_anchor_weight: 0.2         # Keep encoder sharp at MRL anchor dims
-    diversity_weight: 0.0          # Kaiming init means diversity not needed (same as BGE final config)
+    diversity_weight: 0.0          # Kaiming init means diversity not needed (same as BGE-base final config)
     mask_diversity_weight: 0.0     # Option B only
     mask_sparsity_weight: 0.0      # Option B only
     mask_level_targets: null       # Option A only
-    encoder_warmup_epochs: 8       # 7B from MRL init still needs longer warmup
+    encoder_warmup_epochs: 5       # 5 epochs: encoder develops compact representations via MRL
+                                   # anchor loss before efficiency activates.
     temperature_schedule:
       start: 0.1
       end: 0.02
@@ -69,9 +67,9 @@ training:
   encoder_freeze_after_epochs: null
   bloom_noise_rate: 0.0
   hard_neg_refresh_epochs: null
-  checkpoint_dir: "/tmp/bam-a-qwen7b-ckpts/"
-  save_every_n_steps: 500
-  eval_every_n_steps: 250
+  checkpoint_dir: "/tmp/bam-a-bgelarge-ckpts/"
+  save_every_n_steps: 1000
+  eval_every_n_steps: 500
 
 evaluation:
   retrieval_ks: [1, 5, 10, 20, 50, 100]

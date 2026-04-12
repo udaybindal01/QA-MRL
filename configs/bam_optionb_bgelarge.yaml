@@ -1,0 +1,115 @@
+# BAM Option B — BAAI/bge-large-en-v1.5 backbone, MRL warm-start
+#
+# Routing: Embedding(6, 1024) → Gumbel-Sigmoid + STE → scattered binary mask per Bloom level
+# One fixed mask per Bloom level. Active dims are scattered — NOT FAISS sub-index compatible.
+#
+# Init encoder: /tmp/mrl-bgelarge-ckpts/best (run mrl_bgelarge training first).
+# MRL warm-start: domain adaptation benefit outweighs any prefix bias cost since
+# mrl_anchor_weight=0.0 prevents the encoder being re-pulled toward prefix structure.
+#
+# Key differences from BGE-base Option B (bam_optionb.yaml):
+#   - backbone: BAAI/bge-large-en-v1.5 (1024 hidden dim, encoder-only, CLS pooling)
+#   - embedding_dim: 1024
+#   - mrl_dims: [64, 128, 256, 512, 768, 1024]
+#   - BloomMaskHead Embedding is now (6, 1024) — initialized with Φ⁻¹(target) per level
+#   - Per-level dim targets: same fractions as BGE-base run 10, scaled to 1024:
+#       Remember:   0.30 → ~307 dims  (BGE-base: 230)
+#       Understand: 0.56 → ~573 dims  (BGE-base: 430)
+#       Apply:      0.27 → ~276 dims  (BGE-base: 207)
+#       Analyze:    0.28 → ~287 dims  (BGE-base: 215)
+#       Evaluate:   0.56 → ~573 dims  (BGE-base: 430)
+#       Create:     0.27 → ~276 dims  (BGE-base: 207)
+#
+# Run 1
+
+model:
+  backbone: "BAAI/bge-large-en-v1.5"
+  embedding_dim: 1024
+  pooling: "cls"
+  normalize_embeddings: true
+  mrl_dims: [64, 128, 256, 512, 768, 1024]
+  use_mask_routing: true             # Option B: BloomMaskHead scattered mask
+  mask_sparsity_target: null         # Using per-level targets below
+  use_soft_bloom_routing: false      # N/A for Option B
+
+data:
+  train_path: "./data/real/train_curriculum.jsonl"
+  val_path: "./data/real/val.jsonl"
+  test_path: "./data/real/test.jsonl"
+  corpus_path: "./data/real/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
+  max_query_length: 128
+  max_passage_length: 256
+  num_hard_negatives: 7
+
+training:
+  seed: 42
+  num_epochs: 20
+  batch_size: 16
+  gradient_accumulation_steps: 8
+  fp16: true
+  max_grad_norm: 1.0
+  optimizer:
+    type: "adamw"
+    lr: 2.0e-5
+    weight_decay: 0.01
+    encoder_lr: 2.0e-5
+    router_lr: 2.0e-4              # BloomMaskHead — 10x encoder LR
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.1
+  loss:
+    contrastive_weight: 1.0
+    efficiency_weight: 0.3
+    efficiency_uniform_weights: true
+    mrl_anchor_weight: 0.0         # 0: MRL anchor reinforces prefix structure — wrong for scatter
+    diversity_weight: 0.0          # RouterDiversityLoss is for Option A only
+    mask_sparsity_weight: 1.0      # Strong enforcement of per-level targets
+    mask_level_targets:            # Same fractions as BGE-base run 10, scaled to 1024:
+      0: 0.30                      # Remember: ~307 dims
+      1: 0.56                      # Understand: ~573 dims
+      2: 0.27                      # Apply: ~276 dims
+      3: 0.28                      # Analyze: ~287 dims
+      4: 0.56                      # Evaluate: ~573 dims
+      5: 0.27                      # Create: ~276 dims
+    mask_diversity_weight: 0.5
+    mask_diversity_margin: 0.0
+    mask_variance_weight: 0.3
+    mask_distill_weight: 0.3
+    encoder_warmup_epochs: 3       # MRL init already domain-adapted — 3 epochs enough
+    mask_differentiation_epochs: 3
+    temperature_schedule:
+      start: 0.1
+      end: 0.02
+    gumbel_temperature_schedule:
+      start: 1.0
+      end: 0.1
+    # bloom_frequencies injected at runtime by train_bam.py
+  use_pcgrad: false
+  encoder_freeze_after_epochs: null
+  bloom_noise_rate: 0.0
+  hard_neg_refresh_epochs: null
+  checkpoint_dir: "/tmp/bam-b-bgelarge-ckpts/"
+  save_every_n_steps: 1000
+  eval_every_n_steps: 500
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50, 100]
+  bloom_stratified: true
+  tail_topic_threshold: 20
+  measure_latency: true
+
+diagnostics:
+  gradient_attribution: true
+  num_diagnostic_queries: 1000
+  probing:
+    probe_type: "linear"
+    probe_tasks: ["bloom_level", "subject_area"]
+    num_dimension_groups: 8
+
+logging:
+  use_wandb: true
+  wandb_project: "bam-emnlp"
+  wandb_entity: null
+  log_every_n_steps: 10
