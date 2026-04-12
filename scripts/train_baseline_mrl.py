@@ -34,9 +34,16 @@ def main():
         config["training"]["checkpoint_dir"] = args.checkpoint_dir
 
     mc = config["model"]
-    model = MRLEncoder(model_name=mc["backbone"], embedding_dim=mc["embedding_dim"],
-                       mrl_dims=mc["mrl_dims"], pooling=mc["pooling"],
-                       normalize=mc["normalize_embeddings"])
+    tc = config.get("training", {})
+    model = MRLEncoder(
+        model_name=mc["backbone"],
+        embedding_dim=mc["embedding_dim"],
+        mrl_dims=mc["mrl_dims"],
+        pooling=mc["pooling"],
+        normalize=mc["normalize_embeddings"],
+        torch_dtype=mc.get("torch_dtype", None),
+        gradient_checkpointing=tc.get("gradient_checkpointing", False),
+    )
 
     if args.resume:
         ckpt_path = os.path.join(args.resume, "checkpoint.pt")

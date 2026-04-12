@@ -18,6 +18,7 @@ model:
   pooling: "mean"
   normalize_embeddings: true
   mrl_dims: [256, 512, 1024, 1792, 2560, 3584]
+  torch_dtype: "float16"           # load weights in FP16 — saves 14 GB
   use_mask_routing: false          # Option A: BloomDimRouter prefix mask
   use_soft_bloom_routing: false
 
@@ -39,6 +40,8 @@ training:
   gradient_accumulation_steps: 128
   fp16: true
   max_grad_norm: 1.0
+  gradient_checkpointing: true
+  optim_8bit: true
   optimizer:
     type: "adamw"
     lr: 1.0e-5

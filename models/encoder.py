@@ -29,6 +29,8 @@ class MRLEncoder(nn.Module):
         mrl_dims: Optional[List[int]] = None,
         pooling: str = "cls",
         normalize: bool = True,
+        torch_dtype: str = None,        # "float16" or "bfloat16" — halves weight memory for large models
+        gradient_checkpointing: bool = False,  # recompute activations during backward (saves ~4 GB)
     ):
         super().__init__()
         self.model_name = model_name
@@ -36,7 +38,17 @@ class MRLEncoder(nn.Module):
         self.mrl_dims = mrl_dims or [64, 128, 256, 384, 512, 768]
         self.normalize = normalize
 
-        self.transformer = AutoModel.from_pretrained(model_name)
+        import torch as _torch
+        dtype_map = {"float16": _torch.float16, "bfloat16": _torch.bfloat16, "float32": _torch.float32}
+        dtype = dtype_map.get(torch_dtype) if torch_dtype else None
+
+        self.transformer = AutoModel.from_pretrained(
+            model_name,
+            torch_dtype=dtype,      # load weights directly in FP16/BF16 — saves 14 GB for 7B models
+        )
+        if gradient_checkpointing:
+            self.transformer.gradient_checkpointing_enable()
+
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.pooler = Pooler(strategy=pooling)
 

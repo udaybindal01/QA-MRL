@@ -299,6 +299,8 @@ class BloomAlignedMRL(nn.Module):
             mrl_dims=mc["mrl_dims"],
             pooling=mc["pooling"],
             normalize=mc["normalize_embeddings"],
+            torch_dtype=mc.get("torch_dtype", None),
+            gradient_checkpointing=config.get("training", {}).get("gradient_checkpointing", False),
         )
 
         self.use_mask_routing = mc.get("use_mask_routing", False)

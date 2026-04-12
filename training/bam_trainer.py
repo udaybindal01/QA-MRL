@@ -22,6 +22,17 @@ import torch
 import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
+
+def _make_optimizer(params, weight_decay, use_8bit=False):
+    """AdamW8bit (bitsandbytes) if requested and available, else standard AdamW."""
+    if use_8bit:
+        try:
+            import bitsandbytes as bnb
+            return bnb.optim.AdamW8bit(params, weight_decay=weight_decay)
+        except ImportError:
+            print("WARNING: bitsandbytes not installed — falling back to standard AdamW. "
+                  "Install with: pip install bitsandbytes")
+    return AdamW(params, weight_decay=weight_decay)
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from typing import Dict
 from tqdm import tqdm
@@ -64,9 +75,11 @@ class BAMTrainer:
         self.model.to(self.device)
         self.criterion = BAMCombinedLoss(config).to(self.device)
 
-        self.optimizer = AdamW(
+        use_8bit = tc.get("optim_8bit", False)
+        self.optimizer = _make_optimizer(
             model.get_parameter_groups(config),
             weight_decay=tc["optimizer"]["weight_decay"],
+            use_8bit=use_8bit,
         )
 
         # Wrap with PCGrad if requested
@@ -115,9 +128,10 @@ class BAMTrainer:
             else:
                 routing_params = list(self.model.bloom_router.parameters())
 
-            self.optimizer = AdamW(
+            self.optimizer = _make_optimizer(
                 [{"params": routing_params, "lr": fast_lr}],
                 weight_decay=oc["weight_decay"],
+                use_8bit=self.config["training"].get("optim_8bit", False),
             )
             if self.use_pcgrad:
                 self.pcgrad = PCGradOptimizer(self.optimizer)

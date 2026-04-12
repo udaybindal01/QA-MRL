@@ -5,6 +5,19 @@ import torch
 import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
+
+def _make_optimizer(params, lr, weight_decay, use_8bit=False):
+    """AdamW8bit (bitsandbytes) if requested and available, else standard AdamW.
+    8-bit Adam reduces optimizer state memory from 56 GB (FP32) to ~14 GB for 7B models.
+    """
+    if use_8bit:
+        try:
+            import bitsandbytes as bnb
+            return bnb.optim.AdamW8bit(params, lr=lr, weight_decay=weight_decay)
+        except ImportError:
+            print("WARNING: bitsandbytes not installed — falling back to standard AdamW. "
+                  "Install with: pip install bitsandbytes")
+    return AdamW(params, lr=lr, weight_decay=weight_decay)
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from typing import Dict
 from tqdm import tqdm
@@ -37,8 +50,13 @@ class MRLBaselineTrainer:
         self.mrl_loss = MRLContrastiveLoss(mrl_dims=config["model"]["mrl_dims"]).to(self.device)
         self.full_loss = InfoNCELoss().to(self.device)
 
-        self.optimizer = AdamW(model.parameters(), lr=tc["optimizer"]["lr"],
-                               weight_decay=tc["optimizer"]["weight_decay"])
+        use_8bit = tc.get("optim_8bit", False)
+        self.optimizer = _make_optimizer(
+            model.parameters(),
+            lr=tc["optimizer"]["lr"],
+            weight_decay=tc["optimizer"]["weight_decay"],
+            use_8bit=use_8bit,
+        )
         total_steps = len(train_loader) * self.num_epochs // self.grad_accum
         warmup = int(tc["scheduler"]["warmup_ratio"] * total_steps)
         self.scheduler = SequentialLR(self.optimizer, schedulers=[

@@ -13,6 +13,7 @@ model:
   pooling: "mean"
   normalize_embeddings: true
   mrl_dims: [256, 512, 1024, 1792, 2560, 3584]
+  torch_dtype: "float16"           # load weights in FP16 — saves 14 GB vs FP32 default
 
 data:
   train_path: "./data/real/train_curriculum.jsonl"
@@ -32,6 +33,8 @@ training:
   gradient_accumulation_steps: 128
   fp16: true
   max_grad_norm: 1.0
+  gradient_checkpointing: true     # recompute activations during backward — saves ~4 GB
+  optim_8bit: true                 # bitsandbytes AdamW8bit: optimizer states 56 GB → 14 GB
   optimizer:
     type: "adamw"
     lr: 1.0e-5

@@ -28,6 +28,7 @@ model:
   pooling: "mean"                  # decoder-only: no CLS token, use mean over non-padding
   normalize_embeddings: true
   mrl_dims: [256, 512, 1024, 1792, 2560, 3584]
+  torch_dtype: "float16"           # load weights in FP16 — saves 14 GB
   use_mask_routing: true           # Option B: BloomMaskHead scattered mask
   mask_sparsity_target: null       # Using per-level targets below
   use_soft_bloom_routing: false    # N/A for Option B
@@ -50,6 +51,8 @@ training:
   gradient_accumulation_steps: 128 # effective batch = 1 * 128 = 128 (matches BGE effective batch)
   fp16: true
   max_grad_norm: 1.0
+  gradient_checkpointing: true
+  optim_8bit: true
   optimizer:
     type: "adamw"
     lr: 1.0e-5
