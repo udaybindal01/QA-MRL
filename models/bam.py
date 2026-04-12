@@ -37,10 +37,8 @@ class BloomMaskHead(nn.Module):
             hard_mask = (soft_mask > 0.5)                      ← binary
             mask      = hard_mask + (soft_mask - soft_mask.detach())  ← STE
 
-        Eval (top-k, learned k):
-            soft_mask = sigmoid(logit)
-            k         = round(mean(soft_mask) * 768)           ← learned from efficiency equilibrium
-            mask      = top-k dims by soft_mask score          ← binary, exactly k ones
+        Eval (threshold, matching training):
+            hard_mask = (logit > 0).float()                    ← binary, same threshold as training STE
 
     Why STE during training (train-test consistency):
         Without STE (old: mask = soft_mask), the encoder adapts to fractional weights
@@ -143,11 +141,9 @@ class BloomMaskHead(nn.Module):
             # which has a Gumbel offset (~0.577/τ) and temperature scaling that inflates
             # the training fraction far above the eval fraction → systematic overshoot
             # (Remember: 308 dims actual vs 230 target with weight 1.0).
-            clean_sigmoid = torch.sigmoid(logits).detach()  # [B, 768], no grad to mask head via this path
-            # Re-attach gradient via the logits directly so sparsity can push logits.
-            # detach() above blocks double-counting; gradient flows via soft_mask path anyway.
-            # Actually we DO want grad here to enforce the target — use straight sigmoid:
-            clean_sigmoid = torch.sigmoid(logits)  # [B, 768] — grad flows to bloom_logit
+            # sigmoid(logits) without Gumbel/temperature — matches eval-time active fraction.
+            # Gradient flows through to bloom_logit so sparsity loss can push logits toward targets.
+            clean_sigmoid = torch.sigmoid(logits)  # [B, 768]
         else:
             # Eval: threshold at 0.5, matching training STE.
             # Training: hard_mask = (sigmoid((logit+Gumbel)/τ) > 0.5)
@@ -359,6 +355,7 @@ class BloomAlignedMRL(nn.Module):
                 "masked_embedding": masked_emb,
                 "mask": mask,
                 "soft_mask": head_out["soft_mask"],
+                "clean_sigmoid": head_out["clean_sigmoid"],
                 "active_dims": head_out["active_dims"],
                 # No continuous_dim/discrete_dim — scattered mask has no prefix dim
             }
@@ -427,6 +424,8 @@ class BloomAlignedMRL(nn.Module):
         # Option B outputs
         if "soft_mask" in q:
             result["soft_mask"] = q["soft_mask"]
+        if "clean_sigmoid" in q:
+            result["clean_sigmoid"] = q["clean_sigmoid"]
         if "active_dims" in q:
             result["active_dims"] = q["active_dims"]
 
