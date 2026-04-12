@@ -65,12 +65,13 @@ class BloomMaskHead(nn.Module):
         Cognitive-ordered init encodes the right ordering from epoch 0.
     """
 
-    EMBEDDING_DIM = 768
+    EMBEDDING_DIM = 768  # class default; overridden per-instance via __init__ embedding_dim arg
     BLOOM_DIM = 6
 
     def __init__(self, sparsity_target: float = 0.44, gumbel_temperature: float = 1.0,
-                 level_targets: Optional[dict] = None):
+                 level_targets: Optional[dict] = None, embedding_dim: int = 768):
         super().__init__()
+        self.EMBEDDING_DIM = embedding_dim  # instance attribute — overrides class default
         self.sparsity_target = sparsity_target
         self.gumbel_temperature = gumbel_temperature
         self.bloom_logit = nn.Embedding(self.BLOOM_DIM, self.EMBEDDING_DIM)
@@ -295,12 +296,11 @@ class BloomAlignedMRL(nn.Module):
             normalize=mc["normalize_embeddings"],
         )
 
-        self.bloom_router = BloomDimRouter()  # always present (used for Option A, dims table)
-
         self.use_mask_routing = mc.get("use_mask_routing", False)
         self.use_soft_bloom_routing = mc.get("use_soft_bloom_routing", False)
 
         if self.use_mask_routing:
+            # Option B: scattered mask head — bloom_router not needed
             lc = config.get("training", {}).get("loss", {})
             level_targets_cfg = lc.get("mask_level_targets", None)
             level_targets = (
@@ -310,7 +310,11 @@ class BloomAlignedMRL(nn.Module):
             self.bloom_mask_head = BloomMaskHead(
                 sparsity_target=mc.get("mask_sparsity_target", None),
                 level_targets=level_targets,
+                embedding_dim=mc["embedding_dim"],
             )
+        else:
+            # Option A: prefix router — only created when needed (wrong dim for non-768 backbones)
+            self.bloom_router = BloomDimRouter()
 
         self.embedding_dim = mc["embedding_dim"]
         self.mrl_dims = mc["mrl_dims"]
@@ -457,6 +461,8 @@ class BloomAlignedMRL(nn.Module):
         return groups
 
     def get_bloom_dim_table(self) -> Dict[int, float]:
+        if self.use_mask_routing:
+            return {}  # Option B has no prefix dim table
         return self.bloom_router.get_dim_table()
 
     def freeze_encoder(self):
@@ -470,4 +476,6 @@ class BloomAlignedMRL(nn.Module):
     @property
     def query_router(self):
         """Compatibility: eval scripts check hasattr(model, 'query_router')."""
+        if self.use_mask_routing:
+            return None
         return self.bloom_router
