@@ -41,7 +41,7 @@ from evaluation.evaluator import FullEvaluator
 from transformers import AutoTokenizer
 
 BLOOM_NAMES = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
-EMBEDDING_DIM = 768.0
+EMBEDDING_DIM = 768.0  # overridden at runtime from config["model"]["embedding_dim"]
 
 
 def compute_bloom_frequencies(train_path: str):
@@ -135,6 +135,10 @@ def main():
     config = load_config(args.config)
     set_seed(config["training"]["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Override global EMBEDDING_DIM from config so efficiency formula scales correctly
+    global EMBEDDING_DIM
+    EMBEDDING_DIM = float(config["model"].get("embedding_dim", 768))
     tokenizer = AutoTokenizer.from_pretrained(config["model"]["backbone"])
     evaluator = FullEvaluator(config)
 
@@ -155,7 +159,7 @@ def main():
               f"cognitive={cog[b]:.3f}")
     print(f"\nBSR = quality × (1 + {args.alpha} × efficiency)")
     print(f"  quality    = Σ_b [ class_weight_b × R@10_b ]")
-    print(f"  efficiency = Σ_b [ cognitive_b × (1 − dim_b/768) ] / Σ cognitive_b\n")
+    print(f"  efficiency = Σ_b [ cognitive_b × (1 − dim_b/{int(EMBEDDING_DIM)}) ] / Σ cognitive_b\n")
 
     # Collect epoch checkpoints
     epoch_dirs = []

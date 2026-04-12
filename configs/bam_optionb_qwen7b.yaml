@@ -1,14 +1,18 @@
-# BAM Option B: Qwen2.5-7B backbone, base model init (no MRL warm-start)
+# BAM Option B: Qwen2.5-7B backbone, MRL warm-start
 #
 # Routing: Embedding(6, 3584) → Gumbel-Sigmoid + STE → scattered binary mask per Bloom level
 # One fixed mask per Bloom level. Active dims are scattered — NOT FAISS sub-index compatible.
 #
-# Key differences from BGE-base config:
+# Init encoder: /tmp/mrl-qwen7b-ckpts/best (run mrl_qwen7b training first).
+# MRL warm-start used (same as BGE Option B): domain adaptation benefit outweighs any prefix
+# bias cost, since mrl_anchor_weight=0.0 prevents the encoder being re-pulled toward prefix
+# structure during Option B training.
+#
+# Key differences from BGE-base Option B config:
 #   - backbone: Qwen/Qwen2.5-7B (3584 hidden dim, decoder-only)
 #   - pooling: "mean" (no CLS token in decoder-only architecture)
-#   - init_encoder: BASE MODEL (no --init_encoder flag — start from Qwen weights directly)
-#   - num_epochs: 30 (vs 20) — cold start needs more convergence time
-#   - encoder_warmup_epochs: 8 (vs 3) — encoder builds quality reps before compression
+#   - num_epochs: 25 (MRL init, but 7B convergence is slower than BGE-base)
+#   - encoder_warmup_epochs: 8 (larger model, more warmup before compression)
 #   - batch_size: 4 + grad_accum 32 → effective batch 128 (7B model memory constraint)
 #   - encoder_lr: 1e-5 (vs 2e-5) — lower LR for large model stability
 #   - mrl_dims: scaled to [256, 512, 1024, 1792, 2560, 3584] (~same ratios as BGE config)
@@ -41,7 +45,7 @@ data:
 
 training:
   seed: 42
-  num_epochs: 30
+  num_epochs: 25
   batch_size: 4                    # 7B model in FP16 ~14GB; batch 4 leaves room for activations
   gradient_accumulation_steps: 32  # effective batch = 4 * 32 = 128 (matches BGE effective batch)
   fp16: true

@@ -1,0 +1,54 @@
+# MRL Baseline — Qwen2.5-7B backbone
+# Used as warm-start encoder for Option A and Option B (Qwen runs).
+#
+# Key differences from BGE-base MRL:
+#   - backbone: Qwen/Qwen2.5-7B (3584 hidden dim, decoder-only)
+#   - pooling: "mean" (decoder-only has no CLS token)
+#   - num_epochs: 25 (cold start from Qwen base weights)
+#   - batch_size: 4 + grad_accum 32 → effective batch 128
+
+model:
+  backbone: "Qwen/Qwen2.5-7B"
+  embedding_dim: 3584
+  pooling: "mean"
+  normalize_embeddings: true
+  mrl_dims: [256, 512, 1024, 1792, 2560, 3584]
+
+data:
+  train_path: "./data/real/train_curriculum.jsonl"
+  val_path: "./data/real/val.jsonl"
+  test_path: "./data/real/test.jsonl"
+  corpus_path: "./data/real/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
+  max_query_length: 128
+  max_passage_length: 256
+  num_hard_negatives: 7
+
+training:
+  seed: 42
+  num_epochs: 25
+  batch_size: 4
+  gradient_accumulation_steps: 32
+  fp16: true
+  max_grad_norm: 1.0
+  optimizer:
+    type: "adamw"
+    lr: 1.0e-5
+    weight_decay: 0.01
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.1
+  checkpoint_dir: "/tmp/mrl-qwen7b-ckpts/"
+  save_every_n_steps: 500
+  eval_every_n_steps: 250
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50, 100]
+  bloom_stratified: true
+
+logging:
+  use_wandb: true
+  wandb_project: "bam-emnlp"
+  wandb_entity: null
+  log_every_n_steps: 10

@@ -182,13 +182,18 @@ class BloomDimRouter(nn.Module):
     Degrades more gracefully under Bloom classifier noise than hard argmax routing.
     """
 
-    EMBEDDING_DIM = 768
+    EMBEDDING_DIM = 768   # class defaults; overridden per-instance
     MIN_DIM = 128
-    MASK_TEMPERATURE = 10.0  # sigmoid sharpness; meaningful gradients within ±46 dims
+    MASK_TEMPERATURE = 10.0
 
-    def __init__(self, hidden_dim: int = 32):
+    def __init__(self, hidden_dim: int = 32, embedding_dim: int = 768, min_dim: int = None):
         super().__init__()
-        self._span = self.EMBEDDING_DIM - self.MIN_DIM  # 640
+        self.EMBEDDING_DIM = embedding_dim
+        # min_dim defaults to embedding_dim // 6 (scales correctly: 768//6=128, 3584//6=597→512)
+        self.MIN_DIM = min_dim if min_dim is not None else (embedding_dim // 6)
+        # Scale MASK_TEMPERATURE so gradient range (±1/T dims) stays ~10% of embedding dim
+        self.MASK_TEMPERATURE = 10.0 * 768 / embedding_dim
+        self._span = self.EMBEDDING_DIM - self.MIN_DIM
 
         self.bloom_emb = nn.Embedding(6, hidden_dim)
         self.dim_head = nn.Sequential(
@@ -313,8 +318,8 @@ class BloomAlignedMRL(nn.Module):
                 embedding_dim=mc["embedding_dim"],
             )
         else:
-            # Option A: prefix router — only created when needed (wrong dim for non-768 backbones)
-            self.bloom_router = BloomDimRouter()
+            # Option A: prefix router
+            self.bloom_router = BloomDimRouter(embedding_dim=mc["embedding_dim"])
 
         self.embedding_dim = mc["embedding_dim"]
         self.mrl_dims = mc["mrl_dims"]
