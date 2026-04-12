@@ -149,18 +149,12 @@ class BloomMaskHead(nn.Module):
             # Actually we DO want grad here to enforce the target — use straight sigmoid:
             clean_sigmoid = torch.sigmoid(logits)  # [B, 768] — grad flows to bloom_logit
         else:
-            # Eval: top-k selection where k is learned from training dynamics.
-            # k = round(mean(sigmoid(logits_b)) * 768) — top-k dims by score.
+            # Eval: threshold at 0.5, matching training STE.
+            # Training: hard_mask = (sigmoid((logit+Gumbel)/τ) > 0.5)
+            # Eval equivalent (no noise): sigmoid(logit) > 0.5  ⟺  logit > 0
             soft_mask = torch.sigmoid(logits)                          # [B, 768]
             clean_sigmoid = soft_mask                                  # same at eval
-            k_per_sample = (soft_mask.mean(dim=-1) * self.EMBEDDING_DIM).round().long()
-            k_per_sample = k_per_sample.clamp(min=1, max=self.EMBEDDING_DIM)
-
-            hard_mask = torch.zeros_like(soft_mask)
-            for i in range(soft_mask.size(0)):
-                ki = k_per_sample[i].item()
-                topk_idx = soft_mask[i].topk(int(ki)).indices
-                hard_mask[i, topk_idx] = 1.0
+            hard_mask = (logits > 0).float()                           # [B, 768]
             mask = hard_mask
 
         return {
