@@ -672,19 +672,23 @@ class BAMCombinedLoss(nn.Module):
         active_dims: Optional[torch.Tensor] = None,      # Option B: mask active dim count [B]
         negative_embs: Optional[torch.Tensor] = None,
         all_bloom_dims: Optional[torch.Tensor] = None,   # Option A: [6] from router._all_dims()
-        soft_mask: Optional[torch.Tensor] = None,        # Option B: [B, 768] raw sigmoid
+        soft_mask: Optional[torch.Tensor] = None,        # Option B: [B, 768] Gumbel-noisy sigmoid
+        clean_sigmoid: Optional[torch.Tensor] = None,    # Option B: [B, 768] sigmoid(logits), no Gumbel
     ):
         l_c, c_stats = self.contrastive(
             query_emb, positive_emb, query_mask, negative_embs, bloom_labels
         )
 
-        # Efficiency: use soft_mask mean (continuous, non-zero gradient even at collapse)
+        # Efficiency: use clean_sigmoid mean (eval-equivalent active fraction, no Gumbel offset)
         # for Option B; continuous_dim for Option A.
-        # Using hard active_dims for Option B causes zero-gradient when mask collapses to 0,
-        # making recovery impossible. soft_mask.mean(dim=-1) * D gives an equivalent
-        # expected active-dim count but is always differentiable.
-        if soft_mask is not None:
-            # Option B: convert soft_mask fraction → expected active dims [B]
+        # clean_sigmoid = sigmoid(logits) without Gumbel noise or temperature scaling.
+        # This matches eval's k = round(mean(sigmoid(logits)) * 768), so efficiency pressure
+        # directly reduces the quantity that determines eval-time dims.
+        if clean_sigmoid is not None:
+            # Option B: convert clean_sigmoid fraction → expected active dims [B]
+            eff_input = clean_sigmoid.mean(dim=-1) * BloomTwoFactorEfficiencyLoss.EMBEDDING_DIM
+        elif soft_mask is not None:
+            # Fallback if clean_sigmoid not provided (e.g. old trainer)
             eff_input = soft_mask.mean(dim=-1) * BloomTwoFactorEfficiencyLoss.EMBEDDING_DIM
         elif continuous_dim is not None:
             eff_input = continuous_dim
@@ -723,8 +727,10 @@ class BAMCombinedLoss(nn.Module):
             total = total + dist_w * l_dist
             d_stats.update(dist_stats)
 
-            # Sparsity (Stage 2) + diversity + variance (Stage 3)
-            l_sp, sp_stats = self.mask_sparsity(soft_mask, bloom_labels)
+            # Sparsity (Stage 2): use clean_sigmoid so the target matches eval-time dims.
+            # Diversity + variance (Stage 3): use soft_mask for stochastic gradient signal.
+            sparsity_input = clean_sigmoid if clean_sigmoid is not None else soft_mask
+            l_sp, sp_stats = self.mask_sparsity(sparsity_input, bloom_labels)
             l_md, md_stats = self.mask_diversity(soft_mask, bloom_labels)
             l_mv, mv_stats = self.mask_variance(soft_mask, bloom_labels)
             sp_w = getattr(self, "_active_mask_sparsity_weight",  self.mask_sparsity_weight)
@@ -759,6 +765,7 @@ class BAMCombinedLoss(nn.Module):
         query_emb, positive_emb, query_mask, bloom_labels,
         continuous_dim=None, active_dims=None,
         negative_embs=None, all_bloom_dims=None, soft_mask=None,
+        clean_sigmoid=None,
     ):
         """
         Returns (contrastive_loss, routing_loss) as separate tensors for PCGrad.
@@ -769,7 +776,9 @@ class BAMCombinedLoss(nn.Module):
             query_emb, positive_emb, query_mask, negative_embs, bloom_labels
         )
 
-        if soft_mask is not None:
+        if clean_sigmoid is not None:
+            eff_input = clean_sigmoid.mean(dim=-1) * BloomTwoFactorEfficiencyLoss.EMBEDDING_DIM
+        elif soft_mask is not None:
             eff_input = soft_mask.mean(dim=-1) * BloomTwoFactorEfficiencyLoss.EMBEDDING_DIM
         elif continuous_dim is not None:
             eff_input = continuous_dim
@@ -795,7 +804,8 @@ class BAMCombinedLoss(nn.Module):
             l_dist, _ = self.mask_distillation(query_emb, query_mask)
             routing = routing + dist_w * l_dist
 
-            l_sp, _ = self.mask_sparsity(soft_mask, bloom_labels)
+            sparsity_input = clean_sigmoid if clean_sigmoid is not None else soft_mask
+            l_sp, _ = self.mask_sparsity(sparsity_input, bloom_labels)
             l_md, _ = self.mask_diversity(soft_mask, bloom_labels)
             l_mv, _ = self.mask_variance(soft_mask, bloom_labels)
             sp_w = getattr(self, "_active_mask_sparsity_weight",  self.mask_sparsity_weight)

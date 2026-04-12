@@ -26,8 +26,8 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 MRL_CKPT_DIR="/tmp/mrl-ckpts"
 BAM_A_CKPT_DIR="/tmp/bam-ckpts"
-BAM_B_CKPT_DIR="/tmp/bam-b-ckpts9"
-RESULTS_DIR="./results/bam_optionb9"
+BAM_B_CKPT_DIR="/tmp/bam-b-ckpts10"
+RESULTS_DIR="./results/bam_optionb10"
 BAM_A_CONFIG="configs/bam.yaml"
 BAM_B_CONFIG="configs/bam_optionb.yaml"
 BSR_ALPHA="0.5"

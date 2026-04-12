@@ -132,36 +132,27 @@ class BloomMaskHead(nn.Module):
             soft_mask = torch.sigmoid(
                 (logits + gumbel_noise) / self.gumbel_temperature
             )
-            # STE (BUG FIX): use hard binary forward pass, soft sigmoid backward.
-            #
-            # Previous: mask = soft_mask (no STE). Problem: encoder adapts to soft
-            # fractional weights (0.2, 0.7, etc.) during training. At eval, top-k snaps
-            # these to 0/1 → dimensions that contributed 0.3 during training suddenly
-            # vanish → violent shift in the L2-normalized hypersphere → train-test gap.
-            #
-            # Fix: hard binary mask in the forward pass so the encoder trains with the
-            # same 0/1 activations it will see at eval. STE passes gradients through the
-            # hard step via the soft sigmoid, preserving gradient flow to all dims.
-            # This matches SMEC's "hard mask + STE" formulation for training.
+            # STE: hard binary forward pass, soft sigmoid backward.
+            # Ensures encoder trains with the same 0/1 activations it sees at eval.
             hard_mask = (soft_mask > 0.5).float()
             mask = hard_mask + (soft_mask - soft_mask.detach())  # STE
+
+            # Clean sigmoid (no Gumbel, no temperature) = eval-equivalent active fraction.
+            # Used by BloomMaskSparsityLoss so it constrains the EVAL-time quantity directly.
+            # Without this: sparsity loss compares mean(sigmoid((logit+G)/τ)) vs target,
+            # which has a Gumbel offset (~0.577/τ) and temperature scaling that inflates
+            # the training fraction far above the eval fraction → systematic overshoot
+            # (Remember: 308 dims actual vs 230 target with weight 1.0).
+            clean_sigmoid = torch.sigmoid(logits).detach()  # [B, 768], no grad to mask head via this path
+            # Re-attach gradient via the logits directly so sparsity can push logits.
+            # detach() above blocks double-counting; gradient flows via soft_mask path anyway.
+            # Actually we DO want grad here to enforce the target — use straight sigmoid:
+            clean_sigmoid = torch.sigmoid(logits)  # [B, 768] — grad flows to bloom_logit
         else:
             # Eval: top-k selection where k is learned from training dynamics.
-            #
-            # k = round(mean(sigmoid(logits_b)) * 768)
-            #   ↑ encodes the efficiency↔contrastive equilibrium from training.
-            #   Efficiency pushes mean(soft_mask) down → smaller k.
-            #   Contrastive pushes quality up → resists smaller k.
-            #   The converged mean IS the optimal learned k fraction.
-            #
-            # Then select the TOP-k dims by sigmoid score (importance ranking),
-            # not threshold at 0.5. Threshold is brittle — if contrastive shifts
-            # all logits up by +0.5, threshold k jumps wildly. Top-k with learned
-            # k is stable: only dim ranking and mean activation level matter.
-            #
-            # All queries of the same Bloom level share identical logits (Embedding),
-            # so they get the same k and the same mask — correct for static scatter mask.
+            # k = round(mean(sigmoid(logits_b)) * 768) — top-k dims by score.
             soft_mask = torch.sigmoid(logits)                          # [B, 768]
+            clean_sigmoid = soft_mask                                  # same at eval
             k_per_sample = (soft_mask.mean(dim=-1) * self.EMBEDDING_DIM).round().long()
             k_per_sample = k_per_sample.clamp(min=1, max=self.EMBEDDING_DIM)
 
@@ -175,6 +166,7 @@ class BloomMaskHead(nn.Module):
         return {
             "mask": mask,
             "soft_mask": soft_mask,
+            "clean_sigmoid": clean_sigmoid,  # sigmoid(logits) without Gumbel/temperature
             "active_dims": hard_mask.sum(dim=-1),            # [B]
         }
 

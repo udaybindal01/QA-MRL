@@ -4,16 +4,20 @@
 # One fixed mask per Bloom level. Active dims are scattered — NOT FAISS sub-index compatible.
 # Retrieval: normalize(q * mask_b) · normalize(corpus * mask_b) (pre-masked per level).
 #
-# Run 9 — per-level dim targets matched to Option A:
+# Run 10 — fix sparsity calibration: constrain eval-equivalent quantity (clean sigmoid).
 #
-#   Core insight from 8 runs: Option B's masks have good pattern diversity (cosine 0.44-0.52)
-#   but ALL levels converge to ~365 dims (spread: 10). Option A has 205-432 (spread: 227).
-#   With uniform efficiency + no per-level targets, nothing creates dim COUNT differentiation.
-#   Result: B uses 56% more dims than A for similar quality. Apply regresses 8% every run.
+#   Run 9 finding: per-level targets were set (Remember=230, Apply=207, etc.) but actual
+#   eval dims overshot by ~75-80 (Remember=308, Apply=291). Root cause: BloomMaskSparsityLoss
+#   constrained mean(sigmoid((logit+G)/τ)) — Gumbel-noisy, temperature-scaled — against the
+#   target. But eval uses k = round(mean(sigmoid(logit)) * 768) — clean sigmoid, no Gumbel.
+#   At τ=0.1, Gumbel offset ≈+0.577/τ inflates training fraction far above eval fraction,
+#   so the loss "thinks" target is met at much higher logit values → systematic overshoot.
 #
-#   Fix: per-level sparsity targets matched to Option A's learned distribution.
-#   This isolates the true scatter-vs-prefix comparison: same dim counts, different selection.
+#   Fix: pass clean_sigmoid = sigmoid(logits) (no Gumbel, no τ) to BloomMaskSparsityLoss
+#   and BloomTwoFactorEfficiencyLoss. This makes both losses constrain the EXACT quantity
+#   that determines eval-time k, eliminating the systematic overshoot.
 #
+#   Per-level targets unchanged from run 9 (matched to Option A's distribution):
 #     Remember:   0.30 → 230 dims  (Option A: 230)
 #     Understand: 0.56 → 430 dims  (Option A: 432)
 #     Apply:      0.27 → 207 dims  (Option A: 205)
@@ -21,12 +25,6 @@
 #     Evaluate:   0.56 → 430 dims  (Option A: 432)
 #     Create:     0.27 → 207 dims  (Option A: 207)
 #     Average:    0.37 → 287 dims  (Option A: 234)
-#
-#   BloomMaskHead init uses Gaussian quantile μ=Φ⁻¹(f) per level, so logits START at
-#   target → no drift in Stage 1. Sparsity loss (weight 1.0) holds them there.
-#
-#   Encoder LR stays at 2e-5 (higher destabilized quality). 20 epochs (more convergence time
-#   for the mask to find the optimal scattered dims within each level's budget).
 
 model:
   backbone: "BAAI/bge-base-en-v1.5"
@@ -107,7 +105,7 @@ training:
   encoder_freeze_after_epochs: null
   bloom_noise_rate: 0.0
   hard_neg_refresh_epochs: null
-  checkpoint_dir: "/tmp/bam-b-ckpts9/"
+  checkpoint_dir: "/tmp/bam-b-ckpts10/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
 

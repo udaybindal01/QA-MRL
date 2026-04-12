@@ -226,6 +226,7 @@ class BAMTrainer:
                 negative_embs=outputs.get("negative_embeddings"),
                 all_bloom_dims=all_bloom_dims,
                 soft_mask=outputs.get("soft_mask"),
+                clean_sigmoid=outputs.get("clean_sigmoid"),
             )
             loss = loss / self.grad_accum
 
@@ -264,6 +265,7 @@ class BAMTrainer:
                 negative_embs=outputs.get("negative_embeddings"),
                 all_bloom_dims=all_bloom_dims,
                 soft_mask=outputs.get("soft_mask"),
+                clean_sigmoid=outputs.get("clean_sigmoid"),
             )
             l_c = l_c / self.grad_accum
             l_r = l_r / self.grad_accum
