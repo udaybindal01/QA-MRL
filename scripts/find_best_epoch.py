@@ -135,7 +135,7 @@ def main():
     if args.skip_warmup_epochs is not None:
         warmup_cutoff = args.skip_warmup_epochs
     elif args.model_type == "bam":
-        warmup_cutoff = config["training"]["loss"].get("encoder_warmup_epochs", 0)
+        warmup_cutoff = config["training"].get("loss", {}).get("encoder_warmup_epochs", 0)
     else:
         warmup_cutoff = 0  # MRL has no warmup concept here
 

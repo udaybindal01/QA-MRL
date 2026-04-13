@@ -217,6 +217,7 @@ if should_run find_mrl; then
     python3 scripts/find_best_epoch.py \
         --checkpoint_dir "$MRL_CKPT_DIR" \
         --config         "$MRL_CONFIG" \
+        --model_type     mrl \
         || die "find_best_epoch.py failed"
 
     # Resolve best path — fall back to /best if the script didn't write a .txt
