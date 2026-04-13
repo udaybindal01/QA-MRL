@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.misc import load_config, set_seed
 from models.qa_mrl import QAMRL
+from models.bam import BloomAlignedMRL
 from models.encoder import MRLEncoder
 from transformers import AutoTokenizer
 
@@ -468,6 +469,8 @@ def main():
     parser.add_argument("--baseline", default=None, help="MRL baseline checkpoint")
     parser.add_argument("--datasets", nargs="+", default=BEIR_QUICK,
                         help="BEIR datasets to evaluate on")
+    parser.add_argument("--model_type", choices=["qamrl", "bam", "mrl"], default="qamrl",
+                        help="Model architecture: qamrl (default), bam (BloomAlignedMRL), mrl (MRLEncoder)")
     parser.add_argument("--sparse", action="store_true",
                         help="Use sparse retrieval (true efficiency)")
     parser.add_argument("--output_dir", default="results/beir/")
@@ -481,24 +484,47 @@ def main():
 
     all_results = {}
 
-    # Evaluate QA-MRL
+    # Load primary model
+    model_type = args.model_type
     print("\n" + "=" * 70)
-    print("QA-MRL EVALUATION")
-    print("=" * 70)
-    qa_model = QAMRL(config)
+    if model_type == "bam":
+        model_label = "BAM"
+        print(f"BAM EVALUATION (use_mask_routing={config['model'].get('use_mask_routing', False)})")
+        print("=" * 70)
+        primary_model = BloomAlignedMRL(config)
+    elif model_type == "mrl":
+        mc = config["model"]
+        model_label = "MRL"
+        print("MRL EVALUATION")
+        print("=" * 70)
+        primary_model = MRLEncoder(
+            model_name=mc["backbone"], embedding_dim=mc["embedding_dim"],
+            mrl_dims=mc["mrl_dims"], pooling=mc.get("pooling", "cls"),
+            normalize=mc.get("normalize_embeddings", True),
+        )
+    else:
+        model_label = "QA-MRL"
+        print("QA-MRL EVALUATION")
+        print("=" * 70)
+        primary_model = QAMRL(config)
+
     ckpt = os.path.join(args.checkpoint, "checkpoint.pt")
     if os.path.exists(ckpt):
-        qa_model.load_state_dict(torch.load(ckpt, map_location=device)["model_state_dict"])
-    qa_model.to(device).eval()
+        primary_model.load_state_dict(
+            torch.load(ckpt, map_location=device)["model_state_dict"], strict=False
+        )
+    primary_model.to(device).eval()
 
-    qa_results = {}
+    primary_results = {}
+    mrl_trunc = config["model"].get("mrl_dims", None) if model_type == "mrl" else None
     for ds_name in args.datasets:
         metrics = evaluate_on_beir(
-            qa_model, tokenizer, device, ds_name,
-            model_name="QA-MRL", use_sparse=args.sparse,
+            primary_model, tokenizer, device, ds_name,
+            model_name=model_label, use_sparse=args.sparse,
+            mrl_truncation_dims=mrl_trunc,
         )
-        qa_results[ds_name] = metrics
-    all_results["QA-MRL"] = qa_results
+        primary_results[ds_name] = metrics
+    all_results[model_label] = primary_results
 
     # Evaluate baseline
     if args.baseline:
