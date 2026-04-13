@@ -1,35 +1,35 @@
 #!/usr/bin/env bash
 # =============================================================================
-# BEIR/NFCorpus Evaluation Pipeline — E5-large BAM models
+# BEIR/MS MARCO Evaluation Pipeline — E5-large BAM models
 # =============================================================================
 #
-# Evaluates all three trained e5-large models on the BEIR NFCorpus benchmark
-# (biomedical information retrieval). This is an OUT-OF-DOMAIN evaluation:
-# the models were trained on educational science data, but NFCorpus queries
-# are biomedical. Good performance here demonstrates generalization.
+# Evaluates all three trained e5-large models on the BEIR MS MARCO benchmark.
+# This is an OUT-OF-DOMAIN evaluation: the models were trained on educational
+# science data, but MS MARCO queries are web search. Good performance here
+# demonstrates generalization.
+#
+# Key difference from NFCorpus pipeline: queries are annotated with Bloom
+# taxonomy levels using cip29/bert-blooms-taxonomy-classifier so the BAM
+# router actually routes per-query instead of defaulting all to level 5.
 #
 # What this pipeline tests:
 #   - Does BAM routing degrade out-of-domain retrieval quality?
 #   - Does Option B's scattered mask provide real efficiency gains?
 #   - How does MRL truncation compare to BAM adaptive masking on unseen data?
-#
-# Queries are annotated with Bloom taxonomy levels using
-# cip29/bert-blooms-taxonomy-classifier so BAM routing is per-query,
-# not all defaulting to level 5. This gives a realistic routing distribution.
+#   - Does Bloom-aware routing help even on non-educational queries?
 #
 # Pipeline overview:
 #
-#   Step 1  eval_mrl        — evaluate MRL baseline on NFCorpus
+#   Step 1  eval_mrl        — evaluate MRL baseline on MS MARCO (dev split)
 #                             Also runs MRL truncation comparisons at each
 #                             dim in [64, 128, 256, 512, 768, 1024]
 #
 #   Step 2  eval_bam_a      — evaluate BAM Option A (prefix router)
-#                             Without Bloom labels: uses full-dim prefix mask
+#                             Queries annotated with Bloom → per-query prefix dim
 #
 #   Step 3  eval_bam_b      — evaluate BAM Option B (scattered mask)
-#                             Without Bloom labels: uses Create-level mask (~276 dims)
-#                             Runs both dense (full-emb dot product) and sparse
-#                             (mask-active-only dot product) retrieval
+#                             Queries annotated with Bloom → per-query scattered mask
+#                             Runs both dense and sparse retrieval
 #
 #   Step 4  compare         — print side-by-side NDCG@10 / R@10 / R@100 / MAP
 #
@@ -39,15 +39,17 @@
 #     /tmp/bam-a-e5large-ckpts1/best_bsr/checkpoint.pt
 #     /tmp/bam-b-e5large-ckpts2/best_bsr/checkpoint.pt
 #
-#   NFCorpus data: auto-downloaded to data/beir/nfcorpus/ on first run (~50 MB).
+#   MS MARCO data: auto-downloaded via beir library (~1GB corpus).
+#   NOTE: MS MARCO uses 'dev' split (no public test split in BEIR).
 #
-#   Required packages: beir (pip install beir), faiss-gpu or faiss-cpu
+#   Required packages: beir (pip install beir), faiss-gpu or faiss-cpu,
+#                       transformers (for Bloom classifier)
 #
 # Usage:
-#   chmod +x beir-nfcorpus-pipeline.sh
-#   ./beir-nfcorpus-pipeline.sh                     # run all steps
-#   ./beir-nfcorpus-pipeline.sh --from eval_bam_b   # resume from a step
-#   DATASETS="nfcorpus scifact fiqa" ./beir-nfcorpus-pipeline.sh  # multiple datasets
+#   chmod +x beir-msmarco-pipeline.sh
+#   ./beir-msmarco-pipeline.sh                     # run all steps
+#   ./beir-msmarco-pipeline.sh --from eval_bam_b   # resume from a step
+#   DATASETS="msmarco nfcorpus scifact" ./beir-msmarco-pipeline.sh  # multiple
 # =============================================================================
 
 set -euo pipefail
@@ -58,15 +60,18 @@ set -euo pipefail
 MRL_CKPT_DIR="/tmp/mrl-e5large-ckpts"
 BAM_A_CKPT_DIR="/tmp/bam-a-e5large-ckpts1"
 BAM_B_CKPT_DIR="/tmp/bam-b-e5large-ckpts2"
-RESULTS_DIR="./results/beir_e5large"
+RESULTS_DIR="./results/beir_e5large_msmarco"
 
 MRL_CONFIG="configs/mrl_e5large.yaml"
 BAM_A_CONFIG="configs/bam_optionA_e5large.yaml"
 BAM_B_CONFIG="configs/bam_optionb_e5large.yaml"
 
 # Which BEIR datasets to evaluate on. Override with env var for more:
-#   DATASETS="nfcorpus scifact fiqa arguana scidocs" ./beir-nfcorpus-pipeline.sh
-DATASETS="${DATASETS:-nfcorpus}"
+#   DATASETS="msmarco nfcorpus scifact fiqa" ./beir-msmarco-pipeline.sh
+DATASETS="${DATASETS:-msmarco}"
+
+# MS MARCO uses dev split (no public test labels in BEIR)
+SPLIT="dev"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -127,6 +132,7 @@ BAM_B_BEST="$BAM_B_CKPT_DIR/best_bsr"
 [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "Option B best_bsr not found at $BAM_B_BEST. Run e5large-pipeline.sh first."
 
 echo "  Datasets   : $DATASETS"
+echo "  Split      : $SPLIT"
 echo "  MRL        : $MRL_BEST"
 echo "  Option A   : $BAM_A_BEST"
 echo "  Option B   : $BAM_B_BEST"
@@ -136,18 +142,18 @@ mkdir -p "$RESULTS_DIR"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 1 — EVALUATE MRL BASELINE
-# Runs full-dimensional retrieval + MRL truncation comparisons at each
-# configured mrl_dim. This shows what fixed-dim truncation can achieve
-# without any routing — the baseline that BAM needs to beat.
+# Runs full-dimensional retrieval + MRL truncation comparisons.
+# MRL has no Bloom router so --split is the only special flag needed.
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run eval_mrl; then
-    log "STEP 1/4 — EVALUATE MRL BASELINE ON BEIR ($DATASETS)"
+    log "STEP 1/4 — EVALUATE MRL BASELINE ON BEIR ($DATASETS, split=$SPLIT)"
 
     python3 scripts/eval_beir.py \
         --config      "$MRL_CONFIG" \
         --checkpoint  "$MRL_BEST" \
         --model_type  mrl \
         --datasets    $DATASETS \
+        --split       "$SPLIT" \
         --output_dir  "$RESULTS_DIR/mrl/" \
         || die "eval_beir.py (MRL) failed"
 
@@ -156,19 +162,18 @@ fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 2 — EVALUATE BAM OPTION A (prefix router)
-# Without Bloom labels, encode_queries defaults to level 5 (Create) which
-# maps to the highest prefix dim. This is effectively full-dimensional
-# retrieval for Option A — the interesting metric is whether the encoder
-# quality was preserved or degraded by BAM training.
+# Queries are Bloom-annotated inside eval_beir.py (auto when model_type=bam).
+# Each query gets a per-Bloom prefix dim from BloomDimRouter.
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run eval_bam_a; then
-    log "STEP 2/4 — EVALUATE BAM OPTION A ON BEIR ($DATASETS)"
+    log "STEP 2/4 — EVALUATE BAM OPTION A ON BEIR ($DATASETS, split=$SPLIT)"
 
     python3 scripts/eval_beir.py \
         --config      "$BAM_A_CONFIG" \
         --checkpoint  "$BAM_A_BEST" \
         --model_type  bam \
         --datasets    $DATASETS \
+        --split       "$SPLIT" \
         --output_dir  "$RESULTS_DIR/bam_a/" \
         || die "eval_beir.py (Option A) failed"
 
@@ -177,18 +182,13 @@ fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 3 — EVALUATE BAM OPTION B (scattered mask)
-# Two modes:
-#   Dense:  normalized(full_emb * mask) · normalized(full_emb_doc)
-#           Standard dot product — same FAISS index as MRL/Option A
-#   Sparse: only compute dot product over mask-active dims per query
-#           Shows real computational savings, but slower to evaluate
-#           (builds per-pattern FAISS sub-index)
-#
-# Without Bloom labels, uses Create-level mask (~27% of 1024 = ~276 dims).
-# This is the key efficiency result: 73% dimension reduction on unseen data.
+# Queries are Bloom-annotated → each gets a per-level scattered mask from
+# BloomMaskHead. Two retrieval modes:
+#   Dense:  full-emb dot product (masked query · full doc)
+#   Sparse: only active dims dot product (true efficiency)
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run eval_bam_b; then
-    log "STEP 3/4 — EVALUATE BAM OPTION B ON BEIR ($DATASETS)"
+    log "STEP 3/4 — EVALUATE BAM OPTION B ON BEIR ($DATASETS, split=$SPLIT)"
 
     # Dense retrieval (comparable to MRL/Option A)
     python3 scripts/eval_beir.py \
@@ -196,6 +196,7 @@ if should_run eval_bam_b; then
         --checkpoint  "$BAM_B_BEST" \
         --model_type  bam \
         --datasets    $DATASETS \
+        --split       "$SPLIT" \
         --output_dir  "$RESULTS_DIR/bam_b_dense/" \
         || die "eval_beir.py (Option B dense) failed"
 
@@ -208,6 +209,7 @@ if should_run eval_bam_b; then
         --model_type  bam \
         --sparse \
         --datasets    $DATASETS \
+        --split       "$SPLIT" \
         --output_dir  "$RESULTS_DIR/bam_b_sparse/" \
         || die "eval_beir.py (Option B sparse) failed"
 
@@ -272,11 +274,12 @@ log "PIPELINE COMPLETE"
 echo ""
 echo "  Results directory: $RESULTS_DIR/"
 echo "    mrl/beir_results.json          — MRL baseline + truncation comparisons"
-echo "    bam_a/beir_results.json        — BAM Option A (prefix router)"
-echo "    bam_b_dense/beir_results.json  — BAM Option B (dense retrieval)"
+echo "    bam_a/beir_results.json        — BAM Option A (prefix router, Bloom-annotated)"
+echo "    bam_b_dense/beir_results.json  — BAM Option B (dense retrieval, Bloom-annotated)"
 echo "    bam_b_sparse/beir_results.json — BAM Option B (sparse, true efficiency)"
 echo ""
 echo "  Key questions this answers:"
 echo "    1. Does BAM routing hurt out-of-domain quality? (compare MRL vs BAM A)"
-echo "    2. Does scattered masking work? (compare BAM B dense vs sparse)"
-echo "    3. What's the quality/efficiency tradeoff? (BAM B dims vs NDCG drop)"
+echo "    2. Does Bloom annotation help routing? (vs defaulting to level 5)"
+echo "    3. Does scattered masking work? (compare BAM B dense vs sparse)"
+echo "    4. What's the quality/efficiency tradeoff? (BAM B dims vs NDCG drop)"

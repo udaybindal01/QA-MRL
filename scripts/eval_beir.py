@@ -107,10 +107,42 @@ def load_beir_dataset(dataset_name: str, split: str = "test"):
 
 # ─────────────────────── Encoding ───────────────────────
 
+def annotate_bloom_labels(query_texts: List[str], device) -> List[int]:
+    """
+    Classify queries into Bloom taxonomy levels using pretrained classifier.
+    Returns 0-indexed labels (0=Remember ... 5=Create) for BAM routing.
+    """
+    from data.annotate_bloom_pretrained import load_pretrained_classifier, predict_bloom
+    print("  Annotating queries with Bloom levels...")
+    bloom_model, bloom_tok, id2label = load_pretrained_classifier(device=device)
+    # predict_bloom returns 1-indexed (1-6); convert to 0-indexed (0-5) for BAM
+    labels_1idx = predict_bloom(query_texts, bloom_model, bloom_tok,
+                                device=device, id2label=id2label)
+    labels_0idx = [l - 1 for l in labels_1idx]
+    # Print distribution
+    from collections import Counter
+    dist = Counter(labels_0idx)
+    bloom_names = {0: "Remember", 1: "Understand", 2: "Apply",
+                   3: "Analyze", 4: "Evaluate", 5: "Create"}
+    print("  Bloom distribution:")
+    for b in sorted(dist):
+        print(f"    {bloom_names.get(b, b)}: {dist[b]} ({dist[b]/len(labels_0idx):.1%})")
+    # Free GPU memory
+    del bloom_model
+    torch.cuda.empty_cache() if device != "cpu" else None
+    return labels_0idx
+
+
 @torch.no_grad()
 def encode_texts(model, texts: List[str], tokenizer, device,
-                  is_query: bool = False, batch_size: int = 128) -> np.ndarray:
-    """Encode a list of texts into numpy embeddings."""
+                  is_query: bool = False, batch_size: int = 128,
+                  bloom_labels: Optional[List[int]] = None) -> np.ndarray:
+    """Encode a list of texts into numpy embeddings.
+
+    Args:
+        bloom_labels: 0-indexed Bloom labels per query (0=Remember...5=Create).
+                      Only used when is_query=True and model has encode_queries.
+    """
     model.eval()
     all_embs = []
 
@@ -122,7 +154,14 @@ def encode_texts(model, texts: List[str], tokenizer, device,
         enc = {k: v.to(device) for k, v in enc.items()}
 
         if is_query and hasattr(model, "encode_queries"):
-            out = model.encode_queries(enc["input_ids"], enc["attention_mask"])
+            kwargs = {"input_ids": enc["input_ids"],
+                      "attention_mask": enc["attention_mask"]}
+            if bloom_labels is not None:
+                batch_labels = bloom_labels[i:i+batch_size]
+                kwargs["bloom_labels"] = torch.tensor(
+                    batch_labels, dtype=torch.long, device=device
+                )
+            out = model.encode_queries(**kwargs)
             emb = out["masked_embedding"]
         elif not is_query and hasattr(model, "encode_documents"):
             out = model.encode_documents(enc["input_ids"], enc["attention_mask"])
@@ -335,6 +374,7 @@ def evaluate_on_beir(
     model_name: str = "QA-MRL",
     use_sparse: bool = False,
     mrl_truncation_dims: List[int] = None,
+    split: str = "test",
 ) -> Dict[str, float]:
     """Evaluate a model on a single BEIR dataset."""
     print(f"\n{'='*60}")
@@ -342,7 +382,7 @@ def evaluate_on_beir(
     print(f"{'='*60}")
 
     # Load dataset
-    corpus, queries, qrels = load_beir_dataset(dataset_name)
+    corpus, queries, qrels = load_beir_dataset(dataset_name, split=split)
     if corpus is None:
         print(f"  Skipping {dataset_name} (failed to load)")
         return {}
@@ -366,6 +406,11 @@ def evaluate_on_beir(
 
     print(f"  Valid queries: {len(query_texts)}")
 
+    # Annotate queries with Bloom levels for BAM routing
+    bloom_labels = None
+    if hasattr(model, "encode_queries"):
+        bloom_labels = annotate_bloom_labels(query_texts, device)
+
     # Encode
     print("  Encoding corpus...")
     t0 = time.time()
@@ -376,7 +421,8 @@ def evaluate_on_beir(
     print("  Encoding queries...")
     t0 = time.time()
     query_embs = encode_texts(model, query_texts, tokenizer, device,
-                               is_query=True, batch_size=64)
+                               is_query=True, batch_size=64,
+                               bloom_labels=bloom_labels)
     encode_query_time = time.time() - t0
 
     # Get query masks for sparse retrieval
@@ -391,7 +437,14 @@ def evaluate_on_beir(
                 enc = tokenizer(batch, padding=True, truncation=True,
                                max_length=128, return_tensors="pt")
                 enc = {k: v.to(device) for k, v in enc.items()}
-                out = model.encode_queries(enc["input_ids"], enc["attention_mask"])
+                kwargs = {"input_ids": enc["input_ids"],
+                          "attention_mask": enc["attention_mask"]}
+                if bloom_labels is not None:
+                    batch_labels = bloom_labels[i:i+64]
+                    kwargs["bloom_labels"] = torch.tensor(
+                        batch_labels, dtype=torch.long, device=device
+                    )
+                out = model.encode_queries(**kwargs)
                 all_masks.append(out["mask"].cpu().numpy())
         query_masks = np.concatenate(all_masks)
 
@@ -473,6 +526,8 @@ def main():
                         help="Model architecture: qamrl (default), bam (BloomAlignedMRL), mrl (MRLEncoder)")
     parser.add_argument("--sparse", action="store_true",
                         help="Use sparse retrieval (true efficiency)")
+    parser.add_argument("--split", default="test",
+                        help="Dataset split (default: test; use 'dev' for msmarco)")
     parser.add_argument("--output_dir", default="results/beir/")
     args = parser.parse_args()
 
@@ -522,6 +577,7 @@ def main():
             primary_model, tokenizer, device, ds_name,
             model_name=model_label, use_sparse=args.sparse,
             mrl_truncation_dims=mrl_trunc,
+            split=args.split,
         )
         primary_results[ds_name] = metrics
     all_results[model_label] = primary_results
@@ -545,6 +601,7 @@ def main():
                 bl_model, tokenizer, device, ds_name,
                 model_name="MRL Baseline",
                 mrl_truncation_dims=[64, 128, 256, 384, 512],
+                split=args.split,
             )
             bl_results[ds_name] = metrics
         all_results["MRL Baseline"] = bl_results
