@@ -73,8 +73,8 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 MRL_CKPT_DIR="/tmp/mrl-e5large-ckpts"
 BAM_A_CKPT_DIR="/tmp/bam-a-e5large-ckpts1"
-BAM_B_CKPT_DIR="/tmp/bam-b-e5large-ckpts1"
-RESULTS_DIR="./results/bam_e5large1"
+BAM_B_CKPT_DIR="/tmp/bam-b-e5large-ckpts2"
+RESULTS_DIR="./results/bam_e5large2"
 
 MRL_CONFIG="configs/mrl_e5large.yaml"
 BAM_A_CONFIG="configs/bam_optionA_e5large.yaml"
@@ -257,25 +257,32 @@ if should_run train_bam_a; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 6 — TRAIN BAM OPTION B  (scattered mask, raw e5-large init)
+# STEP 6 — TRAIN BAM OPTION B  (scattered mask, MRL warm-start)
 # BloomMaskHead learns one scattered binary mask per Bloom level.
 #
-# Intentionally NO --init_encoder here. MRL training teaches PREFIX structure
-# (early dims are more important), which is correct for Option A's prefix mask
-# but wrong for Option B's scattered mask. e5-large is already retrieval-tuned
-# (contrastive) with no prefix bias — the best starting point for a model that
-# needs to freely select any subset of 1024 dims per Bloom level.
+# Uses the same MRL warm-start as Option A. The MRL-warmed encoder provides a
+# domain-adapted starting point with quality multi-resolution representations.
+# mrl_anchor_weight=0.0 in the config ensures prefix structure is NOT reinforced
+# during scattered mask training — the encoder freely reorganizes which dims are
+# informative per Bloom level. Without the warm-start, Option B must learn domain
+# adaptation, multi-resolution compression, AND scattered masking simultaneously,
+# producing severely degraded encoder quality (R@10=0.32 at full dims vs 0.53 MRL).
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run train_bam_b; then
-    log "STEP 6/9 — TRAIN BAM OPTION B (scattered mask, raw e5-large init)"
+    log "STEP 6/9 — TRAIN BAM OPTION B (scattered mask, MRL warm-start)"
+
+    MRL_BEST="$MRL_CKPT_DIR/best"
+    [[ -f "$RESULTS_DIR/mrl_best_path.txt" ]] && MRL_BEST=$(cat "$RESULTS_DIR/mrl_best_path.txt")
+    [[ -f "$MRL_BEST/checkpoint.pt" ]] \
+        || die "MRL best checkpoint not found at $MRL_BEST — run find_mrl first"
 
     echo "  Config     : $BAM_B_CONFIG"
-    echo "  Init       : intfloat/e5-large-v2 pretrained weights (no MRL warm-start)"
+    echo "  Init       : $MRL_BEST"
     echo "  Output     : $BAM_B_CKPT_DIR/"
 
-    # No --init_encoder: BloomAlignedMRL loads raw e5-large HuggingFace weights
     python3 scripts/train_bam.py \
-        --config "$BAM_B_CONFIG" \
+        --config       "$BAM_B_CONFIG" \
+        --init_encoder "$MRL_BEST" \
         || die "train_bam.py (Option B) failed"
 
     echo "  BAM Option B checkpoints → $BAM_B_CKPT_DIR/"

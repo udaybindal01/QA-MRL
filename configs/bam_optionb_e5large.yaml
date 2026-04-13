@@ -1,19 +1,21 @@
-# BAM Option B — intfloat/e5-large-v2 backbone, raw pretrained init (no MRL warm-start)
+# BAM Option B — intfloat/e5-large-v2 backbone, MRL warm-start
 #
 # Routing: Embedding(6, 1024) → Gumbel-Sigmoid + STE → scattered binary mask per Bloom level
 # One fixed mask per Bloom level. Active dims are scattered — NOT FAISS sub-index compatible.
 #
-# Init encoder: raw intfloat/e5-large-v2 pretrained weights — intentionally NO MRL warm-start.
+# Init encoder: /tmp/mrl-e5large-ckpts/best  (run mrl_e5large training first)
 #
-# Why not MRL warm-start here (unlike Option A)?
-#   MRL training teaches PREFIX structure: dim[0..64] is a valid embedding, dim[0..128] is better,
-#   etc. Option A (prefix mask) aligns with this — its masks always take the first k dims.
-#   Option B (scattered mask) does NOT — it picks any subset of dims, so prefix bias is wrong.
-#   Starting from MRL-warmed weights plants "early dims matter most" into the encoder before
-#   scatter training even begins. mrl_anchor_weight=0.0 stops re-reinforcement during training,
-#   but the initial bias still resists the scatter mask finding a non-prefix solution.
-#   e5-large is already retrieval-tuned (contrastive) with no prefix structure — the ideal
-#   starting point for a scattered mask that needs full freedom over all 1024 dims.
+# Why MRL warm-start (same as Option A)?
+#   Without warm-start, Option B must simultaneously learn: (a) domain-specific retrieval,
+#   (b) multi-resolution compression, AND (c) scattered masking — too much at once.
+#   Run 1 result: BAM encoder R@10=0.3236 at full 1024 dims (vs MRL=0.5353) — the encoder
+#   was severely damaged by the combined loss pressure.
+#
+#   With MRL warm-start, the encoder already has domain-adapted multi-resolution structure.
+#   mrl_anchor_weight=0.0 ensures prefix structure is NOT reinforced during BAM training,
+#   so the scattered mask freely reorganizes which dims are active per Bloom level without
+#   re-planting prefix bias. The MRL warm-start gives quality; Option B's mask gives
+#   per-level specialization on top of that quality foundation.
 #
 # Key differences from BGE-base Option B (configs/bam_optionb.yaml):
 #   - backbone: intfloat/e5-large-v2 (1024 hidden dim)
@@ -28,7 +30,7 @@
 #       Evaluate:   0.56 → ~573 dims  (BGE-base: 430)
 #       Create:     0.27 → ~276 dims  (BGE-base: 207)
 #
-# Run 1
+# Run 2 (MRL warm-start)
 
 model:
   backbone: "intfloat/e5-large-v2"
@@ -100,7 +102,7 @@ training:
   encoder_freeze_after_epochs: null
   bloom_noise_rate: 0.0
   hard_neg_refresh_epochs: null
-  checkpoint_dir: "/tmp/bam-b-e5large-ckpts1/"
+  checkpoint_dir: "/tmp/bam-b-e5large-ckpts2/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
 
