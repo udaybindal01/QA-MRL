@@ -59,7 +59,9 @@ training:
     efficiency_weight: 0.2         # Doubled from 0.1 — more signal needed for 1024-dim space
     efficiency_uniform_weights: false
     mrl_anchor_weight: 0.2         # Keep encoder sharp at MRL anchor dims
-    diversity_weight: 0.0          # Kaiming init — diversity not needed (same as BGE-base final config)
+    diversity_weight: 0.05         # Pushes Bloom levels to different dims — critical for differentiation.
+                                    # Without this, all levels converge to ~220 dims (no adaptation).
+                                    # BGE-base Option A uses 0.05 and achieves 205-432 spread.
     mask_diversity_weight: 0.0     # Option B only
     mask_sparsity_weight: 0.0      # Option B only
     mask_level_targets: null       # Option B only

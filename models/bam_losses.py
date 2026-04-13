@@ -114,10 +114,10 @@ class BloomTwoFactorEfficiencyLoss(nn.Module):
     to get too few updates (rare + low combined weight → stuck near init dims).
     """
 
-    EMBEDDING_DIM = 768.0
-
-    def __init__(self, bloom_frequencies: List[float], uniform_weights: bool = False):
+    def __init__(self, bloom_frequencies: List[float], uniform_weights: bool = False,
+                 embedding_dim: int = 768):
         super().__init__()
+        self.embedding_dim = float(embedding_dim)
         if uniform_weights:
             # Equal compression pressure on all Bloom levels. Use when the cognitive
             # ordering hypothesis (lower levels need fewer dims) is not supported by
@@ -144,7 +144,7 @@ class BloomTwoFactorEfficiencyLoss(nn.Module):
                 continue
             cw = self.cognitive_weights[b]
             class_mean_dim = continuous_dim[mask].mean()
-            total = total + cw * (class_mean_dim / self.EMBEDDING_DIM)
+            total = total + cw * (class_mean_dim / self.embedding_dim)
             n_classes += 1
             per_class_dims[b] = class_mean_dim.item()
 
@@ -164,12 +164,14 @@ class RouterDiversityLoss(nn.Module):
     identical, which allows it to break initial symmetry and push levels apart.
     """
 
-    EMBEDDING_DIM = 768.0
-    MIN_DIM = 128.0
+    def __init__(self, embedding_dim: int = 768, min_dim: int = 128):
+        super().__init__()
+        self.embedding_dim = float(embedding_dim)
+        self.min_dim = float(min_dim)
 
     def forward(self, all_dims: torch.Tensor) -> torch.Tensor:
-        span = self.EMBEDDING_DIM - self.MIN_DIM
-        normalized = (all_dims - self.MIN_DIM) / span
+        span = self.embedding_dim - self.min_dim
+        normalized = (all_dims - self.min_dim) / span
         diff = normalized.unsqueeze(0) - normalized.unsqueeze(1)
         pairwise_dist = diff.abs()
         mask = torch.triu(torch.ones(6, 6, device=all_dims.device), diagonal=1)
@@ -590,15 +592,18 @@ class BAMCombinedLoss(nn.Module):
             temperature=self.temp_start,
             class_weights=cw,
         )
+        emb_dim = mc.get("embedding_dim", 768)
+        min_dim = mc["mrl_dims"][0] if mc.get("mrl_dims") else 128
         self.efficiency = BloomTwoFactorEfficiencyLoss(
             bloom_frequencies=freqs,
             uniform_weights=lc.get("efficiency_uniform_weights", False),
+            embedding_dim=emb_dim,
         )
         self.mrl_anchor = MRLAnchorRegularizationLoss(
             mrl_dims=mc["mrl_dims"],
             temperature=self.temp_start,
         )
-        self.diversity = RouterDiversityLoss()
+        self.diversity = RouterDiversityLoss(embedding_dim=emb_dim, min_dim=min_dim)
 
         # Option B losses — per-level sparsity targets and diversity margin from config
         global_sparsity = mc.get("mask_sparsity_target", None)
