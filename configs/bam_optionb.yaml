@@ -89,6 +89,9 @@ training:
     mask_variance_weight: 0.3      # Per-dim variance across levels — 768 gradient signals vs 15 pairs.
                                    # Complements diversity: rewards each dim being "owned" by specific levels.
     mask_distill_weight: 0.3       # Always-on quality signal without prefix bias.
+    dropmask_rate: 0.1             # Flip 10% of mask bits during training to force encoder
+                                   # to spread information across all 768 dims.
+    dim_redist_weight: 0.05        # Penalize encoder for concentrating variance in prefix dims.
     encoder_warmup_epochs: 3       # MRL init already domain-adapted — 3 epochs enough before
                                    # compression activates (was 5 for base init).
     mask_differentiation_epochs: 3 # Same as encoder_warmup_epochs.

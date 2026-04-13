@@ -87,9 +87,16 @@ training:
     mask_diversity_margin: 0.0
     mask_variance_weight: 0.3
     mask_distill_weight: 0.3
-    encoder_warmup_epochs: 5       # Raw e5-large init: 5 epochs before compression activates
-                                   # (no MRL warm-start, so encoder needs more warmup to
-                                   # develop quality embeddings before sparsity kicks in)
+    dropmask_rate: 0.1             # Flip 10% of mask bits during training. Forces encoder to
+                                   # spread information across all dims, breaking MRL prefix bias.
+                                   # Applied in BloomMaskHead.forward(); does not affect
+                                   # clean_sigmoid / sparsity targets. Zero at eval.
+    dim_redist_weight: 0.05        # Penalize encoder for var(early_dims) > var(late_dims).
+                                   # Works alongside dropmask: behavioral vs statistical signal.
+                                   # Conservative weight — enough to push redistribution without
+                                   # destabilizing contrastive training.
+    encoder_warmup_epochs: 5       # MRL warm-start: encoder already domain-adapted, 5 epochs
+                                   # before compression activates (same as Option A).
     mask_differentiation_epochs: 5
     temperature_schedule:
       start: 0.1

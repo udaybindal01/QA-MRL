@@ -1,5 +1,12 @@
 """
-BAM Training Losses v9.
+BAM Training Losses v10.
+
+New in v10:
+  DimVarianceRedistributionLoss — penalizes encoder for concentrating variance in prefix dims.
+    Fires from epoch 0 for Option B; weight dim_redist_weight (config, default 0).
+  DropMask augmentation — randomly flips mask bits during training to force the encoder
+    to spread information across all dims. Configured via dropmask_rate in the loss section.
+    Applied in BloomMaskHead.forward(); does not affect clean_sigmoid / sparsity targets.
 
 New in v9:
   BloomMaskVarianceLoss  — maximises per-dim variance of mean activation across Bloom levels;
@@ -529,6 +536,50 @@ class BloomMaskDistillationLoss(nn.Module):
         return loss, {"mask_distill": loss.item()}
 
 
+class DimVarianceRedistributionLoss(nn.Module):
+    """
+    Penalizes encoder for concentrating embedding variance in early (prefix) dimensions.
+
+    MRL warm-start trains the encoder so early dims carry most information. For
+    Option B's scattered mask, this prefix bias means late dims are low-quality and
+    the mask is forced to select early dims — negating the benefit of scattered selection.
+
+    L = ReLU( mean_var(early_dims) − mean_var(late_dims) )
+
+    early_dims: first split_fraction of dims (default: first 25%)
+    late_dims:  last split_fraction of dims (default: last 25%)
+
+    Applied to full (unmasked) query embeddings — measures the raw encoder
+    representation distribution, not the masked one.
+
+    Fires from epoch 0 alongside distillation (always-on for Option B). Acts as an
+    encoder-quality signal, not a routing signal.
+    """
+
+    def __init__(self, split_fraction: float = 0.25):
+        super().__init__()
+        self.split_fraction = split_fraction
+
+    def forward(self, full_emb: torch.Tensor) -> tuple:
+        D = full_emb.size(-1)
+        n = max(1, int(D * self.split_fraction))
+
+        # Per-dim variance across the batch (unbiased=False: batch is the population)
+        var_per_dim = full_emb.var(dim=0, unbiased=False)  # [D]
+
+        early_var = var_per_dim[:n].mean()   # first n dims
+        late_var  = var_per_dim[-n:].mean()  # last n dims
+
+        # ReLU: only penalize when early > late (not the reverse — we want redistribution,
+        # not enforcing that late dims are ALWAYS higher variance than early).
+        loss = F.relu(early_var - late_var)
+        return loss, {
+            "dim_redist": loss.item(),
+            "var_early": early_var.item(),
+            "var_late":  late_var.item(),
+        }
+
+
 # ---------------------------------------------------------------------------
 # Combined loss (orchestrates everything)
 # ---------------------------------------------------------------------------
@@ -571,6 +622,7 @@ class BAMCombinedLoss(nn.Module):
         self.mask_diversity_weight = lc.get("mask_diversity_weight", 0.05)
         self.mask_variance_weight  = lc.get("mask_variance_weight", 0.0)
         self.mask_distill_weight   = lc.get("mask_distill_weight", 0.0)
+        self.dim_redist_weight     = lc.get("dim_redist_weight", 0.0)
 
         freqs = lc.get("bloom_frequencies")
         if freqs is None:
@@ -620,6 +672,9 @@ class BAMCombinedLoss(nn.Module):
         self.mask_diversity    = BloomMaskDiversityLoss(margin=diversity_margin)
         self.mask_variance     = BloomMaskVarianceLoss()
         self.mask_distillation = BloomMaskDistillationLoss()
+        self.dim_redistribution = DimVarianceRedistributionLoss(
+            split_fraction=lc.get("dim_redist_split_fraction", 0.25),
+        )
 
     def set_epoch(self, epoch: int, total_epochs: int, freeze_encoder: bool = False):
         """
@@ -687,14 +742,14 @@ class BAMCombinedLoss(nn.Module):
         # Efficiency: use clean_sigmoid mean (eval-equivalent active fraction, no Gumbel offset)
         # for Option B; continuous_dim for Option A.
         # clean_sigmoid = sigmoid(logits) without Gumbel noise or temperature scaling.
-        # This matches eval's k = round(mean(sigmoid(logits)) * 768), so efficiency pressure
+        # This matches eval's k = round(mean(sigmoid(logits)) * emb_dim), so efficiency pressure
         # directly reduces the quantity that determines eval-time dims.
         if clean_sigmoid is not None:
             # Option B: convert clean_sigmoid fraction → expected active dims [B]
-            eff_input = clean_sigmoid.mean(dim=-1) * BloomTwoFactorEfficiencyLoss.EMBEDDING_DIM
+            eff_input = clean_sigmoid.mean(dim=-1) * self.efficiency.embedding_dim
         elif soft_mask is not None:
             # Fallback if clean_sigmoid not provided (e.g. old trainer)
-            eff_input = soft_mask.mean(dim=-1) * BloomTwoFactorEfficiencyLoss.EMBEDDING_DIM
+            eff_input = soft_mask.mean(dim=-1) * self.efficiency.embedding_dim
         elif continuous_dim is not None:
             eff_input = continuous_dim
         else:
@@ -724,13 +779,23 @@ class BAMCombinedLoss(nn.Module):
             d_stats["diversity"] = l_d.item()
             d_stats["dim_variance"] = float(all_bloom_dims.var().item())
 
-        # Option B: distillation + sparsity + diversity + variance
+        # Option B: distillation + sparsity + diversity + variance + redistribution
         if soft_mask is not None:
             # Distillation (Stage 1, fires from epoch 0): teacher=full_emb, student=masked_emb
             dist_w = getattr(self, "_active_mask_distill_weight", self.mask_distill_weight)
             l_dist, dist_stats = self.mask_distillation(query_emb, query_mask)
             total = total + dist_w * l_dist
             d_stats.update(dist_stats)
+
+            # Dim variance redistribution (fires from epoch 0, always-on for Option B).
+            # Penalizes encoder for concentrating variance in early (prefix) dims.
+            # Works alongside DropMask in BloomMaskHead: DropMask forces behavioral
+            # redistribution via contrastive gradient; this loss directly penalizes
+            # the encoder's representation statistics.
+            if self.dim_redist_weight > 0:
+                l_redist, redist_stats = self.dim_redistribution(query_emb)
+                total = total + self.dim_redist_weight * l_redist
+                d_stats.update(redist_stats)
 
             # Sparsity (Stage 2): use clean_sigmoid so the target matches eval-time dims.
             # Diversity + variance (Stage 3): use soft_mask for stochastic gradient signal.
@@ -782,9 +847,9 @@ class BAMCombinedLoss(nn.Module):
         )
 
         if clean_sigmoid is not None:
-            eff_input = clean_sigmoid.mean(dim=-1) * BloomTwoFactorEfficiencyLoss.EMBEDDING_DIM
+            eff_input = clean_sigmoid.mean(dim=-1) * self.efficiency.embedding_dim
         elif soft_mask is not None:
-            eff_input = soft_mask.mean(dim=-1) * BloomTwoFactorEfficiencyLoss.EMBEDDING_DIM
+            eff_input = soft_mask.mean(dim=-1) * self.efficiency.embedding_dim
         elif continuous_dim is not None:
             eff_input = continuous_dim
         else:

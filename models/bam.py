@@ -69,11 +69,13 @@ class BloomMaskHead(nn.Module):
     BLOOM_DIM = 6
 
     def __init__(self, sparsity_target: float = 0.44, gumbel_temperature: float = 1.0,
-                 level_targets: Optional[dict] = None, embedding_dim: int = 768):
+                 level_targets: Optional[dict] = None, embedding_dim: int = 768,
+                 dropmask_rate: float = 0.0):
         super().__init__()
         self.EMBEDDING_DIM = embedding_dim  # instance attribute — overrides class default
         self.sparsity_target = sparsity_target
         self.gumbel_temperature = gumbel_temperature
+        self.dropmask_rate = dropmask_rate
         self.bloom_logit = nn.Embedding(self.BLOOM_DIM, self.EMBEDDING_DIM)
         with torch.no_grad():
             # Per-level inference-calibrated init using the Gaussian quantile.
@@ -135,6 +137,24 @@ class BloomMaskHead(nn.Module):
             # Ensures encoder trains with the same 0/1 activations it sees at eval.
             hard_mask = (soft_mask > 0.5).float()
             mask = hard_mask + (soft_mask - soft_mask.detach())  # STE
+
+            # DropMask: randomly flip a fraction of mask bits during training.
+            # Forces the encoder to spread information across ALL dims instead of
+            # concentrating it in prefix dims (MRL warm-start bias). Without this,
+            # the encoder only receives contrastive gradient through the mask-active
+            # dims, so non-active dims stay low-quality and the mask is stuck
+            # selecting prefix dims because late dims are never trained.
+            # clean_sigmoid / soft_mask / active_dims are NOT affected — they
+            # reflect the true logit state for sparsity/diversity loss targets.
+            if self.dropmask_rate > 0.0:
+                on_flip  = (hard_mask == 1) & (torch.rand_like(hard_mask) < self.dropmask_rate)
+                off_flip = (hard_mask == 0) & (torch.rand_like(hard_mask) < self.dropmask_rate)
+                aug = hard_mask.clone()
+                aug[on_flip]  = 0.0
+                aug[off_flip] = 1.0
+                # STE with augmented forward pass: encoder sees random mask, gradient
+                # still flows through soft_mask (the real sigmoid, unaugmented).
+                mask = aug + (soft_mask - soft_mask.detach())
 
             # Clean sigmoid (no Gumbel, no temperature) = eval-equivalent active fraction.
             # Used by BloomMaskSparsityLoss so it constrains the EVAL-time quantity directly.
@@ -318,6 +338,7 @@ class BloomAlignedMRL(nn.Module):
                 sparsity_target=mc.get("mask_sparsity_target", None),
                 level_targets=level_targets,
                 embedding_dim=mc["embedding_dim"],
+                dropmask_rate=lc.get("dropmask_rate", 0.0),
             )
         else:
             # Option A: prefix router
