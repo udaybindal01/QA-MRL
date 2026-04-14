@@ -78,8 +78,8 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 MRL_CKPT_DIR="/tmp/mrl-e5large-ckpts"
 BAM_A_CKPT_DIR="/tmp/bam-a-e5large-ckpts1"
-BAM_B_CKPT_DIR="/tmp/bam-b-e5large-ckpts2"
-RESULTS_DIR="./results/bam_e5large2"
+BAM_B_CKPT_DIR="/tmp/bam-b-e5large-ckpts3"
+RESULTS_DIR="./results/bam_e5large3"
 
 MRL_CONFIG="configs/mrl_e5large.yaml"
 BAM_A_CONFIG="configs/bam_optionA_e5large.yaml"

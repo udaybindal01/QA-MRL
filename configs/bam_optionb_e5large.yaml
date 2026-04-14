@@ -5,32 +5,34 @@
 #
 # Init encoder: /tmp/mrl-e5large-ckpts/best  (run mrl_e5large training first)
 #
-# Why MRL warm-start (same as Option A)?
-#   Without warm-start, Option B must simultaneously learn: (a) domain-specific retrieval,
-#   (b) multi-resolution compression, AND (c) scattered masking — too much at once.
-#   Run 1 result: BAM encoder R@10=0.3236 at full 1024 dims (vs MRL=0.5353) — the encoder
-#   was severely damaged by the combined loss pressure.
+# Run 3 — aggressive redistribution + higher dim targets + rebalanced losses
 #
-#   With MRL warm-start, the encoder already has domain-adapted multi-resolution structure.
-#   mrl_anchor_weight=0.0 ensures prefix structure is NOT reinforced during BAM training,
-#   so the scattered mask freely reorganizes which dims are active per Bloom level without
-#   re-planting prefix bias. The MRL warm-start gives quality; Option B's mask gives
-#   per-level specialization on top of that quality foundation.
+#   Run 2 findings (R@10):  Option A=0.5563, Option B=0.5293, MRL=0.5353
+#     Per-Bloom: Option B BEATS A on Understand (+7.1), Evaluate (+4.2), ties Apply/Analyze.
+#     Entire aggregate gap comes from Remember (-4 pts, 63% of queries) and Create (-4.4 pts).
+#     Root cause: Option A's prefix mask selects the most-informative dims (MRL prefix bias).
+#     Option B's scattered mask includes less-informative late dims.
+#     DropMask 0.1 + dim_redist 0.05 were too conservative to break prefix bias.
 #
-# Key differences from BGE-base Option B (configs/bam_optionb.yaml):
-#   - backbone: intfloat/e5-large-v2 (1024 hidden dim)
-#   - embedding_dim: 1024
-#   - mrl_dims: [64, 128, 256, 512, 768, 1024]
-#   - BloomMaskHead Embedding is now (6, 1024) — initialized with Φ⁻¹(target) per level
-#   - Per-level dim targets: same fractions as BGE-base run 10, scaled to 1024:
-#       Remember:   0.30 → ~307 dims  (BGE-base: 230)
-#       Understand: 0.56 → ~573 dims  (BGE-base: 430)
-#       Apply:      0.27 → ~276 dims  (BGE-base: 207)
-#       Analyze:    0.28 → ~287 dims  (BGE-base: 215)
-#       Evaluate:   0.56 → ~573 dims  (BGE-base: 430)
-#       Create:     0.27 → ~276 dims  (BGE-base: 207)
+#   Run 3 changes:
+#     1. dropmask_rate: 0.1 → 0.2, dim_redist_weight: 0.05 → 0.2 — 2-4x stronger redistribution
+#     2. Per-level targets bumped ~30% — give Option B more dims to compensate for remaining
+#        prefix bias. Still 60% compression vs full 1024 dims.
+#     3. efficiency_weight: 0.3 → 0.1 — sparsity targets handle compression; efficiency was
+#        creating redundant compression pressure on top of sparsity
+#     4. mask_distill_weight: 0.3 → 0.5 — stronger quality preservation signal
+#     5. Separate 3-stage schedule: warmup=3, differentiation=8. Run 2 had both at 5,
+#        so compression + differentiation fired simultaneously. Separating lets the mask
+#        converge to target dims (Stage 2) before diversity/variance push masks apart (Stage 3).
 #
-# Run 2 (MRL warm-start)
+#   Per-level targets (run 3):
+#       Remember:   0.40 → ~410 dims  (run 2: 307 → actual 288)
+#       Understand: 0.65 → ~666 dims  (run 2: 573 → actual 586)
+#       Apply:      0.38 → ~389 dims  (run 2: 276 → actual 272)
+#       Analyze:    0.40 → ~410 dims  (run 2: 287 → actual 264)
+#       Evaluate:   0.65 → ~666 dims  (run 2: 573 → actual 595)
+#       Create:     0.38 → ~389 dims  (run 2: 276 → actual 271)
+#       Average:    ~488 dims (48% compression vs 1024)
 
 model:
   backbone: "intfloat/e5-large-v2"
@@ -71,33 +73,38 @@ training:
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.3
+    efficiency_weight: 0.1         # Reduced from 0.3 — sparsity targets handle compression,
+                                   # efficiency was adding redundant pressure that hurt quality.
     efficiency_uniform_weights: true
     mrl_anchor_weight: 0.0         # 0: MRL anchor reinforces prefix structure — wrong for scatter
     diversity_weight: 0.0          # RouterDiversityLoss is for Option A only
     mask_sparsity_weight: 1.0      # Strong enforcement of per-level targets
-    mask_level_targets:            # Same fractions as BGE-base run 10, scaled to 1024:
-      0: 0.30                      # Remember: ~307 dims
-      1: 0.56                      # Understand: ~573 dims
-      2: 0.27                      # Apply: ~276 dims
-      3: 0.28                      # Analyze: ~287 dims
-      4: 0.56                      # Evaluate: ~573 dims
-      5: 0.27                      # Create: ~276 dims
+    mask_level_targets:            # ~30% higher than run 2 — more dims to compensate for prefix bias
+      0: 0.40                      # Remember: ~410 dims (run 2: 307)
+      1: 0.65                      # Understand: ~666 dims (run 2: 573)
+      2: 0.38                      # Apply: ~389 dims (run 2: 276)
+      3: 0.40                      # Analyze: ~410 dims (run 2: 287)
+      4: 0.65                      # Evaluate: ~666 dims (run 2: 573)
+      5: 0.38                      # Create: ~389 dims (run 2: 276)
     mask_diversity_weight: 0.5
     mask_diversity_margin: 0.0
     mask_variance_weight: 0.3
-    mask_distill_weight: 0.3
-    dropmask_rate: 0.1             # Flip 10% of mask bits during training. Forces encoder to
-                                   # spread information across all dims, breaking MRL prefix bias.
-                                   # Applied in BloomMaskHead.forward(); does not affect
-                                   # clean_sigmoid / sparsity targets. Zero at eval.
-    dim_redist_weight: 0.05        # Penalize encoder for var(early_dims) > var(late_dims).
-                                   # Works alongside dropmask: behavioral vs statistical signal.
-                                   # Conservative weight — enough to push redistribution without
-                                   # destabilizing contrastive training.
-    encoder_warmup_epochs: 5       # MRL warm-start: encoder already domain-adapted, 5 epochs
-                                   # before compression activates (same as Option A).
-    mask_differentiation_epochs: 5
+    mask_distill_weight: 0.5       # Increased from 0.3 — stronger quality preservation.
+                                   # Distillation forces masked subspace to preserve full-space
+                                   # semantic similarity. With more aggressive DropMask, the
+                                   # encoder needs a stronger quality anchor.
+    dropmask_rate: 0.2             # Doubled from 0.1. Run 2's 10% wasn't enough to break prefix
+                                   # bias — Option B's Remember still 4 pts below Option A.
+                                   # 20% forces stronger information redistribution.
+    dim_redist_weight: 0.2         # 4x from 0.05. Run 2's var_early was still >> var_late.
+                                   # Aggressive penalty to equalize per-dim variance.
+    encoder_warmup_epochs: 3       # Reduced from 5 — MRL warm-start gives a head start;
+                                   # 3 epochs of pure contrastive is enough before compression.
+    mask_differentiation_epochs: 8 # Increased from 5. Run 2 had warmup=5, diff=5 so
+                                   # compression + differentiation fired simultaneously.
+                                   # Now: Stage 1 [0,3): contrastive + distill + redistrib
+                                   #      Stage 2 [3,8): + efficiency + sparsity (compression)
+                                   #      Stage 3 [8,25): + diversity + variance (differentiation)
     temperature_schedule:
       start: 0.1
       end: 0.02
@@ -109,7 +116,7 @@ training:
   encoder_freeze_after_epochs: null
   bloom_noise_rate: 0.0
   hard_neg_refresh_epochs: null
-  checkpoint_dir: "/tmp/bam-b-e5large-ckpts2/"
+  checkpoint_dir: "/tmp/bam-b-e5large-ckpts3/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
 
