@@ -1,0 +1,97 @@
+# BAM Option B — intfloat/e5-large-v2 backbone, MRL warm-start — MS MARCO data
+#
+# Same as bam_optionb_e5large.yaml but trained on MS MARCO passages.
+# Routing: Embedding(6, 1024) → Gumbel-Sigmoid + STE → scattered binary mask per Bloom level
+
+model:
+  backbone: "intfloat/e5-large-v2"
+  embedding_dim: 1024
+  pooling: "cls"
+  normalize_embeddings: true
+  mrl_dims: [64, 128, 256, 512, 768, 1024]
+  use_mask_routing: true             # Option B: BloomMaskHead scattered mask
+  mask_sparsity_target: null
+  use_soft_bloom_routing: false
+
+data:
+  train_path: "/tmp/data/msmarco/train_curriculum.jsonl"
+  val_path: "/tmp/data/msmarco/val.jsonl"
+  test_path: "/tmp/data/msmarco/test.jsonl"
+  corpus_path: "/tmp/data/msmarco/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["general"]
+  max_query_length: 128
+  max_passage_length: 256
+  num_hard_negatives: 7
+
+training:
+  seed: 42
+  num_epochs: 25
+  batch_size: 16
+  gradient_accumulation_steps: 8   # effective batch = 128
+  fp16: true
+  max_grad_norm: 1.0
+  optimizer:
+    type: "adamw"
+    lr: 2.0e-5
+    weight_decay: 0.01
+    encoder_lr: 2.0e-5
+    router_lr: 2.0e-4              # BloomMaskHead — 10x encoder LR
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.1
+  loss:
+    contrastive_weight: 1.0
+    efficiency_weight: 0.3
+    efficiency_uniform_weights: true
+    mrl_anchor_weight: 0.0         # No prefix reinforcement for scattered mask
+    diversity_weight: 0.0          # Option A only
+    mask_sparsity_weight: 1.0
+    mask_level_targets:
+      0: 0.30                      # Remember: ~307 dims
+      1: 0.56                      # Understand: ~573 dims
+      2: 0.27                      # Apply: ~276 dims
+      3: 0.28                      # Analyze: ~287 dims
+      4: 0.56                      # Evaluate: ~573 dims
+      5: 0.27                      # Create: ~276 dims
+    mask_diversity_weight: 0.5
+    mask_diversity_margin: 0.0
+    mask_variance_weight: 0.3
+    mask_distill_weight: 0.3
+    dropmask_rate: 0.1
+    dim_redist_weight: 0.05
+    encoder_warmup_epochs: 5
+    mask_differentiation_epochs: 5
+    temperature_schedule:
+      start: 0.1
+      end: 0.02
+    gumbel_temperature_schedule:
+      start: 1.0
+      end: 0.1
+  use_pcgrad: false
+  encoder_freeze_after_epochs: null
+  bloom_noise_rate: 0.0
+  hard_neg_refresh_epochs: null
+  checkpoint_dir: "/tmp/bam-b-e5large-msmarco-ckpts/"
+  save_every_n_steps: 1000
+  eval_every_n_steps: 500
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50, 100]
+  bloom_stratified: true
+  tail_topic_threshold: 20
+  measure_latency: true
+
+diagnostics:
+  gradient_attribution: true
+  num_diagnostic_queries: 1000
+  probing:
+    probe_type: "linear"
+    probe_tasks: ["bloom_level", "subject_area"]
+    num_dimension_groups: 8
+
+logging:
+  use_wandb: true
+  wandb_project: "bam-emnlp"
+  wandb_entity: null
+  log_every_n_steps: 10
