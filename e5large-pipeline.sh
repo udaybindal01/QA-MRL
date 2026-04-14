@@ -50,9 +50,9 @@
 #   Step 8  eval_compare       — full corpus-level eval: Option A vs Option B vs MRL baseline.
 #                                Outputs recall@K, NDCG@10, per-Bloom breakdown, avg_active_dims.
 #
-#   Step 9  beir_mrl           — BEIR MS MARCO: MRL baseline + truncation comparisons
-#   Step 10 beir_bam_a         — BEIR MS MARCO: BAM Option A (Bloom-annotated queries)
-#   Step 11 beir_bam_b         — BEIR MS MARCO: BAM Option B dense + sparse
+#   Step 9  beir_mrl           — BEIR HotpotQA: MRL baseline + truncation comparisons
+#   Step 10 beir_bam_a         — BEIR HotpotQA: BAM Option A (Bloom-annotated queries)
+#   Step 11 beir_bam_b         — BEIR HotpotQA: BAM Option B dense + sparse
 #   Step 12 beir_compare       — BEIR comparison table (NDCG@10, R@10, R@100, MAP)
 #
 # Prerequisites:
@@ -369,12 +369,22 @@ fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BEIR OUT-OF-DOMAIN EVALUATION (Steps 10-13)
-# Evaluate on MS MARCO (dev split) to test generalization.
+# Evaluate on HotpotQA (test split) to test generalization.
+#
+# Why HotpotQA over MSMARCO:
+#   MSMARCO is web search — ~90% of queries classify as "Remember" (factual recall),
+#   making Bloom-adaptive routing almost indistinguishable from uniform compression.
+#   HotpotQA is multi-hop reasoning — questions explicitly require connecting
+#   information across multiple documents, producing a much more diverse Bloom
+#   distribution (heavy Analyze/Apply). This is where cognitive-level routing
+#   provides the most differentiated benefit, and where the paper's claim that
+#   higher cognitive complexity needs more embedding dimensions can be validated.
+#
 # Queries are auto-annotated with Bloom levels for BAM routing.
 # ─────────────────────────────────────────────────────────────────────────────
 
-BEIR_DATASETS="${BEIR_DATASETS:-msmarco}"
-BEIR_SPLIT="dev"
+BEIR_DATASETS="${BEIR_DATASETS:-hotpotqa}"
+BEIR_SPLIT="test"
 BEIR_RESULTS="$RESULTS_DIR/beir"
 
 # ─────────────────────────────────────────────────────────────────────────────
