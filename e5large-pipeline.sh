@@ -50,6 +50,11 @@
 #   Step 8  eval_compare       — full corpus-level eval: Option A vs Option B vs MRL baseline.
 #                                Outputs recall@K, NDCG@10, per-Bloom breakdown, avg_active_dims.
 #
+#   Step 9  beir_mrl           — BEIR MS MARCO: MRL baseline + truncation comparisons
+#   Step 10 beir_bam_a         — BEIR MS MARCO: BAM Option A (Bloom-annotated queries)
+#   Step 11 beir_bam_b         — BEIR MS MARCO: BAM Option B dense + sparse
+#   Step 12 beir_compare       — BEIR comparison table (NDCG@10, R@10, R@100, MAP)
+#
 # Prerequisites:
 #   ./data/real/train_curriculum.jsonl  — must exist (run optionA-working_pipeline.sh
 #                                         or curriculum_negatives.py first)
@@ -94,7 +99,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-ALL_STEPS=(patch_configs remine_negatives train_mrl find_mrl train_bam_a train_bam_b find_bam_a find_bam_b eval_compare)
+ALL_STEPS=(patch_configs remine_negatives train_mrl find_mrl train_bam_a train_bam_b find_bam_a find_bam_b eval_compare beir_mrl beir_bam_a beir_bam_b beir_compare)
 
 SKIP_STEPS=()
 if [[ -n "$FROM_STEP" ]]; then
@@ -145,7 +150,7 @@ mkdir -p "$MRL_CKPT_DIR" "$BAM_A_CKPT_DIR" "$BAM_B_CKPT_DIR" "$RESULTS_DIR"
 # .bak backups are created so the originals can be restored if needed.
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run patch_configs; then
-    log "STEP 1/9 — PATCH CONFIGS (train_path → $CURRICULUM)"
+    log "STEP 1/13 — PATCH CONFIGS (train_path → $CURRICULUM)"
 
     CURRICULUM_ESC=$(echo "$CURRICULUM" | sed 's|/|\\/|g')
     for cfg in "$MRL_CONFIG" "$BAM_A_CONFIG" "$BAM_B_CONFIG"; do
@@ -163,7 +168,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run remine_negatives; then
     if [[ "$REMINE" == "1" ]]; then
-        log "STEP 2/9 — RE-MINE HARD NEGATIVES"
+        log "STEP 2/13 — RE-MINE HARD NEGATIVES"
         NUM_NEG=$(python3 -c "
 import yaml
 with open('$MRL_CONFIG') as f:
@@ -180,7 +185,7 @@ print(cfg['data']['num_hard_negatives'])
             || die "curriculum_negatives.py failed"
         echo "  Done → $CURRICULUM"
     else
-        log "STEP 2/9 — REMINE_NEGATIVES (skipped — set REMINE=1 to enable)"
+        log "STEP 2/13 — REMINE_NEGATIVES (skipped — set REMINE=1 to enable)"
     fi
 fi
 
@@ -191,7 +196,7 @@ fi
 # none built in. The checkpoint becomes the shared warm-start for both BAM variants.
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run train_mrl; then
-    log "STEP 3/9 — TRAIN MRL BASELINE (e5-large cold start)"
+    log "STEP 3/13 — TRAIN MRL BASELINE (e5-large cold start)"
     echo "  Config     : $MRL_CONFIG"
     echo "  Init       : intfloat/e5-large-v2 pretrained weights"
     echo "  Output     : $MRL_CKPT_DIR/"
@@ -210,7 +215,7 @@ fi
 # and copies the best to $MRL_CKPT_DIR/best/. Steps 5 and 6 read that path.
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run find_mrl; then
-    log "STEP 4/9 — FIND BEST MRL EPOCH (val NDCG)"
+    log "STEP 4/13 — FIND BEST MRL EPOCH (val NDCG)"
     [[ -d "$MRL_CKPT_DIR/epoch_0" ]] \
         || die "No MRL epoch checkpoints at $MRL_CKPT_DIR — run train_mrl first"
 
@@ -237,7 +242,7 @@ fi
 # the encoder already handles compression well, so routing converges faster.
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run train_bam_a; then
-    log "STEP 5/9 — TRAIN BAM OPTION A (prefix router, MRL warm-start)"
+    log "STEP 5/13 — TRAIN BAM OPTION A (prefix router, MRL warm-start)"
 
     MRL_BEST="$MRL_CKPT_DIR/best"
     [[ -f "$RESULTS_DIR/mrl_best_path.txt" ]] && MRL_BEST=$(cat "$RESULTS_DIR/mrl_best_path.txt")
@@ -269,7 +274,7 @@ fi
 # producing severely degraded encoder quality (R@10=0.32 at full dims vs 0.53 MRL).
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run train_bam_b; then
-    log "STEP 6/9 — TRAIN BAM OPTION B (scattered mask, MRL warm-start)"
+    log "STEP 6/13 — TRAIN BAM OPTION B (scattered mask, MRL warm-start)"
 
     MRL_BEST="$MRL_CKPT_DIR/best"
     [[ -f "$RESULTS_DIR/mrl_best_path.txt" ]] && MRL_BEST=$(cat "$RESULTS_DIR/mrl_best_path.txt")
@@ -295,7 +300,7 @@ fi
 # α=0.5 means a 10% quality drop is acceptable for a 20% compression gain.
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run find_bam_a; then
-    log "STEP 7/9 — FIND BEST BAM OPTION A EPOCH (BSR, α=$BSR_ALPHA)"
+    log "STEP 7/13 — FIND BEST BAM OPTION A EPOCH (BSR, α=$BSR_ALPHA)"
     [[ -d "$BAM_A_CKPT_DIR/epoch_0" ]] \
         || die "No BAM-A epoch checkpoints at $BAM_A_CKPT_DIR — run train_bam_a first"
 
@@ -317,7 +322,7 @@ fi
 # but the selection criterion is identical.
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run find_bam_b; then
-    log "STEP 8/9 — FIND BEST BAM OPTION B EPOCH (BSR, α=$BSR_ALPHA)"
+    log "STEP 8/13 — FIND BEST BAM OPTION B EPOCH (BSR, α=$BSR_ALPHA)"
     [[ -d "$BAM_B_CKPT_DIR/epoch_0" ]] \
         || die "No BAM-B epoch checkpoints at $BAM_B_CKPT_DIR — run train_bam_b first"
 
@@ -339,7 +344,7 @@ fi
 # latency. Option A is primary; Option B and MRL baseline are comparisons.
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run eval_compare; then
-    log "STEP 9/9 — FULL EVALUATION (Option A vs Option B vs MRL)"
+    log "STEP 9/13 — FULL EVALUATION (Option A vs Option B vs MRL)"
 
     MRL_BEST="$MRL_CKPT_DIR/best"
     [[ -f "$RESULTS_DIR/mrl_best_path.txt" ]] && MRL_BEST=$(cat "$RESULTS_DIR/mrl_best_path.txt")
@@ -363,17 +368,154 @@ if should_run eval_compare; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# BEIR OUT-OF-DOMAIN EVALUATION (Steps 10-13)
+# Evaluate on MS MARCO (dev split) to test generalization.
+# Queries are auto-annotated with Bloom levels for BAM routing.
+# ─────────────────────────────────────────────────────────────────────────────
+
+BEIR_DATASETS="${BEIR_DATASETS:-msmarco}"
+BEIR_SPLIT="dev"
+BEIR_RESULTS="$RESULTS_DIR/beir"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 10 — BEIR: MRL BASELINE
+# ─────────────────────────────────────────────────────────────────────────────
+if should_run beir_mrl; then
+    log "STEP 10/13 — BEIR: MRL BASELINE ($BEIR_DATASETS, split=$BEIR_SPLIT)"
+
+    MRL_BEST="$MRL_CKPT_DIR/best"
+    [[ -f "$RESULTS_DIR/mrl_best_path.txt" ]] && MRL_BEST=$(cat "$RESULTS_DIR/mrl_best_path.txt")
+
+    python3 scripts/eval_beir.py \
+        --config      "$MRL_CONFIG" \
+        --checkpoint  "$MRL_BEST" \
+        --model_type  mrl \
+        --datasets    $BEIR_DATASETS \
+        --split       "$BEIR_SPLIT" \
+        --output_dir  "$BEIR_RESULTS/mrl/" \
+        || die "eval_beir.py (MRL) failed"
+
+    echo "  MRL BEIR results → $BEIR_RESULTS/mrl/beir_results.json"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 11 — BEIR: BAM OPTION A (Bloom-annotated queries)
+# ─────────────────────────────────────────────────────────────────────────────
+if should_run beir_bam_a; then
+    log "STEP 11/13 — BEIR: BAM OPTION A ($BEIR_DATASETS, split=$BEIR_SPLIT)"
+
+    BAM_A_BEST="$BAM_A_CKPT_DIR/best_bsr"
+
+    python3 scripts/eval_beir.py \
+        --config      "$BAM_A_CONFIG" \
+        --checkpoint  "$BAM_A_BEST" \
+        --model_type  bam \
+        --datasets    $BEIR_DATASETS \
+        --split       "$BEIR_SPLIT" \
+        --output_dir  "$BEIR_RESULTS/bam_a/" \
+        || die "eval_beir.py (Option A) failed"
+
+    echo "  Option A BEIR results → $BEIR_RESULTS/bam_a/beir_results.json"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 12 — BEIR: BAM OPTION B (dense + sparse, Bloom-annotated queries)
+# ─────────────────────────────────────────────────────────────────────────────
+if should_run beir_bam_b; then
+    log "STEP 12/13 — BEIR: BAM OPTION B ($BEIR_DATASETS, split=$BEIR_SPLIT)"
+
+    BAM_B_BEST="$BAM_B_CKPT_DIR/best_bsr"
+
+    # Dense retrieval
+    python3 scripts/eval_beir.py \
+        --config      "$BAM_B_CONFIG" \
+        --checkpoint  "$BAM_B_BEST" \
+        --model_type  bam \
+        --datasets    $BEIR_DATASETS \
+        --split       "$BEIR_SPLIT" \
+        --output_dir  "$BEIR_RESULTS/bam_b_dense/" \
+        || die "eval_beir.py (Option B dense) failed"
+
+    echo "  Option B (dense) → $BEIR_RESULTS/bam_b_dense/beir_results.json"
+
+    # Sparse retrieval (true efficiency)
+    python3 scripts/eval_beir.py \
+        --config      "$BAM_B_CONFIG" \
+        --checkpoint  "$BAM_B_BEST" \
+        --model_type  bam \
+        --sparse \
+        --datasets    $BEIR_DATASETS \
+        --split       "$BEIR_SPLIT" \
+        --output_dir  "$BEIR_RESULTS/bam_b_sparse/" \
+        || die "eval_beir.py (Option B sparse) failed"
+
+    echo "  Option B (sparse) → $BEIR_RESULTS/bam_b_sparse/beir_results.json"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 13 — BEIR: COMPARISON TABLE
+# ─────────────────────────────────────────────────────────────────────────────
+if should_run beir_compare; then
+    log "STEP 13/13 — BEIR COMPARISON TABLE"
+
+    python3 -c "
+import json, os, sys
+
+results_dir = '$BEIR_RESULTS'
+datasets = '$BEIR_DATASETS'.split()
+
+models = [
+    ('MRL Baseline',            'mrl/beir_results.json'),
+    ('BAM Option A',            'bam_a/beir_results.json'),
+    ('BAM Option B (dense)',    'bam_b_dense/beir_results.json'),
+    ('BAM Option B (sparse)',   'bam_b_sparse/beir_results.json'),
+]
+
+data = {}
+for label, path in models:
+    fpath = os.path.join(results_dir, path)
+    if os.path.exists(fpath):
+        with open(fpath) as f:
+            raw = json.load(f)
+        for model_key, ds_results in raw.items():
+            data[label] = ds_results
+
+if not data:
+    print('No BEIR results found. Run steps 10-12 first.')
+    sys.exit(0)
+
+metrics = ['ndcg@10', 'recall@10', 'recall@100', 'map']
+for ds in datasets:
+    print(f'\n  Dataset: {ds}')
+    print(f'  {\"Model\":30s} {\"NDCG@10\":>10s} {\"R@10\":>10s} {\"R@100\":>10s} {\"MAP\":>10s} {\"AvgDims\":>10s}')
+    print('  ' + '-' * 82)
+    for label in [m[0] for m in models]:
+        if label not in data or ds not in data[label]:
+            continue
+        m = data[label][ds]
+        dims = m.get('avg_active_dims', '-')
+        dims_str = f'{dims:.0f}' if isinstance(dims, (int, float)) else dims
+        print(f'  {label:30s} {m.get(\"ndcg@10\",0):>10.4f} {m.get(\"recall@10\",0):>10.4f} '
+              f'{m.get(\"recall@100\",0):>10.4f} {m.get(\"map\",0):>10.4f} {dims_str:>10s}')
+print()
+" || echo "  (comparison script failed — check individual JSON files)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 log "PIPELINE COMPLETE"
 echo ""
 echo "  MRL baseline       : $MRL_CKPT_DIR/best/"
 echo "  Option A best (BSR): $BAM_A_CKPT_DIR/best_bsr/"
 echo "  Option B best (BSR): $BAM_B_CKPT_DIR/best_bsr/"
 echo "  BSR tables         : $RESULTS_DIR/optionA_bsr/  $RESULTS_DIR/optionB_bsr/"
-echo "  Full eval results  : $RESULTS_DIR/results.json"
+echo "  In-domain eval     : $RESULTS_DIR/results.json"
+echo "  BEIR eval          : $BEIR_RESULTS/"
 echo ""
 echo "  Key metrics to compare:"
-echo "    - recall@10, NDCG@10         (overall retrieval quality)"
-echo "    - bloom_*_recall@10          (per-Bloom-level performance)"
-echo "    - avg_active_dims            (efficiency — lower is better)"
-echo "    - bloom_consistent_recall@10 (quality that the BSR step optimised for)"
-echo "    NOTE: Option B dims are scattered — cannot use FAISS sub-index."
+echo "    In-domain:"
+echo "      - recall@10, NDCG@10         (overall retrieval quality)"
+echo "      - bloom_*_recall@10          (per-Bloom-level performance)"
+echo "      - avg_active_dims            (efficiency — lower is better)"
+echo "    BEIR (out-of-domain):"
+echo "      - NDCG@10, R@10, R@100, MAP  (generalization quality)"
+echo "      - avg_active_dims             (efficiency on unseen data)"
