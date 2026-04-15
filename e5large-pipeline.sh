@@ -78,8 +78,8 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 MRL_CKPT_DIR="/tmp/mrl-e5large-ckpts"
 BAM_A_CKPT_DIR="/tmp/bam-a-e5large-ckpts1"
-BAM_B_CKPT_DIR="/tmp/bam-b-e5large-ckpts3"
-RESULTS_DIR="./results/bam_e5large3"
+BAM_B_CKPT_DIR="/tmp/bam-b-e5large-ckpts4"
+RESULTS_DIR="./results/bam_e5large4"
 
 MRL_CONFIG="configs/mrl_e5large.yaml"
 BAM_A_CONFIG="configs/bam_optionA_e5large.yaml"
@@ -265,16 +265,14 @@ fi
 # STEP 6 — TRAIN BAM OPTION B  (scattered mask, MRL warm-start)
 # BloomMaskHead learns one scattered binary mask per Bloom level.
 #
-# Uses the same MRL warm-start as Option A. The MRL-warmed encoder provides a
-# domain-adapted starting point with quality multi-resolution representations.
-# mrl_anchor_weight=0.0 in the config ensures prefix structure is NOT reinforced
-# during scattered mask training — the encoder freely reorganizes which dims are
-# informative per Bloom level. Without the warm-start, Option B must learn domain
-# adaptation, multi-resolution compression, AND scattered masking simultaneously,
-# producing severely degraded encoder quality (R@10=0.32 at full dims vs 0.53 MRL).
+# Run 4: FROZEN encoder. Runs 2-3 showed that training the encoder through
+# scattered masks + multiple loss signals destroys encoder quality (R@10 drops
+# from 0.5315 to 0.3236 at full dims). Freezing preserves MRL encoder quality;
+# the mask just learns which dims to select per Bloom level on top of that.
+# Only ~6K BloomMaskHead parameters train — fast convergence.
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run train_bam_b; then
-    log "STEP 6/13 — TRAIN BAM OPTION B (scattered mask, MRL warm-start)"
+    log "STEP 6/13 — TRAIN BAM OPTION B (scattered mask, FROZEN MRL encoder)"
 
     MRL_BEST="$MRL_CKPT_DIR/best"
     [[ -f "$RESULTS_DIR/mrl_best_path.txt" ]] && MRL_BEST=$(cat "$RESULTS_DIR/mrl_best_path.txt")
@@ -283,11 +281,13 @@ if should_run train_bam_b; then
 
     echo "  Config     : $BAM_B_CONFIG"
     echo "  Init       : $MRL_BEST"
+    echo "  Mode       : FROZEN encoder — only BloomMaskHead trains"
     echo "  Output     : $BAM_B_CKPT_DIR/"
 
     python3 scripts/train_bam.py \
         --config       "$BAM_B_CONFIG" \
         --init_encoder "$MRL_BEST" \
+        --freeze_encoder \
         || die "train_bam.py (Option B) failed"
 
     echo "  BAM Option B checkpoints → $BAM_B_CKPT_DIR/"

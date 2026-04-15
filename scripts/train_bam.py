@@ -106,8 +106,12 @@ def main():
         model.freeze_encoder()
         trainable = count_parameters(model)
         total = count_parameters(model)
-        router_params = sum(p.numel() for p in model.bloom_router.parameters())
-        print(f"Encoder FROZEN. Only training BloomDimRouter ({router_params} params).")
+        if model.use_mask_routing:
+            router_params = sum(p.numel() for p in model.bloom_mask_head.parameters())
+            print(f"Encoder FROZEN. Only training BloomMaskHead ({router_params} params).")
+        else:
+            router_params = sum(p.numel() for p in model.bloom_router.parameters())
+            print(f"Encoder FROZEN. Only training BloomDimRouter ({router_params} params).")
     else:
         print(f"Parameters: {count_parameters(model)}")
     config["training"]["freeze_encoder"] = args.freeze_encoder
