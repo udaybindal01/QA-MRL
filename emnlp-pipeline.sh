@@ -171,9 +171,13 @@ fi
 # Step 4: Train BAM Option B (e5-large, reverse two-stage)
 if should_run train_bam_b_e5; then
     log "PART A — TRAIN BAM OPTION B (e5-large, reverse two-stage)"
-    python3 scripts/train_bam.py --config "$E5_BAM_B_CONFIG" \
-        --init_encoder "$E5_MRL_BEST" --freeze_encoder \
-        || die "Option B training failed"
+    if [[ -f "$E5_BAM_B_CKPT/best_bsr/checkpoint.pt" ]] || [[ -d "$E5_BAM_B_CKPT/epoch_0" ]]; then
+        echo "  Option B checkpoint already exists at $E5_BAM_B_CKPT — skipping training."
+    else
+        python3 scripts/train_bam.py --config "$E5_BAM_B_CONFIG" \
+            --init_encoder "$E5_MRL_BEST" --freeze_encoder \
+            || die "Option B training failed"
+    fi
 fi
 
 # Step 5-6: BSR epoch selection
@@ -298,9 +302,13 @@ if [[ "$SKIP_BGE" != "1" ]]; then
         mkdir -p "$BGE_BAM_B_CKPT" "$BGE_RESULTS"
         [[ -f "$BGE_MRL_BEST/checkpoint.pt" ]] \
             || die "BGE MRL best not found at $BGE_MRL_BEST. Run optionA pipeline first."
-        python3 scripts/train_bam.py --config "$BGE_BAM_B_CONFIG" \
-            --init_encoder "$BGE_MRL_BEST" --freeze_encoder \
-            || die "BGE Option B training failed"
+        if [[ -f "$BGE_BAM_B_CKPT/best_bsr/checkpoint.pt" ]] || [[ -d "$BGE_BAM_B_CKPT/epoch_0" ]]; then
+            echo "  BGE Option B checkpoint already exists at $BGE_BAM_B_CKPT — skipping training."
+        else
+            python3 scripts/train_bam.py --config "$BGE_BAM_B_CONFIG" \
+                --init_encoder "$BGE_MRL_BEST" --freeze_encoder \
+                || die "BGE Option B training failed"
+        fi
     fi
 
     if should_run find_bam_b_bge; then
