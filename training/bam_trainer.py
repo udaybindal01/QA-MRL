@@ -1,7 +1,13 @@
 """
-BAM Trainer v5.
+BAM Trainer v6.
 
-New in v5:
+New in v6:
+  - Reverse two-stage: encoder_unfreeze_after_epochs starts with frozen encoder, then
+    unfreezes at epoch N with a low LR (encoder_finetune_lr, default 1e-6). Optimizer
+    rebuilt at transition. Use with --freeze_encoder for "mask-first, encoder-second"
+    training where the mask converges before encoder fine-tuning begins.
+
+v5 features retained:
   - Two-stage training: encoder_freeze_after_epochs triggers mid-training encoder freeze
     (distinct from static freeze_encoder=True). Optimizer rebuilt at stage transition.
   - PCGrad gradient surgery: optional, off by default. Wraps optimizer with PCGradOptimizer,
@@ -67,6 +73,8 @@ class BAMTrainer:
 
         # v5 new params
         self.encoder_freeze_after = tc.get("encoder_freeze_after_epochs", None)
+        self.encoder_unfreeze_after = tc.get("encoder_unfreeze_after_epochs", None)
+        self.encoder_finetune_lr = tc["optimizer"].get("encoder_finetune_lr", 1.0e-6)
         self.use_pcgrad = tc.get("use_pcgrad", False)
         self.bloom_noise_rate = tc.get("bloom_noise_rate", 0.0)
         self.hard_neg_refresh_epochs = tc.get("hard_neg_refresh_epochs", None)
@@ -100,12 +108,18 @@ class BAMTrainer:
         self.state = TrainingState()
         self._resumed = False
         self._stage2_active = False
+        self._unfreeze_active = False
 
         self.logger.info(f"BAM Parameters: {count_parameters(model)}")
         self.logger.info(f"Training {self.num_epochs} epochs.")
         if self.encoder_freeze_after is not None:
             self.logger.info(
                 f"Two-stage: encoder freezes after epoch {self.encoder_freeze_after - 1}."
+            )
+        if self.encoder_unfreeze_after is not None:
+            self.logger.info(
+                f"Reverse two-stage: encoder unfreezes at epoch {self.encoder_unfreeze_after} "
+                f"with lr={self.encoder_finetune_lr:.1e}."
             )
 
     def _maybe_transition_to_stage2(self, epoch: int):
@@ -144,6 +158,50 @@ class BAMTrainer:
                 self.optimizer, T_max=max(remaining_steps, 1)
             )
             self._stage2_active = True
+
+    def _maybe_unfreeze_encoder(self, epoch: int):
+        """Unfreeze encoder at epoch N for fine-tuning with low LR (reverse two-stage).
+
+        Use with --freeze_encoder: mask trains alone first, then encoder unfreezes
+        with encoder_finetune_lr so it can gently adapt to the converged mask.
+        """
+        if (
+            self.encoder_unfreeze_after is not None
+            and epoch >= self.encoder_unfreeze_after
+            and not self._unfreeze_active
+        ):
+            self.logger.info(
+                f"Epoch {epoch}: UNFREEZING encoder with lr={self.encoder_finetune_lr:.1e}."
+            )
+            self.model.unfreeze_encoder()
+
+            # Rebuild optimizer with encoder params at low LR + routing params at router_lr
+            oc = self.config["training"]["optimizer"]
+            fast_lr = oc.get("router_lr", oc["encoder_lr"] * 10)
+            if self.model.use_mask_routing:
+                routing_params = list(self.model.bloom_mask_head.parameters())
+            else:
+                routing_params = list(self.model.bloom_router.parameters())
+
+            self.optimizer = _make_optimizer(
+                [
+                    {"params": routing_params, "lr": fast_lr},
+                    {"params": list(self.model.encoder.parameters()), "lr": self.encoder_finetune_lr},
+                ],
+                weight_decay=oc["weight_decay"],
+                use_8bit=self.config["training"].get("optim_8bit", False),
+            )
+            if self.use_pcgrad:
+                self.pcgrad = PCGradOptimizer(self.optimizer)
+
+            # Rebuild scheduler for remaining epochs
+            remaining_steps = (
+                len(self.train_loader) * (self.num_epochs - epoch) // self.grad_accum
+            )
+            self.scheduler = CosineAnnealingLR(
+                self.optimizer, T_max=max(remaining_steps, 1)
+            )
+            self._unfreeze_active = True
 
     def _refresh_hard_negatives(self, epoch: int):
         """
@@ -440,6 +498,12 @@ class BAMTrainer:
                 and start_epoch >= self.encoder_freeze_after
             ):
                 self._maybe_transition_to_stage2(start_epoch)
+            # Restore unfreeze if past the unfreeze threshold
+            if (
+                self.encoder_unfreeze_after is not None
+                and start_epoch >= self.encoder_unfreeze_after
+            ):
+                self._maybe_unfreeze_encoder(start_epoch)
 
         for epoch in range(start_epoch, self.num_epochs):
             self.state.epoch = epoch
@@ -450,12 +514,14 @@ class BAMTrainer:
                     and epoch % self.hard_neg_refresh_epochs == 0):
                 self._refresh_hard_negatives(epoch)
 
-            # Check two-stage transition
+            # Check two-stage transitions
             self._maybe_transition_to_stage2(epoch)
+            self._maybe_unfreeze_encoder(epoch)
 
             # Determine if encoder is frozen (static or dynamic stage 2)
+            # Frozen if: (a) static freeze_encoder=True AND not yet unfrozen, OR (b) dynamic freeze-after
             freeze_encoder = (
-                self.config["training"].get("freeze_encoder", False)
+                (self.config["training"].get("freeze_encoder", False) and not self._unfreeze_active)
                 or self._stage2_active
             )
 

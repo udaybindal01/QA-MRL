@@ -78,8 +78,8 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 MRL_CKPT_DIR="/tmp/mrl-e5large-ckpts"
 BAM_A_CKPT_DIR="/tmp/bam-a-e5large-ckpts1"
-BAM_B_CKPT_DIR="/tmp/bam-b-e5large-ckpts4"
-RESULTS_DIR="./results/bam_e5large4"
+BAM_B_CKPT_DIR="/tmp/bam-b-e5large-ckpts5"
+RESULTS_DIR="./results/bam_e5large5"
 
 MRL_CONFIG="configs/mrl_e5large.yaml"
 BAM_A_CONFIG="configs/bam_optionA_e5large.yaml"
@@ -265,14 +265,13 @@ fi
 # STEP 6 — TRAIN BAM OPTION B  (scattered mask, MRL warm-start)
 # BloomMaskHead learns one scattered binary mask per Bloom level.
 #
-# Run 4: FROZEN encoder. Runs 2-3 showed that training the encoder through
-# scattered masks + multiple loss signals destroys encoder quality (R@10 drops
-# from 0.5315 to 0.3236 at full dims). Freezing preserves MRL encoder quality;
-# the mask just learns which dims to select per Bloom level on top of that.
-# Only ~6K BloomMaskHead parameters train — fast convergence.
+# Run 5: Reverse two-stage — mask-first, encoder-second.
+# Stage 1 (epochs 0-7): Encoder FROZEN, only BloomMaskHead trains. Mask converges.
+# Stage 2 (epochs 8-19): Encoder unfreezes at 1e-6 LR. Gentle adaptation to
+#   push information into mask-selected dims. Stable mask = coherent gradients.
 # ─────────────────────────────────────────────────────────────────────────────
 if should_run train_bam_b; then
-    log "STEP 6/13 — TRAIN BAM OPTION B (scattered mask, FROZEN MRL encoder)"
+    log "STEP 6/13 — TRAIN BAM OPTION B (reverse two-stage: frozen → fine-tune)"
 
     MRL_BEST="$MRL_CKPT_DIR/best"
     [[ -f "$RESULTS_DIR/mrl_best_path.txt" ]] && MRL_BEST=$(cat "$RESULTS_DIR/mrl_best_path.txt")
@@ -281,7 +280,7 @@ if should_run train_bam_b; then
 
     echo "  Config     : $BAM_B_CONFIG"
     echo "  Init       : $MRL_BEST"
-    echo "  Mode       : FROZEN encoder — only BloomMaskHead trains"
+    echo "  Mode       : Stage 1 frozen (8 ep) → Stage 2 fine-tune (1e-6 LR)"
     echo "  Output     : $BAM_B_CKPT_DIR/"
 
     python3 scripts/train_bam.py \
