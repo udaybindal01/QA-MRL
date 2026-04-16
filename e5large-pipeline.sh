@@ -382,7 +382,7 @@ fi
 # Queries are auto-annotated with Bloom levels for BAM routing.
 # ─────────────────────────────────────────────────────────────────────────────
 
-BEIR_DATASETS="${BEIR_DATASETS:-hotpotqa}"
+BEIR_DATASETS="${BEIR_DATASETS:-hotpotqa scifact nfcorpus}"
 BEIR_SPLIT="test"
 BEIR_RESULTS="$RESULTS_DIR/beir"
 

@@ -30,7 +30,7 @@ from transformers import AutoTokenizer
 
 BLOOM_NAMES = {0: "Remember", 1: "Understand", 2: "Apply",
                3: "Analyze", 4: "Evaluate", 5: "Create"}
-ERROR_RATES = [0.0, 0.05, 0.10, 0.20, 0.30]
+ERROR_RATES = [0.0, 0.05, 0.10, 0.20, 0.30, 0.50]
 
 
 def flip_bloom_labels(labels: torch.Tensor, flip_rate: float) -> torch.Tensor:
@@ -242,6 +242,50 @@ def run_analysis(args):
             results[mode][str(rate)] = r10
             print(f"    R@10 = {r10:.4f}")
 
+    # --- Special ablations: all-Remember, fully-random ---
+    print("\n  Special ablations:")
+    # All-Remember (majority class baseline)
+    print(f"  Evaluating [all-Remember (majority class)]...")
+    all_remember_r10 = evaluate_at_noise(
+        model, valid, corpus_embs, corpus_id_to_idx,
+        tokenizer, device, flip_rate=1.0, routing_mode="hard"
+    )
+    # Override: force all to Remember by temporarily setting flip to 1.0 won't work correctly
+    # Instead, manually evaluate with all-zero labels
+    query_masked_list = []
+    for i in range(0, len(valid), 64):
+        batch = valid[i:i + 64]
+        enc = tokenizer([s["query"] for s in batch], padding=True, truncation=True,
+                        max_length=128, return_tensors="pt")
+        enc = {k: v.to(device) for k, v in enc.items()}
+        B = len(batch)
+        bloom_labels = torch.zeros(B, dtype=torch.long, device=device)  # All Remember
+        out = model.encode_queries(enc["input_ids"], enc["attention_mask"],
+                                   bloom_labels=bloom_labels)
+        query_masked_list.append(out["masked_embedding"].cpu())
+    query_masked = torch.cat(query_masked_list)
+    N = len(valid)
+    gt_indices = np.array([corpus_id_to_idx[s["positive_id"]] for s in valid])
+    hits = np.zeros(N, dtype=bool)
+    for i in range(0, N, 256):
+        q = query_masked[i:i + 256].to(device)
+        sim = torch.mm(q, corpus_embs.to(device).t())
+        topk = sim.topk(10, dim=-1).indices.cpu().numpy()
+        for j, row in enumerate(topk):
+            hits[i + j] = (gt_indices[i + j] in row)
+    all_remember_r10 = float(hits.mean())
+    results["all_remember"] = all_remember_r10
+    print(f"    All-Remember R@10 = {all_remember_r10:.4f}")
+
+    # Fully random labels
+    print(f"  Evaluating [fully random labels]...")
+    random_r10 = evaluate_at_noise(
+        model, valid, corpus_embs, corpus_id_to_idx,
+        tokenizer, device, flip_rate=1.0, routing_mode="hard"
+    )
+    results["fully_random"] = random_r10
+    print(f"    Fully random R@10 = {random_r10:.4f}")
+
     # Print table
     print("\n=== Classifier Robustness ===")
     print(f"{'Error Rate':>12s}" + "".join(f"{'Hard R@10':>12s}{'Soft R@10':>12s}"))
@@ -252,6 +296,8 @@ def run_analysis(args):
         hard_str = f"{hard_r10:>12.4f}" if isinstance(hard_r10, float) else f"{'N/A':>12s}"
         soft_str = f"{soft_r10:>12.4f}" if isinstance(soft_r10, float) else f"{'N/A':>12s}"
         print(f"{rate:>12.0%}{hard_str}{soft_str}")
+    print(f"{'All-Remember':>12s}{all_remember_r10:>12.4f}")
+    print(f"{'Random':>12s}{random_r10:>12.4f}")
 
     # Save
     out_path = os.path.join(args.output_dir, "classifier_robustness.json")

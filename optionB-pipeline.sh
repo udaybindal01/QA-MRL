@@ -26,8 +26,8 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 MRL_CKPT_DIR="/tmp/mrl-ckpts"
 BAM_A_CKPT_DIR="/tmp/bam-ckpts"
-BAM_B_CKPT_DIR="/tmp/bam-b-ckpts10"
-RESULTS_DIR="./results/bam_optionb10"
+BAM_B_CKPT_DIR="/tmp/bam-b-ckpts11"
+RESULTS_DIR="./results/bam_optionb11"
 BAM_A_CONFIG="configs/bam.yaml"
 BAM_B_CONFIG="configs/bam_optionb.yaml"
 BSR_ALPHA="0.5"
@@ -127,14 +127,12 @@ if should_run train_bam_b; then
     echo "  Init encoder: $MRL_BEST"
     echo "  Output      : $BAM_B_CKPT_DIR/"
 
-    # MRL init: start from Option A's best MRL checkpoint.
-    # Base init was tried and failed — domain adaptation benefit outweighs prefix bias cost.
-    # mrl_anchor_weight=0.0 in config means the encoder won't be pulled back toward prefix
-    # structure during Option B training. MRL init only provides the domain-adapted starting
-    # point; scatter mask training then reorganizes dims freely.
+    # Reverse two-stage: frozen encoder (8 ep) → gentle fine-tune (1e-6 LR).
+    # Proven on e5-large run 5: beats both MRL and Option A on all metrics.
     python3 scripts/train_bam.py \
         --config       "$BAM_B_CONFIG" \
         --init_encoder "$MRL_BEST" \
+        --freeze_encoder \
         || die "train_bam.py (Option B) failed"
 
     echo "  BAM Option B checkpoints → $BAM_B_CKPT_DIR/"
