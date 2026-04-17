@@ -61,7 +61,7 @@ BGE_RESULTS="./results/emnlp_bge"
 
 CURRICULUM="./data/real/train_curriculum.jsonl"
 BSR_ALPHA="0.5"
-BEIR_DATASETS="hotpotqa scifact nfcorpus"
+BEIR_DATASETS="scifact nfcorpus"   # hotpotqa excluded: 5.2M-doc corpus causes OOM on most GPUs
 BEIR_SPLIT="test"
 
 SKIP_BGE="${SKIP_BGE:-0}"

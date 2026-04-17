@@ -169,9 +169,13 @@ def encode_texts(model, texts: List[str], tokenizer, device,
             out = model(enc["input_ids"], enc["attention_mask"])
             emb = out["full"]
 
-        all_embs.append(emb.cpu().numpy())
+        # Use float16 for corpus embeddings to halve memory (5M-doc corpora like HotpotQA)
+        arr = emb.cpu().half().numpy() if not is_query else emb.cpu().numpy()
+        all_embs.append(arr)
 
-    return np.concatenate(all_embs, axis=0)
+    result = np.concatenate(all_embs, axis=0)
+    # Retrieval needs float32; cast back only at search time (done in retrieve_faiss)
+    return result
 
 
 # ─────────────────────── Retrieval ───────────────────────
