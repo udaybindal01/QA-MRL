@@ -254,8 +254,8 @@ def retrieve_faiss_sparse(query_embs: np.ndarray, corpus_embs: np.ndarray,
                 np.ascontiguousarray(q_norm.astype(np.float32)), k
             )
         else:
-            q_t = torch.from_numpy(q_norm)
-            c_t = torch.from_numpy(c_norm)
+            q_t = torch.from_numpy(q_norm.astype(np.float32))
+            c_t = torch.from_numpy(c_norm.astype(np.float32))
             sim = torch.mm(q_t, c_t.t())
             scores_t, indices_t = sim.topk(min(k, N_c), dim=-1)
             scores = scores_t.numpy()
