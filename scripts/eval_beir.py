@@ -28,7 +28,6 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.misc import load_config, set_seed
-from models.qa_mrl import QAMRL
 from models.bam import BloomAlignedMRL
 from models.encoder import MRLEncoder
 from transformers import AutoTokenizer
@@ -561,6 +560,7 @@ def main():
         model_label = "QA-MRL"
         print("QA-MRL EVALUATION")
         print("=" * 70)
+        from models.qa_mrl import QAMRL  # deferred: requires einops
         primary_model = QAMRL(config)
 
     ckpt = os.path.join(args.checkpoint, "checkpoint.pt")
