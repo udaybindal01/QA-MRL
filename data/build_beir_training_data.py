@@ -1,23 +1,22 @@
 """
-Build training data from BEIR dataset train splits.
+Build per-dataset train/val/test splits from BEIR datasets.
 
-Downloads BEIR train splits from HuggingFace, annotates queries with Bloom
-levels, mines hard negatives from the corpus, and writes JSONL files in the
-same format as our educational data — ready to be combined with it.
+For each dataset, outputs:
+  {output_dir}/{dataset}/train.jsonl      — 90% of train qrels
+  {output_dir}/{dataset}/val.jsonl        — 10% of train qrels (for epoch selection)
+  {output_dir}/{dataset}/test.jsonl       — test qrels (never seen during training)
+  {output_dir}/{dataset}/corpus.jsonl     — full corpus
 
-Supported datasets: scifact, nfcorpus, fiqa
-(These are the same datasets used for BEIR evaluation, test split held out.)
+All files use the same JSONL format as educational data so existing
+training/eval scripts work without modification.
+
+Supported datasets: scifact, nfcorpus, fiqa (any BEIR dataset with train qrels)
 
 Usage:
     python data/build_beir_training_data.py \
-        --datasets scifact nfcorpus \
-        --output_dir /tmp/data/beir_train \
+        --datasets scifact nfcorpus fiqa \
+        --output_dir /tmp/data/beir \
         --num_neg 7
-
-    # Then combine with educational data:
-    cat /tmp/data/real/train_curriculum.jsonl \
-        /tmp/data/beir_train/combined_train.jsonl \
-        > /tmp/data/mixed/train_curriculum.jsonl
 """
 
 import argparse
@@ -25,96 +24,70 @@ import json
 import os
 import random
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def load_beir_train_split(dataset_name: str):
-    """Load corpus, train queries, and train qrels from HuggingFace BEIR."""
+def load_beir_corpus(dataset_name: str) -> dict:
+    """Download and return corpus dict {id: {id, text}}."""
     from datasets import load_dataset
-
     print(f"  Loading {dataset_name} corpus...")
-    ds_corpus = load_dataset(f"BeIR/{dataset_name}", "corpus", split="corpus")
+    ds = load_dataset(f"BeIR/{dataset_name}", "corpus", split="corpus")
     corpus = {}
-    for row in tqdm(ds_corpus, desc="  corpus", leave=False):
-        corpus[str(row["_id"])] = {
-            "id": str(row["_id"]),
-            "text": (row.get("title", "") + " " + row.get("text", "")).strip(),
-        }
+    for row in tqdm(ds, desc="  corpus", leave=False):
+        text = (row.get("title", "") + " " + row.get("text", "")).strip()
+        corpus[str(row["_id"])] = {"id": str(row["_id"]), "text": text}
+    return corpus
 
-    print(f"  Loading {dataset_name} queries (train split)...")
+
+def load_beir_qrels(dataset_name: str, split: str) -> tuple:
+    """Load queries and qrels for a given split. Returns (queries, qrels)."""
+    from datasets import load_dataset
     try:
         ds_q = load_dataset(f"BeIR/{dataset_name}", "queries", split="queries")
         queries = {str(row["_id"]): row.get("text", "") for row in ds_q}
     except Exception as e:
         print(f"  WARNING: Could not load queries: {e}")
-        return None, None, None
+        return None, None
 
-    print(f"  Loading {dataset_name} qrels (train split)...")
     try:
-        ds_qrels = load_dataset(f"BeIR/{dataset_name}-qrels", split="train")
+        ds_qrels = load_dataset(f"BeIR/{dataset_name}-qrels", split=split)
         qrels = defaultdict(dict)
         for row in ds_qrels:
             qrels[str(row["query-id"])][str(row["corpus-id"])] = int(row["score"])
         qrels = dict(qrels)
     except Exception as e:
-        print(f"  WARNING: No train qrels for {dataset_name}: {e}")
-        return None, None, None
+        print(f"  WARNING: No {split} qrels for {dataset_name}: {e}")
+        return None, None
 
-    # Only keep queries that have at least one relevant passage
+    # Keep only queries with at least one relevant passage
     valid_qids = {qid for qid, rels in qrels.items() if any(v > 0 for v in rels.values())}
     queries = {qid: text for qid, text in queries.items() if qid in valid_qids}
-
-    print(f"  {dataset_name}: {len(corpus)} passages, {len(queries)} train queries with relevance")
-    return corpus, queries, qrels
+    return queries, qrels
 
 
-def mine_negatives(query_text: str, positive_ids: set, corpus: dict,
-                   num_neg: int = 7, seed: int = 42) -> list:
-    """
-    Simple BM25-style hard negative mining via random sampling from non-relevant passages.
-    For a proper paper run, replace with BM25 retrieval negatives.
-    """
-    rng = random.Random(hash(query_text) + seed)
-    candidate_ids = [pid for pid in corpus if pid not in positive_ids]
-    if len(candidate_ids) < num_neg:
-        return candidate_ids
-    return rng.sample(candidate_ids, num_neg)
+def mine_negatives(query_text: str, positive_ids: set, corpus: dict, num_neg: int = 7) -> list:
+    """Sample hard negatives randomly from non-relevant passages."""
+    rng = random.Random(hash(query_text))
+    candidates = [pid for pid in corpus if pid not in positive_ids]
+    return rng.sample(candidates, min(num_neg, len(candidates)))
 
 
 def annotate_bloom(query_texts: list, device: str) -> list:
-    """Annotate queries with Bloom levels (0-indexed)."""
+    """Annotate queries with Bloom levels (returns 0-indexed)."""
     from data.annotate_bloom_pretrained import load_pretrained_classifier, predict_bloom
     model, tok, id2label = load_pretrained_classifier(device=device)
     labels_1idx = predict_bloom(query_texts, model, tok, device=device, id2label=id2label)
-    return [l - 1 for l in labels_1idx]  # convert to 0-indexed
+    return [l - 1 for l in labels_1idx]
 
 
-def build_dataset(dataset_name: str, output_dir: str, num_neg: int, device: str) -> str:
-    """Build train JSONL for a single BEIR dataset. Returns output path."""
-    corpus, queries, qrels = load_beir_train_split(dataset_name)
-    if corpus is None:
-        print(f"  Skipping {dataset_name} — could not load train split.")
-        return None
-
-    print(f"  Annotating {len(queries)} queries with Bloom levels...")
-    query_list = list(queries.items())  # [(qid, text), ...]
-    texts = [t for _, t in query_list]
-    bloom_labels = annotate_bloom(texts, device)
-
-    # Print Bloom distribution
-    from collections import Counter
-    names = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
-    dist = Counter(bloom_labels)
-    print(f"  Bloom distribution:")
-    for i, name in enumerate(names):
-        print(f"    {name}: {dist[i]} ({dist[i]/len(bloom_labels)*100:.1f}%)")
-
-    print(f"  Building training pairs...")
+def build_pairs(queries: dict, qrels: dict, corpus: dict,
+                bloom_map: dict, num_neg: int, dataset_name: str) -> list:
+    """Build training/eval pair records from queries + qrels."""
     records = []
-    for (qid, query_text), bloom_label in zip(query_list, bloom_labels):
+    for qid, query_text in queries.items():
         if qid not in qrels:
             continue
         positive_ids = {pid for pid, score in qrels[qid].items() if score > 0}
@@ -123,45 +96,116 @@ def build_dataset(dataset_name: str, output_dir: str, num_neg: int, device: str)
         positive_id = list(positive_ids)[0]
         if positive_id not in corpus:
             continue
-
         negative_ids = mine_negatives(query_text, positive_ids, corpus, num_neg)
-        negative_texts = [corpus[nid]["text"] for nid in negative_ids if nid in corpus]
-        negative_ids_list = [nid for nid in negative_ids if nid in corpus]
-
         records.append({
-            "query": query_text,
-            "positive_text": corpus[positive_id]["text"],
-            "positive_id": positive_id,
-            "negative_texts": negative_texts,
-            "negative_ids": negative_ids_list,
-            "bloom_level": bloom_label + 1,   # store 1-indexed to match educational data
-            "subject": dataset_name,
-            "source": f"beir_{dataset_name}",
+            "query":          query_text,
+            "positive_text":  corpus[positive_id]["text"],
+            "positive_id":    positive_id,
+            "negative_texts": [corpus[nid]["text"] for nid in negative_ids if nid in corpus],
+            "negative_ids":   [nid for nid in negative_ids if nid in corpus],
+            "bloom_level":    bloom_map[qid] + 1,   # store 1-indexed
+            "subject":        dataset_name,
+            "source":         f"beir_{dataset_name}",
         })
+    return records
 
-    out_path = os.path.join(output_dir, f"{dataset_name}_train.jsonl")
-    with open(out_path, "w") as f:
+
+def write_jsonl(records: list, path: str):
+    with open(path, "w") as f:
         for r in records:
             f.write(json.dumps(r) + "\n")
-    print(f"  Wrote {len(records)} records → {out_path}")
+    print(f"  Wrote {len(records)} records → {path}")
 
-    # Also write corpus file for this dataset
-    corpus_path = os.path.join(output_dir, f"{dataset_name}_corpus.jsonl")
+
+def build_dataset(dataset_name: str, output_dir: str, num_neg: int,
+                  device: str, val_ratio: float = 0.1):
+    """
+    Build train/val/test splits for one BEIR dataset.
+    val is a held-out 10% of the train qrels.
+    test uses the official BEIR test qrels.
+    """
+    ds_dir = os.path.join(output_dir, dataset_name)
+    os.makedirs(ds_dir, exist_ok=True)
+
+    # Skip if already built
+    if all(os.path.exists(os.path.join(ds_dir, f)) for f in
+           ["train.jsonl", "val.jsonl", "test.jsonl", "corpus.jsonl"]):
+        print(f"  {dataset_name}: already built at {ds_dir} — skipping.")
+        return ds_dir
+
+    # ── Corpus ───────────────────────────────────────────────────────────────
+    corpus = load_beir_corpus(dataset_name)
+    corpus_path = os.path.join(ds_dir, "corpus.jsonl")
     with open(corpus_path, "w") as f:
-        for pid, pdata in corpus.items():
-            f.write(json.dumps({"id": pid, "text": pdata["text"],
-                                "source": f"beir_{dataset_name}"}) + "\n")
-    print(f"  Wrote {len(corpus)} corpus passages → {corpus_path}")
+        for pdata in corpus.values():
+            f.write(json.dumps(pdata) + "\n")
+    print(f"  Corpus: {len(corpus)} passages → {corpus_path}")
 
-    return out_path
+    # ── Train + Val ──────────────────────────────────────────────────────────
+    train_queries, train_qrels = load_beir_qrels(dataset_name, "train")
+    if train_queries is None:
+        print(f"  ERROR: no train qrels for {dataset_name}, skipping.")
+        return None
+    print(f"  Train queries: {len(train_queries)}")
+
+    # Annotate all train queries with Bloom levels
+    print(f"  Annotating {len(train_queries)} train queries with Bloom levels...")
+    qids = list(train_queries.keys())
+    texts = [train_queries[qid] for qid in qids]
+    bloom_labels = annotate_bloom(texts, device)
+    bloom_map = {qid: label for qid, label in zip(qids, bloom_labels)}
+
+    names = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
+    dist = Counter(bloom_labels)
+    print(f"  Bloom distribution (train):")
+    for i, name in enumerate(names):
+        print(f"    {name}: {dist[i]} ({dist[i]/len(bloom_labels)*100:.1f}%)")
+
+    # 90/10 train/val split (deterministic)
+    rng = random.Random(42)
+    shuffled_qids = qids[:]
+    rng.shuffle(shuffled_qids)
+    n_val = max(1, int(len(shuffled_qids) * val_ratio))
+    val_qids = set(shuffled_qids[:n_val])
+    train_qids = set(shuffled_qids[n_val:])
+
+    train_q = {qid: train_queries[qid] for qid in train_qids}
+    val_q   = {qid: train_queries[qid] for qid in val_qids}
+
+    train_records = build_pairs(train_q, train_qrels, corpus, bloom_map, num_neg, dataset_name)
+    val_records   = build_pairs(val_q,   train_qrels, corpus, bloom_map, num_neg, dataset_name)
+
+    write_jsonl(train_records, os.path.join(ds_dir, "train.jsonl"))
+    write_jsonl(val_records,   os.path.join(ds_dir, "val.jsonl"))
+
+    # ── Test ─────────────────────────────────────────────────────────────────
+    test_queries, test_qrels = load_beir_qrels(dataset_name, "test")
+    if test_queries is None:
+        print(f"  WARNING: no test qrels for {dataset_name}.")
+        write_jsonl(val_records, os.path.join(ds_dir, "test.jsonl"))  # fallback
+    else:
+        print(f"  Annotating {len(test_queries)} test queries with Bloom levels...")
+        test_qids = list(test_queries.keys())
+        test_texts = [test_queries[qid] for qid in test_qids]
+        test_bloom = annotate_bloom(test_texts, device)
+        test_bloom_map = {qid: label for qid, label in zip(test_qids, test_bloom)}
+        test_records = build_pairs(test_queries, test_qrels, corpus,
+                                   test_bloom_map, num_neg, dataset_name)
+        write_jsonl(test_records, os.path.join(ds_dir, "test.jsonl"))
+
+    print(f"  Done: {ds_dir}/")
+    return ds_dir
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--datasets", nargs="+", default=["scifact", "nfcorpus"],
-                        help="BEIR datasets to build training data from")
-    parser.add_argument("--output_dir", default="/tmp/data/beir_train")
+                        help="BEIR datasets to build")
+    parser.add_argument("--output_dir", default="/tmp/data/beir",
+                        help="Root output dir; each dataset gets a subdirectory")
     parser.add_argument("--num_neg", type=int, default=7)
+    parser.add_argument("--val_ratio", type=float, default=0.1,
+                        help="Fraction of train queries held out for val")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -171,33 +215,15 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    all_train_paths = []
     for ds_name in args.datasets:
         print(f"\n{'='*60}")
-        print(f"  Processing {ds_name}")
+        print(f"  Building: {ds_name}")
         print(f"{'='*60}")
-        path = build_dataset(ds_name, args.output_dir, args.num_neg, args.device)
-        if path:
-            all_train_paths.append(path)
+        build_dataset(ds_name, args.output_dir, args.num_neg, args.device, args.val_ratio)
 
-    if not all_train_paths:
-        print("ERROR: No datasets built successfully.")
-        return
-
-    # Combine all BEIR train splits into one file
-    combined_path = os.path.join(args.output_dir, "combined_train.jsonl")
-    total = 0
-    with open(combined_path, "w") as fout:
-        for path in all_train_paths:
-            with open(path) as fin:
-                for line in fin:
-                    fout.write(line)
-                    total += 1
-    print(f"\nCombined {total} records → {combined_path}")
-    print(f"\nNext step: mix with educational data:")
-    print(f"  cat /tmp/data/real/train_curriculum.jsonl \\")
-    print(f"      {combined_path} \\")
-    print(f"      > /tmp/data/mixed/train_curriculum.jsonl")
+    print(f"\nAll datasets built under {args.output_dir}/")
+    for ds_name in args.datasets:
+        print(f"  {ds_name:12s}: {args.output_dir}/{ds_name}/{{train,val,test,corpus}}.jsonl")
 
 
 if __name__ == "__main__":
