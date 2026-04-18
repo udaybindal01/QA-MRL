@@ -1,0 +1,135 @@
+# BAM Option B — intfloat/e5-large-v2 backbone, two-stage mask-first training
+#
+# Routing: Embedding(6, 1024) → Gumbel-Sigmoid + STE → scattered binary mask per Bloom level
+# One fixed mask per Bloom level. Active dims are scattered — NOT FAISS sub-index compatible.
+#
+# Init encoder: /tmp/mrl-e5large-ckpts/best  (run mrl_e5large training first)
+#
+# Run 5 — reverse two-stage: frozen mask learning → gentle encoder fine-tuning
+#
+#   Run 4 findings (R@10):  Option A=0.5627, Option B=0.5272, MRL=0.5315
+#     Frozen encoder preserved MRL quality — Option B now 99.2% of MRL at 45% fewer dims.
+#     But still slightly below MRL because a subset of dims can only SELECT existing info,
+#     not CREATE new info. Need the encoder to slightly reorganize information toward the
+#     mask-selected dims.
+#
+#   Runs 2-3 failure mode: encoder + mask trained simultaneously → chaotic gradients from
+#     6+ loss signals through constantly-changing masks → encoder collapsed to R@10=0.3236.
+#
+#   Run 5 strategy: REVERSE TWO-STAGE training.
+#     Stage 1 [epochs 0-7]:  Encoder FROZEN. Only BloomMaskHead trains (~6K params).
+#       Mask converges to good per-level dim selection on top of MRL quality.
+#     Stage 2 [epochs 8-19]: Encoder UNFREEZES at very low LR (1e-6, 20x below run 3).
+#       Encoder gently adapts to push more information into mask-selected dims.
+#       The mask is stable, so encoder gets coherent gradient signal (not chaos).
+#
+#   Key difference from runs 2-3: mask converges FIRST, giving encoder a stable target.
+#   Run 3 LR was 2e-5 (too aggressive). Run 5 uses 1e-6 for encoder fine-tuning.
+#
+#   Per-level targets (unchanged):
+#       Remember:   0.40 → ~410 dims
+#       Understand: 0.65 → ~666 dims
+#       Apply:      0.38 → ~389 dims
+#       Analyze:    0.40 → ~410 dims
+#       Evaluate:   0.65 → ~666 dims
+#       Create:     0.38 → ~389 dims
+#       Average:    ~488 dims (48% compression vs 1024)
+
+model:
+  backbone: "intfloat/e5-large-v2"
+  embedding_dim: 1024
+  pooling: "cls"
+  normalize_embeddings: true
+  mrl_dims: [64, 128, 256, 512, 768, 1024]
+  use_mask_routing: true             # Option B: BloomMaskHead scattered mask
+  mask_sparsity_target: null         # Using per-level targets below
+  use_soft_bloom_routing: false      # N/A for Option B
+
+data:
+  train_path: "/tmp/data/mixed/train_curriculum.jsonl"
+  val_path: "/tmp/data/real/val.jsonl"
+  test_path: "/tmp/data/real/test.jsonl"
+  corpus_path: "/tmp/data/real/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
+  max_query_length: 128
+  max_passage_length: 256
+  num_hard_negatives: 7
+
+training:
+  seed: 42
+  num_epochs: 20                   # 8 frozen + 12 fine-tuning
+  batch_size: 16
+  gradient_accumulation_steps: 8   # effective batch = 128
+  fp16: true
+  max_grad_norm: 1.0
+  optimizer:
+    type: "adamw"
+    lr: 2.0e-4                     # Default LR (mask uses router_lr)
+    weight_decay: 0.01
+    encoder_lr: 2.0e-5             # Used by get_parameter_groups when not frozen
+    router_lr: 2.0e-4              # BloomMaskHead LR
+    encoder_finetune_lr: 1.0e-6    # Stage 2: very conservative encoder fine-tuning
+                                   # 20x below run 3's 2e-5 which destroyed the encoder
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.1
+  loss:
+    contrastive_weight: 1.0        # Primary signal — mask learns which dims preserve quality
+    efficiency_weight: 0.0         # OFF — sparsity targets handle compression
+    efficiency_uniform_weights: true
+    mrl_anchor_weight: 0.0         # 0: MRL anchor reinforces prefix structure — wrong for scatter
+    diversity_weight: 0.0          # RouterDiversityLoss is for Option A only
+    mask_sparsity_weight: 1.0      # Strong enforcement of per-level targets
+    mask_level_targets:
+      0: 0.40                      # Remember: ~410 dims
+      1: 0.65                      # Understand: ~666 dims
+      2: 0.38                      # Apply: ~389 dims
+      3: 0.40                      # Analyze: ~410 dims
+      4: 0.65                      # Evaluate: ~666 dims
+      5: 0.38                      # Create: ~389 dims
+    mask_diversity_weight: 0.5     # Push masks apart — different dim selection per level
+    mask_diversity_margin: 0.0
+    mask_variance_weight: 0.3      # Per-dim variance — each dim "owned" by specific levels
+    mask_distill_weight: 0.5       # Preserve full-space similarity structure in masked subspace
+    dropmask_rate: 0.0             # OFF for stage 1. Could re-enable for stage 2 at low rate.
+    dim_redist_weight: 0.0         # OFF — encoder fine-tuning LR is so low that redistribution
+                                   # has negligible effect. Contrastive through converged mask
+                                   # provides the information-reorganization signal.
+    encoder_warmup_epochs: 0       # All losses active from epoch 0
+    mask_differentiation_epochs: 0 # All losses active from epoch 0
+    temperature_schedule:
+      start: 0.1
+      end: 0.02
+    gumbel_temperature_schedule:
+      start: 1.0
+      end: 0.1
+    # bloom_frequencies injected at runtime by train_bam.py
+  use_pcgrad: false
+  encoder_freeze_after_epochs: null
+  encoder_unfreeze_after_epochs: 8 # Stage 2: unfreeze encoder at epoch 8
+  bloom_noise_rate: 0.0
+  hard_neg_refresh_epochs: null
+  checkpoint_dir: "/tmp/bam_optionb-e5large-mixed-ckpts/"
+  save_every_n_steps: 1000
+  eval_every_n_steps: 500
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50, 100]
+  bloom_stratified: true
+  tail_topic_threshold: 20
+  measure_latency: true
+
+diagnostics:
+  gradient_attribution: true
+  num_diagnostic_queries: 1000
+  probing:
+    probe_type: "linear"
+    probe_tasks: ["bloom_level", "subject_area"]
+    num_dimension_groups: 8
+
+logging:
+  use_wandb: true
+  wandb_project: "bam-emnlp"
+  wandb_entity: null
+  log_every_n_steps: 10
