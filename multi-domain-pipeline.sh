@@ -194,28 +194,14 @@ for DS in $DATASETS; do
     # ── STEP: annotate ───────────────────────────────────────────────────────
     if should_run annotate; then
         if [[ "$DS" == "educational" ]]; then
-            log "[$DS] ANNOTATE — educational data uses pretrained BERT classifier (no GPT needed)"
+            log "[$DS] ANNOTATE — educational data uses pretrained BERT classifier (skipping)"
         else
-            log "[$DS] ANNOTATE — GPT-4 Bloom labels for $DS (fixes classifier collapse)"
-            if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-                echo "  WARNING: OPENAI_API_KEY not set — skipping GPT annotation."
-                echo "  Set it with: export OPENAI_API_KEY=sk-..."
-                echo "  Continuing with pretrained BERT labels (may cause router collapse)."
-            else
-                python3 data/annotate_bloom_gpt.py \
-                    --input "$TRAIN_PATH" \
-                    --model gpt-4o-mini \
-                    || echo "  WARNING: GPT annotation failed for train, continuing..."
-                python3 data/annotate_bloom_gpt.py \
-                    --input "$VAL_PATH" \
-                    --model gpt-4o-mini \
-                    || echo "  WARNING: GPT annotation failed for val, continuing..."
-                python3 data/annotate_bloom_gpt.py \
-                    --input "$TEST_PATH" \
-                    --model gpt-4o-mini \
-                    || echo "  WARNING: GPT annotation failed for test, continuing..."
-                echo "  GPT annotation complete → bloom_cache files updated"
-            fi
+            log "[$DS] ANNOTATE — zero-shot NLI Bloom labels for $DS (fixes 82% Remember collapse)"
+            python3 data/annotate_bloom_local.py \
+                --beir_root "$BEIR_DATA_ROOT" \
+                --datasets  "$DS" \
+                || die "[$DS] Bloom annotation failed"
+            echo "  Annotation complete → bloom_cache files updated"
         fi
     fi
 
