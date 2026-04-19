@@ -23,6 +23,9 @@
 #   ./run_full_pipeline.sh --from train_bam_b         # skip to BAM-B training
 #   ./run_full_pipeline.sh --datasets "scifact fiqa"  # subset of datasets
 #   ./run_full_pipeline.sh --from eval                # re-eval only
+#   ./run_full_pipeline.sh --force                    # NLI Bloom on all splits (incl. educational),
+#                                                       overwrite BEIR caches, wipe ckpts, retrain + reselect
+#   FORCE_PIPELINE=1 ./run_full_pipeline.sh         # same as --force (env)
 #
 # Requirements:
 #   pip install transformers torch sentence-transformers faiss-gpu pyyaml
@@ -43,6 +46,10 @@ BSR_ALPHA="0.5"
 NLI_MODEL="MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
 NLI_BATCH_SIZE="64"   # reduce to 32 if GPU OOM
 
+# Set to 1 (or pass --force) to: NLI-annotate educational data, --overwrite BEIR NLI caches,
+# remove MRL/BAM-B checkpoints under CKPT_ROOT, and rerun training + best-epoch selection.
+FORCE="${FORCE_PIPELINE:-0}"
+
 BASE_MRL_CONFIG="configs/mrl_e5large.yaml"
 BASE_BAM_B_CONFIG="configs/bam_optionb_e5large.yaml"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -56,6 +63,7 @@ while [[ $# -gt 0 ]]; do
         --datasets)  DATASETS="$2";       shift 2 ;;
         --dataset)   SINGLE_DATASET="$2"; shift 2 ;;
         --nli_model) NLI_MODEL="$2";      shift 2 ;;
+        --force)     FORCE=1;             shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -111,6 +119,7 @@ echo "  Datasets  : $DATASETS"
 echo "  CKPT root : $CKPT_ROOT"
 echo "  Results   : $RESULTS_ROOT"
 echo "  NLI model : $NLI_MODEL"
+echo "  Force     : $FORCE  (1 = re-annotate with NLI, clear ckpts, retrain)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PER-DATASET LOOP
@@ -172,8 +181,31 @@ for DS in $DATASETS; do
 
     # ── STEP 2: annotate ─────────────────────────────────────────────────────
     if should_run annotate; then
+        OVERWRITE_FLAG=()
+        [[ "$FORCE" == "1" ]] && OVERWRITE_FLAG=(--overwrite)
+
         if [[ "$DS" == "educational" ]]; then
-            log "[$DS] ANNOTATE — educational data already has BERT Bloom labels (skipping)"
+            if [[ "$FORCE" == "1" ]]; then
+                log "[$DS] ANNOTATE — NLI Bloom (train/val/test + cache; matches BEIR pipeline)"
+                echo "  Model: $NLI_MODEL"
+                for EDU_JSONL in \
+                    "$EDU_DATA_DIR/train_curriculum.jsonl" \
+                    "$EDU_DATA_DIR/val.jsonl" \
+                    "$EDU_DATA_DIR/test.jsonl"
+                do
+                    [[ -f "$EDU_JSONL" ]] || die "Missing $EDU_JSONL"
+                    python3 data/annotate_bloom_local.py \
+                        --input      "$EDU_JSONL" \
+                        --model      "$NLI_MODEL" \
+                        --batch_size "$NLI_BATCH_SIZE" \
+                        "${OVERWRITE_FLAG[@]}" \
+                        || die "[$DS] Bloom annotation failed for $EDU_JSONL"
+                done
+                echo "  Educational splits updated — .bloom_cache.json next to each JSONL"
+            else
+                log "[$DS] ANNOTATE — using existing labels/cache (BERT jsonl + .bloom_cache.json)"
+                echo "  Tip: ./run_full_pipeline.sh --force (or FORCE_PIPELINE=1) to re-run NLI with --nli_model"
+            fi
         else
             log "[$DS] ANNOTATE — zero-shot NLI Bloom classification"
             echo "  Model: $NLI_MODEL"
@@ -183,6 +215,7 @@ for DS in $DATASETS; do
                 --datasets   "$DS" \
                 --model      "$NLI_MODEL" \
                 --batch_size "$NLI_BATCH_SIZE" \
+                "${OVERWRITE_FLAG[@]}" \
                 || die "[$DS] Bloom annotation failed"
             echo "  Annotation complete — .bloom_cache.json files written"
         fi
@@ -191,8 +224,12 @@ for DS in $DATASETS; do
     # ── STEP 3: train_mrl ────────────────────────────────────────────────────
     if should_run train_mrl; then
         log "[$DS] TRAIN MRL BASELINE"
-        if [[ -f "$MRL_BEST/checkpoint.pt" ]] || ls "$MRL_CKPT"/epoch_* &>/dev/null 2>&1; then
-            echo "  MRL checkpoint exists — skipping. Delete $MRL_CKPT to retrain."
+        if [[ "$FORCE" == "1" ]]; then
+            log "[$DS] FORCE — clearing MRL checkpoints under $MRL_CKPT"
+            rm -rf "$MRL_CKPT"/epoch_* "$MRL_CKPT"/inbatch_best "$MRL_CKPT"/best "$MRL_CKPT"/final 2>/dev/null || true
+        fi
+        if [[ "$FORCE" != "1" ]] && { [[ -f "$MRL_BEST/checkpoint.pt" ]] || ls "$MRL_CKPT"/epoch_* &>/dev/null 2>&1; }; then
+            echo "  MRL checkpoint exists — skipping. Delete $MRL_CKPT or use --force to retrain."
         else
             python3 scripts/train_baseline_mrl.py \
                 --config "$MRL_CFG" \
@@ -204,7 +241,7 @@ for DS in $DATASETS; do
     # ── STEP 4: find_mrl ─────────────────────────────────────────────────────
     if should_run find_mrl; then
         log "[$DS] SELECT BEST MRL EPOCH (corpus-level, not in-batch)"
-        if [[ -f "$MRL_BEST/checkpoint.pt" ]]; then
+        if [[ "$FORCE" != "1" ]] && [[ -f "$MRL_BEST/checkpoint.pt" ]]; then
             echo "  MRL best already selected."
         else
             python3 scripts/find_best_epoch.py \
@@ -218,8 +255,12 @@ for DS in $DATASETS; do
     # ── STEP 5: train_bam_b ──────────────────────────────────────────────────
     if should_run train_bam_b; then
         log "[$DS] TRAIN BAM-B (reverse two-stage: frozen mask → encoder fine-tune)"
-        if [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || ls "$BAM_B_CKPT"/epoch_* &>/dev/null 2>&1; then
-            echo "  BAM-B checkpoint exists — skipping. Delete $BAM_B_CKPT to retrain."
+        if [[ "$FORCE" == "1" ]]; then
+            log "[$DS] FORCE — clearing BAM-B checkpoints under $BAM_B_CKPT"
+            rm -rf "$BAM_B_CKPT"/epoch_* "$BAM_B_CKPT"/inbatch_best "$BAM_B_CKPT"/best_bsr "$BAM_B_CKPT"/final 2>/dev/null || true
+        fi
+        if [[ "$FORCE" != "1" ]] && { [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || ls "$BAM_B_CKPT"/epoch_* &>/dev/null 2>&1; }; then
+            echo "  BAM-B checkpoint exists — skipping. Delete $BAM_B_CKPT or use --force to retrain."
         else
             [[ -f "$MRL_BEST/checkpoint.pt" ]] || die "[$DS] MRL best not found — run find_mrl first"
             python3 scripts/train_bam.py \
