@@ -581,6 +581,71 @@ class DimVarianceRedistributionLoss(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Per-query routing contrastive loss (v11)
+# ---------------------------------------------------------------------------
+
+class QueryRoutingContrastiveLoss(nn.Module):
+    """
+    Per-query routing diversity loss for Option B.
+
+    Unlike BloomMaskDiversityLoss (centroid-based, 15 gradient signals) this
+    operates on every query pair in the batch, giving O(B²) gradient signals.
+    Critical for BEIR domains where some Bloom levels appear only 1-2× per batch —
+    centroid-based loss has near-zero gradient for rare levels; this does not.
+
+    For each pair (i, j) with DIFFERENT Bloom labels:
+        penalize  cos_sim(mask_i, mask_j) > margin_neg
+    For each pair (i, j) with SAME Bloom label (optional attraction):
+        penalize  cos_sim(mask_i, mask_j) < margin_pos
+
+    margin_neg=0.5: push different-level pairs below 0.5 cosine similarity.
+    attraction disabled by default (attraction_weight=0) — attraction can hurt
+    when same-level masks are legitimately diverse.
+    """
+
+    def __init__(self, margin_neg: float = 0.5,
+                 margin_pos: float = 0.8, attraction_weight: float = 0.0):
+        super().__init__()
+        self.margin_neg = margin_neg
+        self.margin_pos = margin_pos
+        self.attraction_weight = attraction_weight
+
+    def forward(self, soft_mask: torch.Tensor,
+                bloom_labels: torch.Tensor) -> tuple:
+        B = soft_mask.size(0)
+        if B < 2:
+            return torch.tensor(0.0, device=soft_mask.device), {"query_routing_div": 0.0}
+
+        normed = F.normalize(soft_mask.float(), p=2, dim=-1)   # [B, D]
+        sim = torch.mm(normed, normed.t())                      # [B, B]
+
+        # Boolean pair matrices
+        same  = bloom_labels.unsqueeze(0) == bloom_labels.unsqueeze(1)  # [B, B]
+        diff  = ~same
+        triu  = torch.triu(torch.ones(B, B, dtype=torch.bool,
+                                      device=soft_mask.device), diagonal=1)
+
+        # Repulsion: penalize different-level pairs with high similarity
+        diff_pairs = diff & triu
+        n_diff = diff_pairs.sum().clamp(min=1)
+        repulsion = F.relu(sim - self.margin_neg)[diff_pairs].sum() / n_diff
+
+        loss = repulsion
+        stats = {"query_routing_div": loss.item(), "n_diff_pairs": int(n_diff.item())}
+
+        # Optional attraction: pull same-level pairs together
+        if self.attraction_weight > 0:
+            same_pairs = same & triu
+            n_same = same_pairs.sum().clamp(min=1)
+            if n_same > 0:
+                attraction = F.relu(self.margin_pos - sim)[same_pairs].sum() / n_same
+                loss = loss + self.attraction_weight * attraction
+                stats["query_routing_attract"] = attraction.item()
+
+        return loss, stats
+
+
+# ---------------------------------------------------------------------------
 # Combined loss (orchestrates everything)
 # ---------------------------------------------------------------------------
 
@@ -675,6 +740,12 @@ class BAMCombinedLoss(nn.Module):
         self.dim_redistribution = DimVarianceRedistributionLoss(
             split_fraction=lc.get("dim_redist_split_fraction", 0.25),
         )
+        self.query_routing_div_weight = lc.get("query_routing_div_weight", 0.0)
+        self.query_routing_div = QueryRoutingContrastiveLoss(
+            margin_neg=lc.get("query_routing_div_margin_neg", 0.5),
+            margin_pos=lc.get("query_routing_div_margin_pos", 0.8),
+            attraction_weight=lc.get("query_routing_div_attraction", 0.0),
+        )
 
     def set_epoch(self, epoch: int, total_epochs: int, freeze_encoder: bool = False):
         """
@@ -712,8 +783,9 @@ class BAMCombinedLoss(nn.Module):
         self._active_efficiency_weight     = self.efficiency_weight     if past_stage1 else 0.0
         self._active_mask_sparsity_weight  = self.mask_sparsity_weight  if past_stage1 else 0.0
         # Stage 2 → 3: differentiation losses activate
-        self._active_mask_diversity_weight = self.mask_diversity_weight if past_stage2 else 0.0
-        self._active_mask_variance_weight  = self.mask_variance_weight  if past_stage2 else 0.0
+        self._active_mask_diversity_weight    = self.mask_diversity_weight    if past_stage2 else 0.0
+        self._active_mask_variance_weight     = self.mask_variance_weight     if past_stage2 else 0.0
+        self._active_query_routing_div_weight = self.query_routing_div_weight if past_stage2 else 0.0
         # Distillation fires ALL epochs — it is the key quality signal for Option B.
         # It forces the mask to select semantically informative dims by minimizing
         # |Sim(full_i,full_j) - Sim(masked_i,masked_j)|. Gating it to Stage 1 caused
@@ -803,15 +875,19 @@ class BAMCombinedLoss(nn.Module):
             l_sp, sp_stats = self.mask_sparsity(sparsity_input, bloom_labels)
             l_md, md_stats = self.mask_diversity(soft_mask, bloom_labels)
             l_mv, mv_stats = self.mask_variance(soft_mask, bloom_labels)
-            sp_w = getattr(self, "_active_mask_sparsity_weight",  self.mask_sparsity_weight)
-            md_w = getattr(self, "_active_mask_diversity_weight", self.mask_diversity_weight)
-            mv_w = getattr(self, "_active_mask_variance_weight",  self.mask_variance_weight)
+            l_qr, qr_stats = self.query_routing_div(soft_mask, bloom_labels)
+            sp_w = getattr(self, "_active_mask_sparsity_weight",   self.mask_sparsity_weight)
+            md_w = getattr(self, "_active_mask_diversity_weight",  self.mask_diversity_weight)
+            mv_w = getattr(self, "_active_mask_variance_weight",   self.mask_variance_weight)
+            qr_w = getattr(self, "_active_query_routing_div_weight", self.query_routing_div_weight)
             total = total + sp_w * l_sp
             total = total + md_w * l_md
             total = total + mv_w * l_mv
+            total = total + qr_w * l_qr
             d_stats.update(sp_stats)
             d_stats.update(md_stats)
             d_stats.update(mv_stats)
+            d_stats.update(qr_stats)
 
         stats = {}
         stats.update(c_stats)
@@ -878,11 +954,14 @@ class BAMCombinedLoss(nn.Module):
             l_sp, _ = self.mask_sparsity(sparsity_input, bloom_labels)
             l_md, _ = self.mask_diversity(soft_mask, bloom_labels)
             l_mv, _ = self.mask_variance(soft_mask, bloom_labels)
-            sp_w = getattr(self, "_active_mask_sparsity_weight",  self.mask_sparsity_weight)
-            md_w = getattr(self, "_active_mask_diversity_weight", self.mask_diversity_weight)
-            mv_w = getattr(self, "_active_mask_variance_weight",  self.mask_variance_weight)
+            l_qr, _ = self.query_routing_div(soft_mask, bloom_labels)
+            sp_w = getattr(self, "_active_mask_sparsity_weight",   self.mask_sparsity_weight)
+            md_w = getattr(self, "_active_mask_diversity_weight",  self.mask_diversity_weight)
+            mv_w = getattr(self, "_active_mask_variance_weight",   self.mask_variance_weight)
+            qr_w = getattr(self, "_active_query_routing_div_weight", self.query_routing_div_weight)
             routing = routing + sp_w * l_sp
             routing = routing + md_w * l_md
             routing = routing + mv_w * l_mv
+            routing = routing + qr_w * l_qr
 
         return self.contrastive_weight * l_c, routing

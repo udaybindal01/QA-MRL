@@ -272,48 +272,75 @@ def build_pairs(corpus: List[Dict], num_neg: int = 3) -> List[Dict]:
         raw_matches.append((q, idx, 0))
     print(f"    SciQ: {len(raw_matches) - n0} candidates")
 
-    # ARC questions
+    # ARC questions — all splits (train/validation/test) for both Easy and Challenge
     print("  Collecting ARC questions...")
     n0 = len(raw_matches)
-    for split_name, boost in [("ARC-Easy", 0), ("ARC-Challenge", 2)]:
-        try:
-            ds = load_dataset("allenai/ai2_arc", split_name, split="train")
-        except Exception:
-            continue
-        for row in ds:
-            q = row["question"]
-            ans = ""
-            for lb, tx in zip(row["choices"]["label"], row["choices"]["text"]):
-                if lb == row["answerKey"]:
-                    ans = tx
-                    break
-            qkw = _get_keywords(q + " " + ans)
-            idx = _find_best_passage(qkw, corpus_kw, min_overlap=2)
-            if idx is None:
+    for arc_name, boost in [("ARC-Easy", 0), ("ARC-Challenge", 2)]:
+        for arc_split in ["train", "validation", "test"]:
+            try:
+                ds = load_dataset("allenai/ai2_arc", arc_name, split=arc_split)
+            except Exception:
                 continue
-            raw_matches.append((q, idx, boost))
+            for row in ds:
+                q = row["question"]
+                ans = ""
+                for lb, tx in zip(row["choices"]["label"], row["choices"]["text"]):
+                    if lb == row["answerKey"]:
+                        ans = tx
+                        break
+                qkw = _get_keywords(q + " " + ans)
+                idx = _find_best_passage(qkw, corpus_kw, min_overlap=2)
+                if idx is None:
+                    continue
+                raw_matches.append((q, idx, boost))
     print(f"    ARC: {len(raw_matches) - n0} candidates")
 
-    # OpenBookQA questions
+    # OpenBookQA questions — all splits
     print("  Collecting OpenBookQA questions...")
     n0 = len(raw_matches)
-    try:
-        ds = load_dataset("allenai/openbookqa", "main", split="train")
-        for row in ds:
-            q = row["question_stem"]
-            ans = ""
-            for lb, tx in zip(row["choices"]["label"], row["choices"]["text"]):
-                if lb == row["answerKey"]:
-                    ans = tx
-                    break
-            qkw = _get_keywords(q + " " + ans)
-            idx = _find_best_passage(qkw, corpus_kw, min_overlap=2)
-            if idx is None:
-                continue
-            raw_matches.append((q, idx, 0))
-    except Exception:
-        pass
+    for obqa_split in ["train", "validation", "test"]:
+        try:
+            ds = load_dataset("allenai/openbookqa", "main", split=obqa_split)
+            for row in ds:
+                q = row["question_stem"]
+                ans = ""
+                for lb, tx in zip(row["choices"]["label"], row["choices"]["text"]):
+                    if lb == row["answerKey"]:
+                        ans = tx
+                        break
+                qkw = _get_keywords(q + " " + ans)
+                idx = _find_best_passage(qkw, corpus_kw, min_overlap=2)
+                if idx is None:
+                    continue
+                raw_matches.append((q, idx, 0))
+        except Exception:
+            pass
     print(f"    OBQA: {len(raw_matches) - n0} candidates")
+
+    # QASC questions — requires combining two facts, naturally Apply/Analyze level
+    print("  Collecting QASC questions...")
+    n0 = len(raw_matches)
+    for qasc_split in ["train", "validation"]:
+        try:
+            ds = load_dataset("allenai/qasc", split=qasc_split)
+            for row in ds:
+                q = row.get("question", "").strip()
+                if not q:
+                    continue
+                ans = ""
+                for lb, tx in zip(row["choices"]["label"], row["choices"]["text"]):
+                    if lb == row["answerKey"]:
+                        ans = tx
+                        break
+                qkw = _get_keywords(q + " " + ans)
+                idx = _find_best_passage(qkw, corpus_kw, min_overlap=2)
+                if idx is None:
+                    continue
+                # QASC requires multi-hop reasoning → Apply/Analyze → boost +1
+                raw_matches.append((q, idx, 1))
+        except Exception:
+            pass
+    print(f"    QASC: {len(raw_matches) - n0} candidates")
 
     # ── Batch classify all queries at once ──
     print(f"  Classifying {len(raw_matches)} queries with HuggingFace Bloom model...")

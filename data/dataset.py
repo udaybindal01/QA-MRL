@@ -7,12 +7,12 @@ All dataset classes and the corpus builder live here for single-import convenien
 import json
 import os
 import random
+from collections import Counter
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
 import torch
-from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 # ─────────────────────────── Data structures ──────────────────────────────
@@ -391,18 +391,52 @@ def build_dataloaders(config: dict, tokenizer) -> Dict[str, DataLoader]:
     dc = config["data"]
     tc = config["training"]
 
+    # Balanced sampling: each Bloom level contributes equally to every training batch.
+    # Prevents the optimizer from overfitting the router to dominant levels
+    # (e.g. 82% Remember on NFCorpus) while rare levels get too few gradient updates.
+    use_balanced = tc.get("balanced_bloom_sampling", True)
+
     loaders = {}
     for split, path in [("train", dc["train_path"]),
                         ("val", dc["val_path"]),
                         ("test", dc["test_path"])]:
-        if os.path.exists(path):
-            ds = EducationalRetrievalDataset(
-                data_path=path,
-                tokenizer=tokenizer,
-                max_query_length=dc["max_query_length"],
-                max_passage_length=dc["max_passage_length"],
-                num_hard_negatives=dc["num_hard_negatives"],
+        if not os.path.exists(path):
+            continue
+
+        ds = EducationalRetrievalDataset(
+            data_path=path,
+            tokenizer=tokenizer,
+            max_query_length=dc["max_query_length"],
+            max_passage_length=dc["max_passage_length"],
+            num_hard_negatives=dc["num_hard_negatives"],
+        )
+
+        if split == "train" and use_balanced:
+            # Use predicted Bloom labels (same as training signal) for weighting.
+            bloom_labels = [s.get("predicted_bloom_level",
+                                  s.get("bloom_level", 1) - 1)
+                            for s in ds.samples]
+            counts = Counter(bloom_labels)
+            # Weight = 1 / class_count so each class gets equal expected representation
+            weights = [1.0 / max(counts[b], 1) for b in bloom_labels]
+            sampler = WeightedRandomSampler(
+                weights=weights,
+                num_samples=len(ds),
+                replacement=True,
             )
+            loaders[split] = DataLoader(
+                ds,
+                batch_size=tc["batch_size"],
+                sampler=sampler,
+                num_workers=4,
+                pin_memory=True,
+                drop_last=True,
+            )
+            total = len(bloom_labels)
+            print(f"  [balanced sampler] Bloom distribution → "
+                  + ", ".join(f"{BLOOM_NAMES[b+1]}:{counts[b]/total:.0%}"
+                               for b in range(6) if counts[b] > 0))
+        else:
             loaders[split] = DataLoader(
                 ds,
                 batch_size=tc["batch_size"],

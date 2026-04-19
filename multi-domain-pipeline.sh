@@ -64,7 +64,7 @@ done
 
 [[ -n "$SINGLE_DATASET" ]] && DATASETS="$SINGLE_DATASET"
 
-ALL_STEPS=(build train_mrl find_mrl train_bam_a train_bam_b find_bam_a find_bam_b eval fair_cmp)
+ALL_STEPS=(build annotate train_mrl find_mrl train_bam_a train_bam_b find_bam_a find_bam_b eval fair_cmp eff_curves)
 
 should_run() {
     local step="$1"
@@ -191,6 +191,34 @@ for DS in $DATASETS; do
         make_config "$BASE_BAM_B_CONFIG" "$BAM_B_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BAM_B_CKPT/"
     fi
 
+    # ── STEP: annotate ───────────────────────────────────────────────────────
+    if should_run annotate; then
+        if [[ "$DS" == "educational" ]]; then
+            log "[$DS] ANNOTATE — educational data uses pretrained BERT classifier (no GPT needed)"
+        else
+            log "[$DS] ANNOTATE — GPT-4 Bloom labels for $DS (fixes classifier collapse)"
+            if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+                echo "  WARNING: OPENAI_API_KEY not set — skipping GPT annotation."
+                echo "  Set it with: export OPENAI_API_KEY=sk-..."
+                echo "  Continuing with pretrained BERT labels (may cause router collapse)."
+            else
+                python3 data/annotate_bloom_gpt.py \
+                    --input "$TRAIN_PATH" \
+                    --model gpt-4o-mini \
+                    || echo "  WARNING: GPT annotation failed for train, continuing..."
+                python3 data/annotate_bloom_gpt.py \
+                    --input "$VAL_PATH" \
+                    --model gpt-4o-mini \
+                    || echo "  WARNING: GPT annotation failed for val, continuing..."
+                python3 data/annotate_bloom_gpt.py \
+                    --input "$TEST_PATH" \
+                    --model gpt-4o-mini \
+                    || echo "  WARNING: GPT annotation failed for test, continuing..."
+                echo "  GPT annotation complete → bloom_cache files updated"
+            fi
+        fi
+    fi
+
     # ── STEP: train_mrl ──────────────────────────────────────────────────────
     if should_run train_mrl; then
         log "[$DS] TRAIN MRL BASELINE"
@@ -311,6 +339,20 @@ for DS in $DATASETS; do
             --output_dir     "$DS_RESULTS/fair_comparison/" \
             || die "[$DS] eval_fair_comparison.py failed"
         echo "  Fair comparison → $DS_RESULTS/fair_comparison/fair_comparison.json"
+    fi
+
+    # ── STEP: eff_curves ────────────────────────────────────────────────────
+    if should_run eff_curves; then
+        log "[$DS] EFFICIENCY CURVES — R@10 vs dims for MRL and BAM-B"
+        BAM_B_BEST="$BAM_B_CKPT/best_bsr"
+        [[ -f "$MRL_BEST/checkpoint.pt" ]]   || die "[$DS] MRL best not found"
+        [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "[$DS] BAM-B best_bsr not found"
+        python3 scripts/eval_efficiency_curves.py \
+            --config         "$BAM_B_CFG" \
+            --bam_checkpoint "$BAM_B_BEST" \
+            --mrl_checkpoint "$MRL_BEST" \
+            --output_dir     "$DS_RESULTS/efficiency_curves/" \
+            || die "[$DS] eval_efficiency_curves.py failed"
     fi
 
 done  # end per-dataset loop

@@ -92,6 +92,9 @@ training:
     mask_diversity_margin: 0.0
     mask_variance_weight: 0.3      # Per-dim variance — each dim "owned" by specific levels
     mask_distill_weight: 0.5       # Preserve full-space similarity structure in masked subspace
+    query_routing_div_weight: 0.3  # Per-query routing contrastive loss (O(B²) signals)
+    query_routing_div_margin_neg: 0.5  # Penalize different-level pairs above this similarity
+    query_routing_div_attraction: 0.0  # No attraction — same-level masks can be diverse
     dropmask_rate: 0.0             # OFF for stage 1. Could re-enable for stage 2 at low rate.
     dim_redist_weight: 0.0         # OFF — encoder fine-tuning LR is so low that redistribution
                                    # has negligible effect. Contrastive through converged mask
@@ -105,6 +108,7 @@ training:
       start: 1.0
       end: 0.1
     # bloom_frequencies injected at runtime by train_bam.py
+  balanced_bloom_sampling: true    # WeightedRandomSampler — equal Bloom level representation
   use_pcgrad: false
   encoder_freeze_after_epochs: null
   encoder_unfreeze_after_epochs: 8 # Stage 2: unfreeze encoder at epoch 8
