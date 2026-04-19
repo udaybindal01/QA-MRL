@@ -5,9 +5,9 @@
 #
 # Runs every stage in order:
 #   1. build        — download/prepare data for all 4 datasets
-#   2. annotate     — fix Bloom labels on BEIR datasets using zero-shot NLI
-#                     (replaces educational BERT classifier that collapses to
-#                     82% "Remember" on keyword/scientific/financial queries)
+#   2. annotate     — zero-shot NLI Bloom labels on every dataset (educational +
+#                     each BEIR set): train/val/test JSONLs + .bloom_cache.json
+#                     (default: --overwrite so NLI_MODEL is always applied)
 #   3. train_mrl    — train MRL baseline for each dataset
 #   4. find_mrl     — select best MRL checkpoint (corpus-level, not in-batch)
 #   5. train_bam_b  — reverse two-stage BAM-B: frozen mask → gentle encoder tune
@@ -23,10 +23,11 @@
 #   ./run_full_pipeline.sh --from train_bam_b         # skip to BAM-B training
 #   ./run_full_pipeline.sh --datasets "scifact fiqa"  # subset of datasets
 #   ./run_full_pipeline.sh --from eval                # re-eval only
-#   ./run_full_pipeline.sh --force                    # NLI Bloom on every dataset in DATASETS (educational
-#                                                       + each BEIR set): all train/val/test JSONLs,
-#                                                       --overwrite sidecar caches, wipe ckpts, retrain
+#   ./run_full_pipeline.sh --force                    # same as default annotate + also wipe any
+#                                                       leftover ckpts before train (belt-and-suspenders)
 #   FORCE_PIPELINE=1 ./run_full_pipeline.sh           # same as --force (env)
+#   REUSE_BLOOM_CACHE=1 ./run_full_pipeline.sh        # skip --overwrite on NLI (faster if labels unchanged)
+#   REUSE_TRAINED_MODELS=1 ./run_full_pipeline.sh     # skip MRL/BAM-B training if epoch ckpts already exist
 #
 # Requirements:
 #   pip install transformers torch sentence-transformers faiss-gpu pyyaml
@@ -47,10 +48,13 @@ BSR_ALPHA="0.5"
 NLI_MODEL="MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
 NLI_BATCH_SIZE="64"   # reduce to 32 if GPU OOM
 
-# Set to 1 (or pass --force) to: NLI-annotate every dataset (educational + all BEIR in DATASETS),
-# pass --overwrite on each split so caches match the current NLI_MODEL, clear MRL/BAM-B ckpts,
-# and rerun training + best-epoch selection.
+# --force / FORCE_PIPELINE=1: extra checkpoint wipe before train (use if ckpts look stale).
 FORCE="${FORCE_PIPELINE:-0}"
+# Default 0: annotate step passes --overwrite so NLI_MODEL refreshes all splits; then ckpts are
+# cleared and models retrained. Set REUSE_BLOOM_CACHE=1 to keep existing .bloom_cache.json behavior.
+REUSE_BLOOM_CACHE="${REUSE_BLOOM_CACHE:-0}"
+# Default 0: after a Bloom refresh, always retrain. Set REUSE_TRAINED_MODELS=1 to skip train when ckpts exist.
+REUSE_TRAINED_MODELS="${REUSE_TRAINED_MODELS:-0}"
 
 BASE_MRL_CONFIG="configs/mrl_e5large.yaml"
 BASE_BAM_B_CONFIG="configs/bam_optionb_e5large.yaml"
@@ -121,12 +125,16 @@ echo "  Datasets  : $DATASETS"
 echo "  CKPT root : $CKPT_ROOT"
 echo "  Results   : $RESULTS_ROOT"
 echo "  NLI model : $NLI_MODEL"
-echo "  Force     : $FORCE  (1 = re-annotate with NLI, clear ckpts, retrain)"
+echo "  Bloom cache: REUSE_BLOOM_CACHE=$REUSE_BLOOM_CACHE  (1 = no --overwrite on annotate)"
+echo "  Train skip : REUSE_TRAINED_MODELS=$REUSE_TRAINED_MODELS  (1 = keep ckpts if present)"
+echo "  Force      : $FORCE  (1 = always wipe ckpts before train)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PER-DATASET LOOP
 # ─────────────────────────────────────────────────────────────────────────────
 for DS in $DATASETS; do
+    # Set when this run executed NLI with --overwrite so downstream training matches new Bloom labels.
+    BLOOM_NLI_REFRESHED=0
 
     log "━━━━  DATASET: $DS  ━━━━"
 
@@ -182,63 +190,58 @@ for DS in $DATASETS; do
     fi
 
     # ── STEP 2: annotate ─────────────────────────────────────────────────────
-    # Same path for every dataset: annotate_bloom_local.py --input per split (train/val/test).
-    # Educational: NLI only when FORCE=1 (otherwise BERT labels + existing cache).
-    # BEIR: always run NLI; with FORCE=1 add --overwrite so a new NLI_MODEL replaces caches.
+    # Every dataset: same NLI path on train/val/test JSONLs. Default --overwrite so NLI_MODEL
+    # always rewrites bloom_level + .bloom_cache.json (set REUSE_BLOOM_CACHE=1 to skip overwrite).
     if should_run annotate; then
-        OVERWRITE_FLAG=()
-        [[ "$FORCE" == "1" ]] && OVERWRITE_FLAG=(--overwrite)
+        OVERWRITE_FLAG=(--overwrite)
+        [[ "$REUSE_BLOOM_CACHE" == "1" ]] && OVERWRITE_FLAG=()
 
-        if [[ "$DS" == "educational" && "$FORCE" != "1" ]]; then
-            log "[$DS] ANNOTATE — using existing labels/cache (skip NLI unless --force)"
-            echo "  Tip: ./run_full_pipeline.sh --force --nli_model ... to refresh all datasets + ckpts"
+        ANNOTATE_JSONL=()
+        if [[ "$DS" == "educational" ]]; then
+            ANNOTATE_JSONL+=(
+                "$EDU_DATA_DIR/train_curriculum.jsonl"
+                "$EDU_DATA_DIR/val.jsonl"
+                "$EDU_DATA_DIR/test.jsonl"
+            )
         else
-            ANNOTATE_JSONL=()
-            if [[ "$DS" == "educational" ]]; then
-                ANNOTATE_JSONL+=(
-                    "$EDU_DATA_DIR/train_curriculum.jsonl"
-                    "$EDU_DATA_DIR/val.jsonl"
-                    "$EDU_DATA_DIR/test.jsonl"
-                )
-            else
-                for split in train val test; do
-                    p="$BEIR_DATA_ROOT/$DS/${split}.jsonl"
-                    [[ -f "$p" ]] && ANNOTATE_JSONL+=("$p")
-                done
-                if [[ ${#ANNOTATE_JSONL[@]} -eq 0 ]]; then
-                    die "[$DS] No train/val/test.jsonl under $BEIR_DATA_ROOT/$DS — run build first"
-                fi
-            fi
-
-            log "[$DS] ANNOTATE — NLI Bloom (${#ANNOTATE_JSONL[@]} JSONL splits)"
-            echo "  Model: $NLI_MODEL"
-            if [[ "$FORCE" == "1" ]]; then
-                echo "  --overwrite: refresh labels + .bloom_cache.json for this model"
-            elif [[ "$DS" != "educational" ]]; then
-                echo "  Existing per-file cache is reused unless lengths mismatch (use --force to replace)"
-            fi
-            for jsonl in "${ANNOTATE_JSONL[@]}"; do
-                [[ -f "$jsonl" ]] || die "Missing $jsonl"
-                python3 data/annotate_bloom_local.py \
-                    --input      "$jsonl" \
-                    --model      "$NLI_MODEL" \
-                    --batch_size "$NLI_BATCH_SIZE" \
-                    "${OVERWRITE_FLAG[@]}" \
-                    || die "[$DS] Bloom annotation failed for $jsonl"
+            for split in train val test; do
+                p="$BEIR_DATA_ROOT/$DS/${split}.jsonl"
+                [[ -f "$p" ]] && ANNOTATE_JSONL+=("$p")
             done
-            echo "  Annotation complete for $DS"
+            if [[ ${#ANNOTATE_JSONL[@]} -eq 0 ]]; then
+                die "[$DS] No train/val/test.jsonl under $BEIR_DATA_ROOT/$DS — run build first"
+            fi
         fi
+
+        log "[$DS] ANNOTATE — NLI Bloom (${#ANNOTATE_JSONL[@]} splits, model=$NLI_MODEL)"
+        if [[ ${#OVERWRITE_FLAG[@]} -gt 0 ]]; then
+            echo "  --overwrite on each file (fresh labels for this NLI run)"
+            BLOOM_NLI_REFRESHED=1
+        else
+            echo "  REUSE_BLOOM_CACHE=1 — existing cache kept if size matches"
+        fi
+        for jsonl in "${ANNOTATE_JSONL[@]}"; do
+            [[ -f "$jsonl" ]] || die "Missing $jsonl"
+            python3 data/annotate_bloom_local.py \
+                --input      "$jsonl" \
+                --model      "$NLI_MODEL" \
+                --batch_size "$NLI_BATCH_SIZE" \
+                "${OVERWRITE_FLAG[@]}" \
+                || die "[$DS] Bloom annotation failed for $jsonl"
+        done
+        echo "  Annotation complete for $DS"
     fi
 
     # ── STEP 3: train_mrl ────────────────────────────────────────────────────
     if should_run train_mrl; then
         log "[$DS] TRAIN MRL BASELINE"
-        if [[ "$FORCE" == "1" ]]; then
-            log "[$DS] FORCE — clearing MRL checkpoints under $MRL_CKPT"
+        if [[ "$FORCE" == "1" ]] || [[ "$BLOOM_NLI_REFRESHED" == "1" ]]; then
+            log "[$DS] Clearing MRL checkpoints (Bloom labels refreshed or --force)"
             rm -rf "$MRL_CKPT"/epoch_* "$MRL_CKPT"/inbatch_best "$MRL_CKPT"/best "$MRL_CKPT"/final 2>/dev/null || true
         fi
-        if [[ "$FORCE" != "1" ]] && { [[ -f "$MRL_BEST/checkpoint.pt" ]] || ls "$MRL_CKPT"/epoch_* &>/dev/null 2>&1; }; then
-            echo "  MRL checkpoint exists — skipping. Delete $MRL_CKPT or use --force to retrain."
+        if [[ "$REUSE_TRAINED_MODELS" == "1" ]] && [[ "$FORCE" != "1" ]] && [[ "$BLOOM_NLI_REFRESHED" != "1" ]] \
+            && { [[ -f "$MRL_BEST/checkpoint.pt" ]] || ls "$MRL_CKPT"/epoch_* &>/dev/null 2>&1; }; then
+            echo "  MRL checkpoint exists — skipping (REUSE_TRAINED_MODELS=1). Delete $MRL_CKPT or unset to retrain."
         else
             python3 scripts/train_baseline_mrl.py \
                 --config "$MRL_CFG" \
@@ -250,7 +253,7 @@ for DS in $DATASETS; do
     # ── STEP 4: find_mrl ─────────────────────────────────────────────────────
     if should_run find_mrl; then
         log "[$DS] SELECT BEST MRL EPOCH (corpus-level, not in-batch)"
-        if [[ "$FORCE" != "1" ]] && [[ -f "$MRL_BEST/checkpoint.pt" ]]; then
+        if [[ "$FORCE" != "1" ]] && [[ "$BLOOM_NLI_REFRESHED" != "1" ]] && [[ -f "$MRL_BEST/checkpoint.pt" ]]; then
             echo "  MRL best already selected."
         else
             python3 scripts/find_best_epoch.py \
@@ -264,12 +267,13 @@ for DS in $DATASETS; do
     # ── STEP 5: train_bam_b ──────────────────────────────────────────────────
     if should_run train_bam_b; then
         log "[$DS] TRAIN BAM-B (reverse two-stage: frozen mask → encoder fine-tune)"
-        if [[ "$FORCE" == "1" ]]; then
-            log "[$DS] FORCE — clearing BAM-B checkpoints under $BAM_B_CKPT"
+        if [[ "$FORCE" == "1" ]] || [[ "$BLOOM_NLI_REFRESHED" == "1" ]]; then
+            log "[$DS] Clearing BAM-B checkpoints (Bloom labels refreshed or --force)"
             rm -rf "$BAM_B_CKPT"/epoch_* "$BAM_B_CKPT"/inbatch_best "$BAM_B_CKPT"/best_bsr "$BAM_B_CKPT"/final 2>/dev/null || true
         fi
-        if [[ "$FORCE" != "1" ]] && { [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || ls "$BAM_B_CKPT"/epoch_* &>/dev/null 2>&1; }; then
-            echo "  BAM-B checkpoint exists — skipping. Delete $BAM_B_CKPT or use --force to retrain."
+        if [[ "$REUSE_TRAINED_MODELS" == "1" ]] && [[ "$FORCE" != "1" ]] && [[ "$BLOOM_NLI_REFRESHED" != "1" ]] \
+            && { [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || ls "$BAM_B_CKPT"/epoch_* &>/dev/null 2>&1; }; then
+            echo "  BAM-B checkpoint exists — skipping (REUSE_TRAINED_MODELS=1). Delete $BAM_B_CKPT or unset to retrain."
         else
             [[ -f "$MRL_BEST/checkpoint.pt" ]] || die "[$DS] MRL best not found — run find_mrl first"
             python3 scripts/train_bam.py \
