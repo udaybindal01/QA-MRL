@@ -56,8 +56,10 @@ Return ONLY a JSON array of integers (1-6), one per query, in the same order."""
 
 
 def classify_batch_gpt(queries: List[str], client, model: str,
-                        retries: int = 3, backoff: float = 2.0) -> List[int]:
-    """Call GPT to classify a batch of queries. Returns list of 1-indexed Bloom levels."""
+                        retries: int = 6, backoff: float = 5.0) -> List[int]:
+    """Call GPT to classify a batch of queries. Returns list of 1-indexed Bloom levels.
+    Handles rate-limit (429) with exponential backoff up to 5 minutes."""
+    import re
     numbered = "\n".join(f"{i+1}. {q}" for i, q in enumerate(queries))
     user_msg = f"Classify these {len(queries)} queries:\n\n{numbered}"
 
@@ -74,13 +76,10 @@ def classify_batch_gpt(queries: List[str], client, model: str,
             )
             text = response.choices[0].message.content.strip()
 
-            # Parse JSON array
-            import re
             match = re.search(r'\[[\d,\s]+\]', text)
             if match:
                 levels = json.loads(match.group())
             else:
-                # fallback: extract all integers
                 levels = [int(x) for x in re.findall(r'\b[1-6]\b', text)]
 
             if len(levels) == len(queries):
@@ -89,30 +88,45 @@ def classify_batch_gpt(queries: List[str], client, model: str,
             print(f"  WARNING: got {len(levels)} labels for {len(queries)} queries, retrying...")
 
         except Exception as e:
-            print(f"  API error (attempt {attempt+1}/{retries}): {e}")
+            err = str(e)
+            is_rate_limit = "429" in err or "rate_limit" in err.lower() or "Rate limit" in err
+            wait = backoff * (2 ** attempt)   # exponential: 5, 10, 20, 40, 80, 160s
+            if is_rate_limit:
+                print(f"  Rate limit hit — waiting {wait:.0f}s before retry "
+                      f"({attempt+1}/{retries})...")
+            else:
+                print(f"  API error (attempt {attempt+1}/{retries}): {e} — retrying in {wait:.0f}s")
             if attempt < retries - 1:
-                time.sleep(backoff * (attempt + 1))
+                time.sleep(wait)
 
-    # Fallback: classify one at a time
-    print("  Falling back to single-query classification...")
+    # Fallback: classify one at a time with conservative pacing
+    print("  Falling back to single-query classification (1 req/s)...")
     results = []
     for q in queries:
-        try:
-            r = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user",   "content": f"Classify this query (return only 1-6): {q}"},
-                ],
-                temperature=0.0,
-                max_tokens=5,
-            )
-            import re
-            nums = re.findall(r'\b[1-6]\b', r.choices[0].message.content)
-            results.append(int(nums[0]) if nums else 1)
-        except Exception:
-            results.append(1)
-        time.sleep(0.1)
+        for attempt in range(retries):
+            try:
+                r = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user",
+                         "content": f"Classify this query (return only 1-6): {q}"},
+                    ],
+                    temperature=0.0,
+                    max_tokens=5,
+                )
+                nums = re.findall(r'\b[1-6]\b', r.choices[0].message.content)
+                results.append(int(nums[0]) if nums else 1)
+                break
+            except Exception as e:
+                wait = backoff * (2 ** attempt)
+                if "429" in str(e) or "rate_limit" in str(e).lower():
+                    print(f"  Rate limit — waiting {wait:.0f}s...")
+                    time.sleep(wait)
+                else:
+                    results.append(1)
+                    break
+        time.sleep(1.0)   # 1 req/s hard floor for fallback path
     return results
 
 
