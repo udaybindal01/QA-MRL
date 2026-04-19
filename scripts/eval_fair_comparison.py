@@ -147,22 +147,21 @@ def recall_at_k(q_embs, c_embs, gt_indices, k, device, chunk=256):
 
 
 def bam_retrieval_per_level(
-    level_idx, full_embs, dims, masks, corpus_embs, gt_indices,
+    level_idx, full_embs, dims, masks, corpus_embs, level_gt,
     device, is_prefix, k=10
 ):
     """
     Run BAM retrieval for queries at one Bloom level, returning hit array.
+
+    level_idx: global query indices for this level (used to slice full_embs/dims/masks)
+    level_gt:  gt_indices already subset to this level (len == len(level_idx))
     Option A (is_prefix=True): normalize(q[:d]) · normalize(c[:d])
     Option B (is_prefix=False): normalize(q*mask) · normalize(c*mask)
-    For Option B, mask is per-query, so we process one query at a time
-    (or group by unique mask — fast enough for eval).
     """
     N = len(level_idx)
     hits = np.zeros(N)
 
     if is_prefix:
-        # All queries in this level share the same average dim; use the actual
-        # discrete_dim per query for correctness.
         for j, qi in enumerate(level_idx):
             d = int(dims[qi].item())
             d = max(1, min(d, corpus_embs.shape[1]))
@@ -170,16 +169,15 @@ def bam_retrieval_per_level(
             c_v = F.normalize(corpus_embs[:, :d], p=2, dim=-1).to(device)
             sim = torch.mm(q_v, c_v.t())
             topk = sim.topk(k, dim=-1).indices.cpu().numpy()[0]
-            hits[j] = int(gt_indices[qi] in topk)
+            hits[j] = int(level_gt[j] in topk)
     else:
-        # Option B: normalize(q * mask) · normalize(c * mask)
         for j, qi in enumerate(level_idx):
-            m = masks[qi].to(device)              # [D]
+            m = masks[qi].to(device)
             q_v = F.normalize(full_embs[qi:qi+1].to(device) * m, p=2, dim=-1)
             c_v = F.normalize(corpus_embs.to(device) * m, p=2, dim=-1)
             sim = torch.mm(q_v, c_v.t())
             topk = sim.topk(k, dim=-1).indices.cpu().numpy()[0]
-            hits[j] = int(gt_indices[qi] in topk)
+            hits[j] = int(level_gt[j] in topk)
 
     return hits
 
@@ -222,70 +220,61 @@ def main():
     gt_indices = np.array([corpus_id_to_idx[s["positive_id"]] for s in valid])
     query_blooms = np.array([s["bloom_level"] for s in valid])   # 1-indexed
 
-    # ── Encode corpus ─────────────────────────────────────────────────────────
-    print("\nEncoding corpus with MRL...")
-    mrl_model = load_mrl(config, args.mrl_checkpoint, device)
-    corpus_embs_full = encode_corpus(mrl_model, [p["text"] for p in corpus],
-                                     tokenizer, device)
-    print(f"  Corpus embeddings: {corpus_embs_full.shape}")
+    corpus_texts = [p["text"] for p in corpus]
 
-    # ── Encode all queries with MRL ───────────────────────────────────────────
-    print("\nEncoding queries with MRL...")
+    # ── MRL: encode corpus + queries ─────────────────────────────────────────
+    print("\nEncoding corpus + queries with MRL...")
+    mrl_model = load_mrl(config, args.mrl_checkpoint, device)
+    mrl_corpus_embs = encode_corpus(mrl_model, corpus_texts, tokenizer, device)
+    print(f"  MRL corpus: {mrl_corpus_embs.shape}")
     mrl_q_embs = encode_queries_mrl(mrl_model, valid, tokenizer, device)
-    print(f"  Query embeddings: {mrl_q_embs.shape}")
+    print(f"  MRL queries: {mrl_q_embs.shape}")
     del mrl_model
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
-    # ── Encode queries with BAM-B ─────────────────────────────────────────────
+    # ── BAM: encode corpus + queries ─────────────────────────────────────────
+    # Corpus must be encoded with BAM's own encoder (different weights from MRL).
+    # Comparing BAM queries against MRL corpus would be a cross-model dot product.
     bam_bloom_dims = {}   # level (1-indexed) → avg active dims
 
+    print("\nEncoding corpus + queries with BAM...")
+    bam_model = load_bam(config, args.bam_checkpoint, device)
+    bam_corpus_embs = encode_corpus(bam_model, corpus_texts, tokenizer, device)
+    print(f"  BAM corpus: {bam_corpus_embs.shape}")
+    bam_full_embs, bam_dims, bam_masks, bam_active = encode_queries_bam(
+        bam_model, valid, tokenizer, device
+    )
+
+    # Read per-level dims from saved results if available (avoids re-encoding)
     if args.bam_results and os.path.exists(args.bam_results):
-        print(f"\nLoading BAM results from {args.bam_results}...")
         with open(args.bam_results) as f:
             bam_res = json.load(f)
-        # Find key matching "BAM" or "BAM v4 (Option B)"
         bam_key = next((k for k in bam_res if "BAM" in k and "Encoder" not in k
                         and "MRL" not in k), None)
         if bam_key:
             for level in range(1, 7):
-                name = BLOOM_NAMES[level]
-                dim_key = f"bloom_{name}_avg_dim"
+                dim_key = f"bloom_{BLOOM_NAMES[level]}_avg_dim"
                 if dim_key in bam_res[bam_key]:
                     bam_bloom_dims[level] = int(round(bam_res[bam_key][dim_key]))
-            print(f"  Per-level dims from saved results: {bam_bloom_dims}")
+            if bam_bloom_dims:
+                print(f"  Per-level dims from saved results: {bam_bloom_dims}")
 
-    # If we don't have per-level dims yet, run BAM encoding
-    bam_full_embs = bam_dims = bam_masks = bam_active = None
+    # Compute per-level dims from the freshly encoded queries if not read from file
     if not bam_bloom_dims:
-        print("\nEncoding queries with BAM...")
-        bam_model = load_bam(config, args.bam_checkpoint, device)
-        bam_full_embs, bam_dims, bam_masks, bam_active = encode_queries_bam(
-            bam_model, valid, tokenizer, device
-        )
         for level in range(1, 7):
-            mask = query_blooms == level
-            if mask.sum() == 0:
+            lmask = query_blooms == level
+            if lmask.sum() == 0:
                 continue
-            name = BLOOM_NAMES[level]
             if bam_active is not None:
-                bam_bloom_dims[level] = int(round(bam_active[mask].float().mean().item()))
+                bam_bloom_dims[level] = int(round(bam_active[lmask].float().mean().item()))
             elif bam_dims is not None:
-                bam_bloom_dims[level] = int(round(bam_dims[mask].float().mean().item()))
-        print(f"  Per-level dims (from BAM encoding): {bam_bloom_dims}")
-        del bam_model
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-    else:
-        # Still need BAM embeddings for retrieval (unless we read from saved per-level R@k)
-        print("\nEncoding queries with BAM for retrieval...")
-        bam_model = load_bam(config, args.bam_checkpoint, device)
-        bam_full_embs, bam_dims, bam_masks, bam_active = encode_queries_bam(
-            bam_model, valid, tokenizer, device
-        )
-        del bam_model
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+                bam_bloom_dims[level] = int(round(bam_dims[lmask].float().mean().item()))
+        print(f"  Per-level dims (from live encoding): {bam_bloom_dims}")
+
+    del bam_model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
     is_prefix = bam_dims is not None  # True = Option A, False = Option B (scattered)
     print(f"\nBAM routing mode: {'Option A (prefix)' if is_prefix else 'Option B (scattered mask)'}")
@@ -308,25 +297,28 @@ def main():
             continue
         name = BLOOM_NAMES[level]
         level_idx = np.where(mask)[0]
+        # Subset gt_indices to this level — fixes off-by-index bug when recall_at_k
+        # uses i+j as a local offset (not a global index into gt_indices).
+        level_gt = gt_indices[level_idx]
         budget = bam_bloom_dims.get(level, None)
 
-        # MRL at full dims
+        # MRL at full dims (MRL corpus + MRL queries, same model on both sides)
         q_full_norm = F.normalize(mrl_q_embs[level_idx], p=2, dim=-1)
-        c_full_norm = F.normalize(corpus_embs_full, p=2, dim=-1)
-        hits_mrl_full = recall_at_k(q_full_norm, c_full_norm, gt_indices, k, device)
+        c_full_norm = F.normalize(mrl_corpus_embs, p=2, dim=-1)
+        hits_mrl_full = recall_at_k(q_full_norm, c_full_norm, level_gt, k, device)
 
-        # MRL truncated to BAM's budget
+        # MRL truncated to BAM's budget (MRL corpus prefix-truncated)
         hits_mrl_trunc = None
         if budget is not None:
             d = max(1, min(budget, mrl_q_embs.shape[1]))
             q_trunc = F.normalize(mrl_q_embs[level_idx, :d], p=2, dim=-1)
-            c_trunc = F.normalize(corpus_embs_full[:, :d], p=2, dim=-1)
-            hits_mrl_trunc = recall_at_k(q_trunc, c_trunc, gt_indices, k, device)
+            c_trunc = F.normalize(mrl_corpus_embs[:, :d], p=2, dim=-1)
+            hits_mrl_trunc = recall_at_k(q_trunc, c_trunc, level_gt, k, device)
 
-        # BAM-B at its per-level budget
+        # BAM at its per-level budget (BAM corpus + BAM queries, same model on both sides)
         hits_bam = bam_retrieval_per_level(
             level_idx, bam_full_embs, bam_dims, bam_masks,
-            corpus_embs_full, gt_indices, device, is_prefix=is_prefix, k=k
+            bam_corpus_embs, level_gt, device, is_prefix=is_prefix, k=k
         )
 
         r_mrl_full  = float(hits_mrl_full.mean())
