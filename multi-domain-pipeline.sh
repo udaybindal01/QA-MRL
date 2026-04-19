@@ -64,7 +64,7 @@ done
 
 [[ -n "$SINGLE_DATASET" ]] && DATASETS="$SINGLE_DATASET"
 
-ALL_STEPS=(build train_mrl find_mrl train_bam_a train_bam_b find_bam_a find_bam_b eval)
+ALL_STEPS=(build train_mrl find_mrl train_bam_a train_bam_b find_bam_a find_bam_b eval fair_cmp)
 
 should_run() {
     local step="$1"
@@ -296,6 +296,23 @@ for DS in $DATASETS; do
         echo "  Results → $DS_RESULTS/results.json"
     fi
 
+    # ── STEP: fair_cmp ──────────────────────────────────────────────────────
+    if should_run fair_cmp; then
+        log "[$DS] FAIR COMPARISON — BAM-B vs MRL at same per-Bloom dim budget"
+        BAM_B_BEST="$BAM_B_CKPT/best_bsr"
+        [[ -f "$MRL_BEST/checkpoint.pt" ]]   || die "[$DS] MRL best not found"
+        [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "[$DS] BAM-B best_bsr not found"
+        mkdir -p "$DS_RESULTS/fair_comparison"
+        python3 scripts/eval_fair_comparison.py \
+            --config         "$BAM_B_CFG" \
+            --bam_checkpoint "$BAM_B_BEST" \
+            --mrl_checkpoint "$MRL_BEST" \
+            --bam_results    "$DS_RESULTS/results.json" \
+            --output_dir     "$DS_RESULTS/fair_comparison/" \
+            || die "[$DS] eval_fair_comparison.py failed"
+        echo "  Fair comparison → $DS_RESULTS/fair_comparison/fair_comparison.json"
+    fi
+
 done  # end per-dataset loop
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -304,14 +321,15 @@ done  # end per-dataset loop
 log "MULTI-DOMAIN COMPARISON TABLE"
 
 python3 - <<PYEOF
-import json, os
+import json, os, math
 
 datasets = "$DATASETS".split()
 results_root = "$RESULTS_ROOT"
 
 print()
-print(f"  {'Dataset':14s} {'MRL R@10':>10s} {'MRL NDCG':>10s} {'BAM-A R@10':>12s} {'BAM-B R@10':>12s} {'BAM-B NDCG':>12s} {'BAM-B Dims':>12s} {'vs MRL':>8s}")
-print("  " + "-" * 94)
+print("  Standard comparison (BAM-B vs MRL at full MRL dims):")
+print(f"  {'Dataset':14s} {'MRL R@10':>10s} {'BAM-A R@10':>12s} {'BAM-B R@10':>12s} {'BAM-B Dims':>12s} {'vs MRL':>8s}")
+print("  " + "-" * 72)
 
 for ds in datasets:
     path = os.path.join(results_root, ds, "results.json")
@@ -325,18 +343,42 @@ for ds in datasets:
     bam_a = r.get("BAM", {})
     bam_b = r.get("BAM v4 (Option B)", {})
 
-    mrl_r10   = mrl.get("recall@10", 0)
-    mrl_ndcg  = mrl.get("ndcg@10",   0)
-    a_r10     = bam_a.get("recall@10", 0)
-    b_r10     = bam_b.get("recall@10", 0)
-    b_ndcg    = bam_b.get("ndcg@10",   0)
-    b_dims    = bam_b.get("avg_active_dims", bam_b.get("avg_active_dims_scattered", 0))
-    delta     = b_r10 - mrl_r10
-
-    sign = "+" if delta >= 0 else ""
-    print(f"  {ds:14s} {mrl_r10:>10.4f} {mrl_ndcg:>10.4f} {a_r10:>12.4f} {b_r10:>12.4f} {b_ndcg:>12.4f} {b_dims:>12.0f} {sign}{delta*100:>6.1f}%")
+    mrl_r10  = mrl.get("recall@10", 0)
+    a_r10    = bam_a.get("recall@10", 0)
+    b_r10    = bam_b.get("recall@10", 0)
+    b_dims   = bam_b.get("avg_active_dims", bam_b.get("avg_active_dims_scattered", 0))
+    delta    = b_r10 - mrl_r10
+    sign     = "+" if delta >= 0 else ""
+    print(f"  {ds:14s} {mrl_r10:>10.4f} {a_r10:>12.4f} {b_r10:>12.4f} {b_dims:>12.0f} {sign}{delta*100:>6.1f}%")
 
 print()
+print("  FAIR comparison (BAM-B vs MRL truncated to SAME per-Bloom dim budget):")
+print(f"  {'Dataset':14s} {'Avg Δ(BAM−MRL_trunc)':>22s} {'BAM wins (levels)':>20s}")
+print("  " + "-" * 60)
+
+for ds in datasets:
+    fc_path = os.path.join(results_root, ds, "fair_comparison", "fair_comparison.json")
+    if not os.path.exists(fc_path):
+        print(f"  {ds:14s}  (fair comparison not yet run)")
+        continue
+    with open(fc_path) as f:
+        fc = json.load(f)
+    avg_d = fc.get("avg_delta_bam_minus_mrl_trunc", math.nan)
+    wins  = fc.get("bam_wins", 0)
+    total = fc.get("total_levels", 6)
+    sign  = "+" if avg_d >= 0 else ""
+    print(f"  {ds:14s} {sign}{avg_d*100:>20.2f}% {wins}/{total:>18}")
+
+    # Print per-level breakdown
+    for name, lv in fc.get("per_level", {}).items():
+        budget = lv.get("budget_dims", 0)
+        r_mrl  = lv.get("mrl_truncated_recall@10", 0)
+        r_bam  = lv.get("bam_recall@10", 0)
+        d      = r_bam - r_mrl
+        sign   = "+" if d >= 0 else ""
+        print(f"    {name:14s}  dims={budget:4d}  MRL-trunc={r_mrl:.4f}  BAM={r_bam:.4f}  {sign}{d*100:.1f}%")
+    print()
+
 PYEOF
 
 log "PIPELINE COMPLETE"
