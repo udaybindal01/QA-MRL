@@ -23,9 +23,10 @@
 #   ./run_full_pipeline.sh --from train_bam_b         # skip to BAM-B training
 #   ./run_full_pipeline.sh --datasets "scifact fiqa"  # subset of datasets
 #   ./run_full_pipeline.sh --from eval                # re-eval only
-#   ./run_full_pipeline.sh --force                    # NLI Bloom on all splits (incl. educational),
-#                                                       overwrite BEIR caches, wipe ckpts, retrain + reselect
-#   FORCE_PIPELINE=1 ./run_full_pipeline.sh         # same as --force (env)
+#   ./run_full_pipeline.sh --force                    # NLI Bloom on every dataset in DATASETS (educational
+#                                                       + each BEIR set): all train/val/test JSONLs,
+#                                                       --overwrite sidecar caches, wipe ckpts, retrain
+#   FORCE_PIPELINE=1 ./run_full_pipeline.sh           # same as --force (env)
 #
 # Requirements:
 #   pip install transformers torch sentence-transformers faiss-gpu pyyaml
@@ -46,8 +47,9 @@ BSR_ALPHA="0.5"
 NLI_MODEL="MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
 NLI_BATCH_SIZE="64"   # reduce to 32 if GPU OOM
 
-# Set to 1 (or pass --force) to: NLI-annotate educational data, --overwrite BEIR NLI caches,
-# remove MRL/BAM-B checkpoints under CKPT_ROOT, and rerun training + best-epoch selection.
+# Set to 1 (or pass --force) to: NLI-annotate every dataset (educational + all BEIR in DATASETS),
+# pass --overwrite on each split so caches match the current NLI_MODEL, clear MRL/BAM-B ckpts,
+# and rerun training + best-epoch selection.
 FORCE="${FORCE_PIPELINE:-0}"
 
 BASE_MRL_CONFIG="configs/mrl_e5large.yaml"
@@ -180,44 +182,51 @@ for DS in $DATASETS; do
     fi
 
     # ── STEP 2: annotate ─────────────────────────────────────────────────────
+    # Same path for every dataset: annotate_bloom_local.py --input per split (train/val/test).
+    # Educational: NLI only when FORCE=1 (otherwise BERT labels + existing cache).
+    # BEIR: always run NLI; with FORCE=1 add --overwrite so a new NLI_MODEL replaces caches.
     if should_run annotate; then
         OVERWRITE_FLAG=()
         [[ "$FORCE" == "1" ]] && OVERWRITE_FLAG=(--overwrite)
 
-        if [[ "$DS" == "educational" ]]; then
-            if [[ "$FORCE" == "1" ]]; then
-                log "[$DS] ANNOTATE — NLI Bloom (train/val/test + cache; matches BEIR pipeline)"
-                echo "  Model: $NLI_MODEL"
-                for EDU_JSONL in \
-                    "$EDU_DATA_DIR/train_curriculum.jsonl" \
-                    "$EDU_DATA_DIR/val.jsonl" \
-                    "$EDU_DATA_DIR/test.jsonl"
-                do
-                    [[ -f "$EDU_JSONL" ]] || die "Missing $EDU_JSONL"
-                    python3 data/annotate_bloom_local.py \
-                        --input      "$EDU_JSONL" \
-                        --model      "$NLI_MODEL" \
-                        --batch_size "$NLI_BATCH_SIZE" \
-                        "${OVERWRITE_FLAG[@]}" \
-                        || die "[$DS] Bloom annotation failed for $EDU_JSONL"
-                done
-                echo "  Educational splits updated — .bloom_cache.json next to each JSONL"
-            else
-                log "[$DS] ANNOTATE — using existing labels/cache (BERT jsonl + .bloom_cache.json)"
-                echo "  Tip: ./run_full_pipeline.sh --force (or FORCE_PIPELINE=1) to re-run NLI with --nli_model"
-            fi
+        if [[ "$DS" == "educational" && "$FORCE" != "1" ]]; then
+            log "[$DS] ANNOTATE — using existing labels/cache (skip NLI unless --force)"
+            echo "  Tip: ./run_full_pipeline.sh --force --nli_model ... to refresh all datasets + ckpts"
         else
-            log "[$DS] ANNOTATE — zero-shot NLI Bloom classification"
+            ANNOTATE_JSONL=()
+            if [[ "$DS" == "educational" ]]; then
+                ANNOTATE_JSONL+=(
+                    "$EDU_DATA_DIR/train_curriculum.jsonl"
+                    "$EDU_DATA_DIR/val.jsonl"
+                    "$EDU_DATA_DIR/test.jsonl"
+                )
+            else
+                for split in train val test; do
+                    p="$BEIR_DATA_ROOT/$DS/${split}.jsonl"
+                    [[ -f "$p" ]] && ANNOTATE_JSONL+=("$p")
+                done
+                if [[ ${#ANNOTATE_JSONL[@]} -eq 0 ]]; then
+                    die "[$DS] No train/val/test.jsonl under $BEIR_DATA_ROOT/$DS — run build first"
+                fi
+            fi
+
+            log "[$DS] ANNOTATE — NLI Bloom (${#ANNOTATE_JSONL[@]} JSONL splits)"
             echo "  Model: $NLI_MODEL"
-            echo "  Fixes: BERT classifier collapses to 82% Remember on keyword queries"
-            python3 data/annotate_bloom_local.py \
-                --beir_root  "$BEIR_DATA_ROOT" \
-                --datasets   "$DS" \
-                --model      "$NLI_MODEL" \
-                --batch_size "$NLI_BATCH_SIZE" \
-                "${OVERWRITE_FLAG[@]}" \
-                || die "[$DS] Bloom annotation failed"
-            echo "  Annotation complete — .bloom_cache.json files written"
+            if [[ "$FORCE" == "1" ]]; then
+                echo "  --overwrite: refresh labels + .bloom_cache.json for this model"
+            elif [[ "$DS" != "educational" ]]; then
+                echo "  Existing per-file cache is reused unless lengths mismatch (use --force to replace)"
+            fi
+            for jsonl in "${ANNOTATE_JSONL[@]}"; do
+                [[ -f "$jsonl" ]] || die "Missing $jsonl"
+                python3 data/annotate_bloom_local.py \
+                    --input      "$jsonl" \
+                    --model      "$NLI_MODEL" \
+                    --batch_size "$NLI_BATCH_SIZE" \
+                    "${OVERWRITE_FLAG[@]}" \
+                    || die "[$DS] Bloom annotation failed for $jsonl"
+            done
+            echo "  Annotation complete for $DS"
         fi
     fi
 
