@@ -80,14 +80,23 @@ training:
     efficiency_uniform_weights: true
     mrl_anchor_weight: 0.0         # 0: MRL anchor reinforces prefix structure — wrong for scatter
     diversity_weight: 0.0          # RouterDiversityLoss is for Option A only
-    mask_sparsity_weight: 1.0      # Strong enforcement of per-level targets
+    mask_sparsity_weight: 1.5      # Stronger enforcement — model drifts ~10% below targets
     mask_level_targets:
-      0: 0.40                      # Remember: ~410 dims
-      1: 0.65                      # Understand: ~666 dims
-      2: 0.38                      # Apply: ~389 dims
-      3: 0.40                      # Analyze: ~410 dims
-      4: 0.65                      # Evaluate: ~666 dims
-      5: 0.38                      # Create: ~389 dims
+      # Cognitively motivated: higher Bloom = more complex query = more dims needed.
+      # Targets set ~10% above desired actual dims to account for observed drift-below-target.
+      # Desired actual (educational results):
+      #   Remember:   ~320 dims  (simple recall — confirmed efficient at 349 already)
+      #   Understand: ~510 dims  (concept explanation — moderate complexity)
+      #   Apply:      ~560 dims  (was 351 → tanked to 0.208; needs 2× more dims)
+      #   Analyze:    ~610 dims  (was 369 → tanked to 0.329; complex relationships)
+      #   Evaluate:   ~690 dims  (evidence weighing — highest IR complexity)
+      #   Create:     ~510 dims  (synthesis — rare in IR, moderate budget)
+      0: 0.35                      # Remember:   ~358 dims  (was 0.40 → actual 349, slight overfit)
+      1: 0.55                      # Understand: ~563 dims  (was 0.65 → actual 688, reduce slightly)
+      2: 0.62                      # Apply:      ~635 dims  (was 0.38 → actual 351 → R@10 tanked)
+      3: 0.68                      # Analyze:    ~696 dims  (was 0.40 → actual 369 → R@10 tanked)
+      4: 0.75                      # Evaluate:   ~768 dims  (no test data; keep generous)
+      5: 0.55                      # Create:     ~563 dims  (was 0.38 → actual 314; n=2 too small)
     mask_diversity_weight: 0.5     # Push masks apart — different dim selection per level
     mask_diversity_margin: 0.0
     mask_variance_weight: 0.3      # Per-dim variance — each dim "owned" by specific levels
