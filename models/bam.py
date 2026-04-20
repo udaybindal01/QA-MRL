@@ -279,9 +279,9 @@ class BloomQueryMaskHead(nn.Module):
         bloom_logits = self.bloom_logit(bloom_labels)             # [B, D]
 
         # Per-query delta (fine, query-specific)
-        # Normalize CLS for scale-stable MLP input
-        cls_normed = F.normalize(cls_token.float(), p=2, dim=-1)  # [B, D]
-        query_delta = self.query_mlp(cls_normed)                  # [B, D]
+        # Cast to bloom_logits dtype (handles fp16 autocast — avoids dtype mismatch)
+        cls_normed = F.normalize(cls_token.to(bloom_logits.dtype), p=2, dim=-1)  # [B, D]
+        query_delta = self.query_mlp(cls_normed)                                 # [B, D]
 
         # Combined logits
         logits = bloom_logits + self.alpha * query_delta          # [B, D]
