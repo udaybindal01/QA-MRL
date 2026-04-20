@@ -58,6 +58,7 @@ REUSE_TRAINED_MODELS="${REUSE_TRAINED_MODELS:-0}"
 
 BASE_MRL_CONFIG="configs/mrl_e5large.yaml"
 BASE_BAM_B_CONFIG="configs/bam_optionb_e5large.yaml"
+BASE_BAM_PQ_CONFIG="configs/bam_pq.yaml"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
@@ -75,7 +76,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$SINGLE_DATASET" ]] && DATASETS="$SINGLE_DATASET"
 
-ALL_STEPS=(build annotate train_mrl find_mrl train_bam_b find_bam_b eval fair_cmp eff_curves)
+ALL_STEPS=(build annotate train_mrl find_mrl train_bam_b find_bam_b train_bam_pq find_bam_pq eval fair_cmp eff_curves)
 
 should_run() {
     local step="$1"
@@ -154,19 +155,23 @@ for DS in $DATASETS; do
 
     MRL_CKPT="$CKPT_ROOT/$DS/mrl"
     BAM_B_CKPT="$CKPT_ROOT/$DS/bam_b"
+    BAM_PQ_CKPT="$CKPT_ROOT/$DS/bam_pq"
     DS_RESULTS="$RESULTS_ROOT/$DS"
     CFG_DIR="$DS_RESULTS/configs"
     MRL_CFG="$CFG_DIR/mrl.yaml"
     BAM_B_CFG="$CFG_DIR/bam_b.yaml"
+    BAM_PQ_CFG="$CFG_DIR/bam_pq.yaml"
     MRL_BEST="$MRL_CKPT/best"
     BAM_B_BEST="$BAM_B_CKPT/best_bsr"
+    BAM_PQ_BEST="$BAM_PQ_CKPT/best_bsr"
 
-    mkdir -p "$MRL_CKPT" "$BAM_B_CKPT" "$DS_RESULTS" "$CFG_DIR"
+    mkdir -p "$MRL_CKPT" "$BAM_B_CKPT" "$BAM_PQ_CKPT" "$DS_RESULTS" "$CFG_DIR"
 
     # ── Always regenerate configs if missing (safe to re-run) ────────────────
     if [[ ! -f "$MRL_CFG" ]]; then
-        make_config "$BASE_MRL_CONFIG"   "$MRL_CFG"   "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$MRL_CKPT/"
-        make_config "$BASE_BAM_B_CONFIG" "$BAM_B_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BAM_B_CKPT/"
+        make_config "$BASE_MRL_CONFIG"    "$MRL_CFG"    "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$MRL_CKPT/"
+        make_config "$BASE_BAM_B_CONFIG"  "$BAM_B_CFG"  "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BAM_B_CKPT/"
+        make_config "$BASE_BAM_PQ_CONFIG" "$BAM_PQ_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BAM_PQ_CKPT/"
     fi
 
     # ── STEP 1: build ────────────────────────────────────────────────────────
@@ -185,8 +190,9 @@ for DS in $DATASETS; do
                     || die "[$DS] build_beir_training_data.py failed"
             fi
         fi
-        make_config "$BASE_MRL_CONFIG"   "$MRL_CFG"   "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$MRL_CKPT/"
-        make_config "$BASE_BAM_B_CONFIG" "$BAM_B_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BAM_B_CKPT/"
+        make_config "$BASE_MRL_CONFIG"    "$MRL_CFG"    "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$MRL_CKPT/"
+        make_config "$BASE_BAM_B_CONFIG"  "$BAM_B_CFG"  "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BAM_B_CKPT/"
+        make_config "$BASE_BAM_PQ_CONFIG" "$BAM_PQ_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BAM_PQ_CKPT/"
     fi
 
     # ── STEP 2: annotate ─────────────────────────────────────────────────────
@@ -295,6 +301,38 @@ for DS in $DATASETS; do
             --output_dir     "$DS_RESULTS/bam_b_bsr/" \
             --alpha          "$BSR_ALPHA" \
             || die "[$DS] BSR selection (BAM-B) failed"
+    fi
+
+    # ── STEP 5b: train_bam_pq ────────────────────────────────────────────────
+    if should_run train_bam_pq; then
+        log "[$DS] TRAIN BAM-PQ (Bloom anchor + per-query MLP residual)"
+        if [[ "$FORCE" == "1" ]] || [[ "$BLOOM_NLI_REFRESHED" == "1" ]]; then
+            rm -rf "$BAM_PQ_CKPT"/epoch_* "$BAM_PQ_CKPT"/inbatch_best "$BAM_PQ_CKPT"/best_bsr "$BAM_PQ_CKPT"/final 2>/dev/null || true
+        fi
+        if [[ "$REUSE_TRAINED_MODELS" == "1" ]] && [[ "$FORCE" != "1" ]] && [[ "$BLOOM_NLI_REFRESHED" != "1" ]] \
+            && { [[ -f "$BAM_PQ_BEST/checkpoint.pt" ]] || ls "$BAM_PQ_CKPT"/epoch_* &>/dev/null 2>&1; }; then
+            echo "  BAM-PQ checkpoint exists — skipping (REUSE_TRAINED_MODELS=1)."
+        else
+            [[ -f "$MRL_BEST/checkpoint.pt" ]] || die "[$DS] MRL best not found — run find_mrl first"
+            python3 scripts/train_bam.py \
+                --config          "$BAM_PQ_CFG" \
+                --init_encoder    "$MRL_BEST" \
+                --checkpoint_dir  "$BAM_PQ_CKPT" \
+                --freeze_encoder \
+                || die "[$DS] BAM-PQ training failed"
+        fi
+    fi
+
+    # ── STEP 6b: find_bam_pq ─────────────────────────────────────────────────
+    if should_run find_bam_pq; then
+        log "[$DS] BSR EPOCH SELECTION — BAM-PQ"
+        mkdir -p "$DS_RESULTS/bam_pq_bsr"
+        python3 scripts/find_best_epoch_bsr.py \
+            --config         "$BAM_PQ_CFG" \
+            --checkpoint_dir "$BAM_PQ_CKPT" \
+            --output_dir     "$DS_RESULTS/bam_pq_bsr/" \
+            --alpha          "$BSR_ALPHA" \
+            || die "[$DS] BSR selection (BAM-PQ) failed"
     fi
 
     # ── STEP 7: eval ─────────────────────────────────────────────────────────

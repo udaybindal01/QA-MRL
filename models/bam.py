@@ -1,7 +1,7 @@
 """
 Bloom-Aligned Matryoshka (BAM) Model v4+.
 
-Two routing modes (config: model.use_mask_routing):
+Three routing modes (config: model.use_mask_routing / model.use_query_delta):
 
   Option A — default (use_mask_routing=False):
     BloomDimRouter: 6 learned scalar params → prefix binary mask via STE.
@@ -9,11 +9,19 @@ Two routing modes (config: model.use_mask_routing):
     Supports soft routing: bloom_probs @ all_dims instead of argmax lookup.
     (set use_soft_bloom_routing=True in config)
 
-  Option B (use_mask_routing=True):
-    BloomMaskHead: 2-layer MLP (CLS + Bloom one-hot → sigmoid) → scattered mask.
-    Active dims are scattered (not prefix-contiguous).
+  Option B (use_mask_routing=True, use_query_delta=False):
+    BloomMaskHead: Embedding(6, D) → Gumbel-Sigmoid + STE → scattered binary mask.
+    One fixed mask per Bloom level. Active dims are scattered (not prefix-contiguous).
     Retrieval: masked_query · full_doc dot product (zero dims are naturally ignored).
-    Needs BloomMaskSparsityLoss + BloomMaskDiversityLoss to prevent all-ones collapse.
+
+  BAM-PQ (use_mask_routing=True, use_query_delta=True):
+    BloomQueryMaskHead: combines Option B with a per-query residual.
+      final_logits = bloom_logit[level] + alpha * query_mlp(cls_token)
+    Bloom component: coarse cognitive-level prior (same as Option B).
+    Query component: lightweight MLP producing fine-grained per-query adjustment.
+    Alpha: learned scalar in [0,1], init≈0.05 — model starts as pure BAM-B and
+           learns to incorporate query-specific information as training stabilizes.
+    All existing losses (sparsity, diversity, query routing div) apply unchanged.
 """
 
 import math
@@ -182,6 +190,135 @@ class BloomMaskHead(nn.Module):
         }
 
 
+class BloomQueryMaskHead(nn.Module):
+    """
+    BAM-PQ: Combined Bloom-level + per-query scattered mask routing.
+
+    Architecture:
+        bloom_logit:  Embedding(6, D)        — coarse cognitive-level prior
+        query_mlp:    Linear(D,H) → GELU → LayerNorm(H) → Linear(H,D)
+                      — fine per-query residual on top of the Bloom base
+        alpha:        sigmoid(alpha_raw) ∈ [0,1]
+                      — learned mixing weight, init≈0.05 → pure Bloom at epoch 0
+
+        final_logits  = bloom_logit[level] + alpha * query_mlp(normalize(cls))
+        mask          = Gumbel-STE(final_logits)   ← same STE logic as BloomMaskHead
+
+    Why this combination works:
+      - Bloom anchor prevents per-query collapse (the chronic failure mode of
+        self-supervised per-query routing with only contrastive loss).
+      - Query MLP output layer zero-initialized → model is identical to BAM-B at
+        epoch 0 and only grows per-query signal if it genuinely helps retrieval.
+      - Alpha sigmoid-bounded to [0,1]: interpretable, stable, auditable.
+        At convergence, alpha tells you "how much does query content matter
+        beyond what the Bloom level already tells you?"
+
+    Sparsity / diversity losses operate on soft_mask identically to BloomMaskHead.
+    The Bloom anchor keeps these losses meaningful even early in training.
+    """
+
+    BLOOM_DIM = 6
+
+    def __init__(
+        self,
+        embedding_dim: int = 768,
+        gumbel_temperature: float = 1.0,
+        level_targets: Optional[dict] = None,
+        dropmask_rate: float = 0.0,
+        query_hidden: int = 256,
+    ):
+        super().__init__()
+        self.EMBEDDING_DIM = embedding_dim
+        self.gumbel_temperature = gumbel_temperature
+        self.dropmask_rate = dropmask_rate
+
+        # ── Bloom component (identical init to BloomMaskHead) ─────────────────
+        self.bloom_logit = nn.Embedding(self.BLOOM_DIM, embedding_dim)
+
+        # ── Per-query delta MLP ───────────────────────────────────────────────
+        self.query_mlp = nn.Sequential(
+            nn.Linear(embedding_dim, query_hidden),
+            nn.GELU(),
+            nn.LayerNorm(query_hidden),
+            nn.Linear(query_hidden, embedding_dim),
+        )
+
+        # ── Mixing weight: sigmoid(-3) ≈ 0.047 → nearly pure Bloom at init ──
+        self.alpha_raw = nn.Parameter(torch.full((1,), -3.0))
+
+        with torch.no_grad():
+            # Bloom logit init: same Gaussian-quantile calibration as BloomMaskHead
+            if level_targets:
+                for b in range(self.BLOOM_DIM):
+                    f = level_targets.get(b, 0.46)
+                    f = max(1e-4, min(1.0 - 1e-4, f))
+                    mu = (torch.erfinv(torch.tensor(2.0 * f - 1.0)) * math.sqrt(2)).item()
+                    nn.init.normal_(self.bloom_logit.weight[b], mean=mu, std=1.0)
+            else:
+                nn.init.normal_(self.bloom_logit.weight, mean=-0.100, std=1.0)
+
+            # Zero-init query MLP output layer: delta starts silent (pure Bloom).
+            # Gradient signal will grow alpha and the MLP if per-query adjustment helps.
+            nn.init.zeros_(self.query_mlp[3].weight)
+            nn.init.zeros_(self.query_mlp[3].bias)
+
+    @property
+    def alpha(self) -> torch.Tensor:
+        """Mixing weight in [0, 1]. Logged each epoch for interpretability."""
+        return torch.sigmoid(self.alpha_raw)
+
+    def set_temperature(self, temperature: float):
+        self.gumbel_temperature = max(temperature, 1e-3)
+
+    def forward(
+        self,
+        cls_token: torch.Tensor,     # [B, D] unnormalized CLS from encoder
+        bloom_labels: torch.Tensor,  # [B] int 0-indexed Bloom levels
+    ) -> Dict[str, torch.Tensor]:
+        # Bloom base logits (coarse, level-specific)
+        bloom_logits = self.bloom_logit(bloom_labels)             # [B, D]
+
+        # Per-query delta (fine, query-specific)
+        # Normalize CLS for scale-stable MLP input
+        cls_normed = F.normalize(cls_token.float(), p=2, dim=-1)  # [B, D]
+        query_delta = self.query_mlp(cls_normed)                  # [B, D]
+
+        # Combined logits
+        logits = bloom_logits + self.alpha * query_delta          # [B, D]
+
+        if self.training:
+            U = torch.rand_like(logits).clamp(min=1e-10, max=1.0 - 1e-10)
+            gumbel_noise = -torch.log(-torch.log(U))
+            soft_mask = torch.sigmoid(
+                (logits + gumbel_noise) / self.gumbel_temperature
+            )
+            hard_mask = (soft_mask > 0.5).float()
+            mask = hard_mask + (soft_mask - soft_mask.detach())   # STE
+
+            if self.dropmask_rate > 0.0:
+                on_flip  = (hard_mask == 1) & (torch.rand_like(hard_mask) < self.dropmask_rate)
+                off_flip = (hard_mask == 0) & (torch.rand_like(hard_mask) < self.dropmask_rate)
+                aug = hard_mask.clone()
+                aug[on_flip]  = 0.0
+                aug[off_flip] = 1.0
+                mask = aug + (soft_mask - soft_mask.detach())
+
+            clean_sigmoid = torch.sigmoid(logits)
+        else:
+            soft_mask    = torch.sigmoid(logits)
+            clean_sigmoid = soft_mask
+            hard_mask    = (logits > 0).float()
+            mask         = hard_mask
+
+        return {
+            "mask":         mask,
+            "soft_mask":    soft_mask,
+            "clean_sigmoid": clean_sigmoid,
+            "active_dims":  hard_mask.sum(dim=-1),   # [B]
+            "alpha":        self.alpha.item(),        # scalar — logged for interpretability
+        }
+
+
 class BloomDimRouter(nn.Module):
     """
     Option A: Learns one truncation dimension per Bloom level via independent MLP heads.
@@ -324,22 +461,32 @@ class BloomAlignedMRL(nn.Module):
         )
 
         self.use_mask_routing = mc.get("use_mask_routing", False)
+        self.use_query_delta  = mc.get("use_query_delta", False)   # BAM-PQ
         self.use_soft_bloom_routing = mc.get("use_soft_bloom_routing", False)
 
         if self.use_mask_routing:
-            # Option B: scattered mask head — bloom_router not needed
             lc = config.get("training", {}).get("loss", {})
             level_targets_cfg = lc.get("mask_level_targets", None)
             level_targets = (
                 {int(k): float(v) for k, v in level_targets_cfg.items()}
                 if level_targets_cfg else None
             )
-            self.bloom_mask_head = BloomMaskHead(
-                sparsity_target=mc.get("mask_sparsity_target", None),
-                level_targets=level_targets,
-                embedding_dim=mc["embedding_dim"],
-                dropmask_rate=lc.get("dropmask_rate", 0.0),
-            )
+            if self.use_query_delta:
+                # BAM-PQ: Bloom anchor + per-query MLP residual
+                self.bloom_mask_head = BloomQueryMaskHead(
+                    embedding_dim=mc["embedding_dim"],
+                    level_targets=level_targets,
+                    dropmask_rate=lc.get("dropmask_rate", 0.0),
+                    query_hidden=mc.get("query_delta_hidden", 256),
+                )
+            else:
+                # Option B: pure Bloom scattered mask
+                self.bloom_mask_head = BloomMaskHead(
+                    sparsity_target=mc.get("mask_sparsity_target", None),
+                    level_targets=level_targets,
+                    embedding_dim=mc["embedding_dim"],
+                    dropmask_rate=lc.get("dropmask_rate", 0.0),
+                )
         else:
             # Option A: prefix router
             self.bloom_router = BloomDimRouter(embedding_dim=mc["embedding_dim"])
@@ -377,20 +524,24 @@ class BloomAlignedMRL(nn.Module):
         full_emb = enc["full"]  # [B, 768] normalized
 
         if self.use_mask_routing:
-            # Option B: scattered soft mask from BloomMaskHead
-            cls_token = enc["hidden_states"][:, 0, :]  # [B, 768] unnormalized CLS
+            # Option B / BAM-PQ: scattered mask from BloomMaskHead or BloomQueryMaskHead
+            cls_token = enc["hidden_states"][:, 0, :]  # [B, D] unnormalized CLS
             head_out = self.bloom_mask_head(cls_token, bloom_labels)
             mask = head_out["mask"]
             masked_emb = F.normalize(full_emb * mask, p=2, dim=-1)
-            return {
-                "full_embedding": full_emb,
+            out = {
+                "full_embedding":  full_emb,
                 "masked_embedding": masked_emb,
-                "mask": mask,
-                "soft_mask": head_out["soft_mask"],
-                "clean_sigmoid": head_out["clean_sigmoid"],
-                "active_dims": head_out["active_dims"],
-                # No continuous_dim/discrete_dim — scattered mask has no prefix dim
+                "mask":            mask,
+                "soft_mask":       head_out["soft_mask"],
+                "clean_sigmoid":   head_out["clean_sigmoid"],
+                "active_dims":     head_out["active_dims"],
             }
+            # BAM-PQ only: log alpha so trainer can track how much per-query
+            # signal is being used vs the Bloom anchor
+            if "alpha" in head_out:
+                out["query_delta_alpha"] = head_out["alpha"]
+            return out
         else:
             # Option A: prefix mask from BloomDimRouter
             if self.use_soft_bloom_routing and bloom_probs is None:
@@ -453,13 +604,15 @@ class BloomAlignedMRL(nn.Module):
         if "bloom_probs" in q:
             result["bloom_probs"] = q["bloom_probs"]
 
-        # Option B outputs
+        # Option B / BAM-PQ outputs
         if "soft_mask" in q:
             result["soft_mask"] = q["soft_mask"]
         if "clean_sigmoid" in q:
             result["clean_sigmoid"] = q["clean_sigmoid"]
         if "active_dims" in q:
             result["active_dims"] = q["active_dims"]
+        if "query_delta_alpha" in q:
+            result["query_delta_alpha"] = q["query_delta_alpha"]
 
         if negative_input_ids is not None:
             B, N, L = negative_input_ids.shape
@@ -478,6 +631,8 @@ class BloomAlignedMRL(nn.Module):
         # Only include params for the active routing mode — the other router is not
         # used in forward() and including it causes AdamW weight decay on dead params.
         if self.use_mask_routing:
+            # Both BAM-B and BAM-PQ: all bloom_mask_head params at router_lr.
+            # For BAM-PQ this includes bloom_logit + query_mlp + alpha_raw.
             routing_params = list(self.bloom_mask_head.parameters())
         else:
             routing_params = list(self.bloom_router.parameters())

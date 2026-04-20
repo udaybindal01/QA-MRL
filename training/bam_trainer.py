@@ -303,6 +303,11 @@ class BAMTrainer:
             loss = loss / self.grad_accum
 
         self.scaler.scale(loss).backward()
+
+        # BAM-PQ: log learned alpha (how much per-query delta contributes)
+        if "query_delta_alpha" in outputs:
+            loss_dict["query_delta_alpha"] = outputs["query_delta_alpha"]
+
         return loss_dict
 
     def _train_step_pcgrad(self, batch, bloom_label):
@@ -356,7 +361,8 @@ class BAMTrainer:
         self.model.train()
         meters = {
             k: AverageMeter()
-            for k in ["total", "contrastive", "efficiency", "mrl_anchor", "avg_dim"]
+            for k in ["total", "contrastive", "efficiency", "mrl_anchor", "avg_dim",
+                      "query_delta_alpha"]
         }
 
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}")
@@ -399,10 +405,10 @@ class BAMTrainer:
                     self.save_checkpoint(f"step_{self.state.global_step}")
 
             dim_str = f"{meters['avg_dim'].avg:.0f}" if meters["avg_dim"].count else "N/A"
-            pbar.set_postfix(
-                loss=f"{meters['total'].avg:.4f}",
-                dim=dim_str,
-            )
+            postfix = {"loss": f"{meters['total'].avg:.4f}", "dim": dim_str}
+            if meters["query_delta_alpha"].count:
+                postfix["alpha"] = f"{meters['query_delta_alpha'].avg:.3f}"
+            pbar.set_postfix(**postfix)
 
     @torch.no_grad()
     def validate(self):
