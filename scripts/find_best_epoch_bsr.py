@@ -78,29 +78,42 @@ def compute_bsr(metrics: dict, cw: list, alpha: float):
     """
     Compute BSR from evaluator metrics dict.
 
+    Levels with 0 test queries are skipped (evaluator omits their keys).
+    Weights are renormalised over present levels so BSR stays in the same range.
+
     Returns (bsr, quality, efficiency, per_bloom_r10, per_bloom_dim).
-    Returns None if per-bloom metrics are missing.
+    per_bloom_r10/dim are full 6-element lists with None for absent levels.
+    Returns None only if NO level metrics exist at all.
     """
     per_bloom_r10 = []
     per_bloom_dim = []
+    present = []   # indices of levels that have test queries
 
-    for name in BLOOM_NAMES:
+    for b, name in enumerate(BLOOM_NAMES):
         r10_key = f"bloom_{name}_recall@10"
         dim_key = f"bloom_{name}_avg_dim"
-        if r10_key not in metrics or dim_key not in metrics:
-            return None
-        per_bloom_r10.append(metrics[r10_key])
-        per_bloom_dim.append(metrics[dim_key])
+        if r10_key in metrics and dim_key in metrics:
+            per_bloom_r10.append(metrics[r10_key])
+            per_bloom_dim.append(metrics[dim_key])
+            present.append(b)
+        else:
+            per_bloom_r10.append(None)
+            per_bloom_dim.append(None)
+
+    if not present:
+        return None
 
     cog = cognitive_weights()
-    cog_sum = sum(cog)
 
-    # Quality: class-weighted R@10
-    quality = sum(cw[b] * per_bloom_r10[b] for b in range(6))
+    # Renormalise class weights and cognitive weights over present levels only
+    cw_sum  = sum(cw[b]  for b in present)
+    cog_sum = sum(cog[b] for b in present)
 
-    # Efficiency: cognitive-weighted compression, normalised to [0, 1]
+    quality = sum(
+        (cw[b] / cw_sum) * per_bloom_r10[b] for b in present
+    )
     efficiency = sum(
-        cog[b] * (1.0 - per_bloom_dim[b] / EMBEDDING_DIM) for b in range(6)
+        cog[b] * (1.0 - per_bloom_dim[b] / EMBEDDING_DIM) for b in present
     ) / cog_sum
 
     bsr = quality * (1.0 + alpha * efficiency)
@@ -217,9 +230,10 @@ def main():
             print(f"{name:10s}  [missing per-bloom metrics — skipping]")
         else:
             bsr, quality, efficiency, r10s, dims = bsr_out
-            avg_dim = sum(dims) / len(dims)
+            present_dims = [d for d in dims if d is not None]
+            avg_dim = sum(present_dims) / len(present_dims) if present_dims else 0
             warmup_tag = " [W]" if is_warmup else "    "
-            r10_str = "  ".join(f"{r:>6.4f}" for r in r10s)
+            r10_str = "  ".join(f"{r:>6.4f}" if r is not None else f"{'—':>6s}" for r in r10s)
             print(f"{name:10s} {bsr:>7.4f} {quality:>8.4f} {efficiency:>11.4f}  "
                   f"{r10_str}  {avg_dim:>7.0f}{warmup_tag}")
 
@@ -254,8 +268,11 @@ def main():
         print(f"  Efficiency (cognitive-weighted compression): {efficiency:.4f}")
         print(f"  Per-Bloom breakdown:")
         for b, bloom_name in enumerate(BLOOM_NAMES):
-            print(f"    {bloom_name:12s}: R@10={r10s[b]:.4f}  dim={dims[b]:.0f}  "
-                  f"class_w={cw[b]:.3f}  cog={cog[b]:.3f}")
+            if r10s[b] is None:
+                print(f"    {bloom_name:12s}: (no test queries — skipped)")
+            else:
+                print(f"    {bloom_name:12s}: R@10={r10s[b]:.4f}  dim={dims[b]:.0f}  "
+                      f"class_w={cw[b]:.3f}  cog={cog[b]:.3f}")
 
     # Copy best checkpoint
     best_dest = os.path.join(args.checkpoint_dir, "best_bsr")
