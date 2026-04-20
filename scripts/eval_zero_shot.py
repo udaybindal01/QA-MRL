@@ -142,6 +142,9 @@ def load_beir_dataset(dataset_name: str, split: str = "test",
                 if attempt == 2:
                     return None, None, None, False
 
+    if corpus is None or queries is None or qrels is None:
+        return None, None, None, False
+
     truncated = False
     if max_corpus_size and len(corpus) > max_corpus_size:
         print(f"  Corpus has {len(corpus):,} docs — truncating to {max_corpus_size:,} "
