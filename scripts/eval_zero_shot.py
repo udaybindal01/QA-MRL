@@ -147,6 +147,7 @@ def load_beir_dataset(dataset_name: str, split: str = "test",
         print(f"  Corpus has {len(corpus):,} docs — truncating to {max_corpus_size:,} "
               f"(set --max_corpus_size 0 to disable)")
         # Keep all docs that appear in qrels first, then fill with random
+        assert qrels is not None
         relevant_ids = set()
         for rel_dict in qrels.values():
             relevant_ids.update(rel_dict.keys())
