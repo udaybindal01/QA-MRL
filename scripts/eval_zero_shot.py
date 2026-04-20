@@ -11,6 +11,13 @@ Models evaluated:
 
 Metrics: R@1, R@5, R@10, NDCG@10 — overall and stratified by Bloom level.
 
+Memory handling:
+  - qrels stored as sparse dicts (not dense arrays) — essential for large corpora
+  - corpus embeddings stored as float16 (half memory)
+  - retrieval done in chunks so full corpus never needs to be in GPU VRAM
+  - BAM-B uses per-level FAISS indices (6 unique masks × 1 FAISS build each)
+  - --max_corpus_size caps very large corpora (default 500k; climate-fever has 5.4M)
+
 Usage:
     python scripts/eval_zero_shot.py \
         --mrl_checkpoint /tmp/multi-domain/educational/mrl/best/ \
@@ -19,10 +26,6 @@ Usage:
         --bam_b_config     results/multi_domain/educational/configs/bam_b.yaml \
         --datasets trec-covid scidocs climate-fever \
         --output_dir results/zero_shot/
-
-    # Optional BAM-A
-        --bam_a_checkpoint /tmp/multi-domain/educational/bam_a/best_bsr/ \
-        --bam_a_config     results/multi_domain/educational/configs/bam_a.yaml \
 """
 
 import argparse
@@ -53,7 +56,6 @@ except ImportError:
 BLOOM_NAMES = {0: "Remember", 1: "Understand", 2: "Apply",
                3: "Analyze",  4: "Evaluate",   5: "Create"}
 
-# Standard BEIR datasets for zero-shot transfer
 ZERO_SHOT_DATASETS = ["trec-covid", "scidocs", "climate-fever"]
 
 
@@ -91,42 +93,74 @@ def load_bam_model(config, ckpt_path, device):
 
 # ─────────────────────── BEIR dataset loading ────────────────────────────────
 
-def load_beir_dataset(dataset_name: str, split: str = "test"):
-    """Returns (corpus, queries, qrels) dicts in BEIR format."""
+def load_beir_dataset(dataset_name: str, split: str = "test",
+                      max_corpus_size: Optional[int] = None):
+    """Returns (corpus, queries, qrels, truncated_flag) in BEIR format."""
+    corpus, queries, qrels = None, None, None
+
     try:
         from beir import util as beir_util
         from beir.datasets.data_loader import GenericDataLoader
-
         data_path = os.path.join("data/beir", dataset_name)
         if not os.path.exists(data_path):
             url = (f"https://public.ukp.informatik.tu-darmstadt.de/"
                    f"thakur/BEIR/datasets/{dataset_name}.zip")
             print(f"  Downloading {dataset_name} ...")
             beir_util.download_and_unzip(url, "data/beir")
-
         corpus, queries, qrels = GenericDataLoader(data_path).load(split=split)
-        return corpus, queries, qrels
-
     except ImportError:
-        from datasets import load_dataset
-        print(f"  Loading {dataset_name} from HuggingFace datasets ...")
-        try:
-            corpus_ds = load_dataset(f"BeIR/{dataset_name}", "corpus", split="corpus")
-            corpus = {r["_id"]: {"title": r.get("title", ""), "text": r.get("text", "")}
-                      for r in corpus_ds}
+        pass
+    except Exception as exc:
+        print(f"  beir library failed ({exc}), falling back to HuggingFace ...")
 
-            queries_ds = load_dataset(f"BeIR/{dataset_name}", "queries", split="queries")
-            queries = {r["_id"]: r.get("text", "") for r in queries_ds}
+    if corpus is None:
+        for attempt in range(3):
+            try:
+                from datasets import load_dataset
+                print(f"  Loading {dataset_name} from HuggingFace (attempt {attempt+1}) ...")
+                corpus_ds = load_dataset(
+                    f"BeIR/{dataset_name}", "corpus", split="corpus",
+                    trust_remote_code=True)
+                corpus = {r["_id"]: {"title": r.get("title", ""),
+                                      "text":  r.get("text",  "")}
+                          for r in corpus_ds}
+                queries_ds = load_dataset(
+                    f"BeIR/{dataset_name}", "queries", split="queries",
+                    trust_remote_code=True)
+                queries = {r["_id"]: r.get("text", "") for r in queries_ds}
 
-            qrels_ds = load_dataset(f"BeIR/{dataset_name}-qrels", split=split)
-            qrels: Dict[str, Dict[str, int]] = defaultdict(dict)
-            for r in qrels_ds:
-                qrels[str(r["query-id"])][str(r["corpus-id"])] = int(r["score"])
-            return corpus, queries, dict(qrels)
+                qrels_ds = load_dataset(
+                    f"BeIR/{dataset_name}-qrels", split=split,
+                    trust_remote_code=True)
+                qrels_raw: Dict[str, Dict[str, int]] = defaultdict(dict)
+                for r in qrels_ds:
+                    qrels_raw[str(r["query-id"])][str(r["corpus-id"])] = int(r["score"])
+                qrels = dict(qrels_raw)
+                break
+            except Exception as exc2:
+                print(f"  HuggingFace attempt {attempt+1} failed: {exc2}")
+                if attempt == 2:
+                    return None, None, None, False
 
-        except Exception as exc:
-            print(f"  FAILED to load {dataset_name}: {exc}")
-            return None, None, None
+    truncated = False
+    if max_corpus_size and len(corpus) > max_corpus_size:
+        print(f"  Corpus has {len(corpus):,} docs — truncating to {max_corpus_size:,} "
+              f"(set --max_corpus_size 0 to disable)")
+        # Keep all docs that appear in qrels first, then fill with random
+        relevant_ids = set()
+        for rel_dict in qrels.values():
+            relevant_ids.update(rel_dict.keys())
+        kept = list(relevant_ids & set(corpus.keys()))
+        all_ids = list(corpus.keys())
+        remaining = [cid for cid in all_ids if cid not in relevant_ids]
+        np.random.shuffle(remaining)
+        kept += remaining[:max(0, max_corpus_size - len(kept))]
+        corpus = {cid: corpus[cid] for cid in kept[:max_corpus_size]}
+        truncated = True
+        print(f"  Truncated corpus: {len(corpus):,} docs "
+              f"(includes all {len(relevant_ids):,} relevant docs)")
+
+    return corpus, queries, qrels, truncated
 
 
 # ─────────────────────── Bloom annotation ────────────────────────────────────
@@ -134,10 +168,6 @@ def load_beir_dataset(dataset_name: str, split: str = "test"):
 def annotate_bloom_nli(query_texts: List[str], device,
                        model_name: str = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
                        batch_size: int = 32) -> List[int]:
-    """
-    Classify queries into Bloom levels (0-indexed, 0=Remember…5=Create)
-    using zero-shot NLI entailment.
-    """
     from transformers import pipeline
 
     HYPOTHESES = [
@@ -149,8 +179,7 @@ def annotate_bloom_nli(query_texts: List[str], device,
         "This query is asking to design, propose, or synthesize something new.",
     ]
 
-    print(f"  Annotating {len(query_texts)} queries with NLI Bloom classifier "
-          f"({model_name}) ...")
+    print(f"  Annotating {len(query_texts)} queries with NLI Bloom classifier ...")
     classifier = pipeline(
         "zero-shot-classification",
         model=model_name,
@@ -167,8 +196,7 @@ def annotate_bloom_nli(query_texts: List[str], device,
             results = [results]
         for r in results:
             best_hyp = r["labels"][0]
-            idx = HYPOTHESES.index(best_hyp)
-            labels.append(idx)
+            labels.append(HYPOTHESES.index(best_hyp))
 
     dist = Counter(labels)
     print("  Bloom distribution:")
@@ -184,243 +212,261 @@ def annotate_bloom_nli(query_texts: List[str], device,
 # ─────────────────────── Encoding ────────────────────────────────────────────
 
 @torch.no_grad()
-def encode_corpus(model, corpus_texts: List[str], tokenizer, device,
-                  batch_size: int = 128) -> np.ndarray:
+def encode_texts_to_array(model, texts: List[str], tokenizer, device,
+                           is_query: bool = False,
+                           bloom_labels: Optional[List[int]] = None,
+                           batch_size: int = 128) -> np.ndarray:
+    """Encode texts → float16 numpy array. Keeps full embedding dim."""
     all_embs = []
-    for i in tqdm(range(0, len(corpus_texts), batch_size),
-                  desc="  corpus", leave=False):
-        batch = corpus_texts[i: i + batch_size]
+    for i in tqdm(range(0, len(texts), batch_size),
+                  desc="  queries" if is_query else "  corpus", leave=False):
+        batch = texts[i: i + batch_size]
         enc = tokenizer(batch, padding=True, truncation=True,
-                        max_length=256, return_tensors="pt")
+                        max_length=128 if is_query else 256,
+                        return_tensors="pt")
         enc = {k: v.to(device) for k, v in enc.items()}
 
-        if hasattr(model, "encode_documents"):
+        if is_query and hasattr(model, "encode_queries"):
+            kwargs = dict(input_ids=enc["input_ids"],
+                          attention_mask=enc["attention_mask"])
+            if bloom_labels is not None:
+                bl = bloom_labels[i: i + batch_size]
+                kwargs["bloom_labels"] = torch.tensor(bl, dtype=torch.long, device=device)
+            out = model.encode_queries(**kwargs)
+            emb = out.get("full_embedding", out.get("masked_embedding"))
+        elif not is_query and hasattr(model, "encode_documents"):
             out = model.encode_documents(enc["input_ids"], enc["attention_mask"])
             emb = out["masked_embedding"]
         else:
             out = model(enc["input_ids"], enc["attention_mask"])
             emb = out["full"]
 
-        all_embs.append(emb.cpu().float().numpy())
+        all_embs.append(emb.cpu().half().numpy())   # float16 — halves memory
+
     return np.concatenate(all_embs, axis=0)
 
 
-@torch.no_grad()
-def encode_queries_mrl(model, query_texts: List[str], tokenizer, device,
-                        batch_size: int = 64) -> np.ndarray:
-    all_embs = []
-    for i in tqdm(range(0, len(query_texts), batch_size),
-                  desc="  queries-mrl", leave=False):
-        batch = query_texts[i: i + batch_size]
-        enc = tokenizer(batch, padding=True, truncation=True,
-                        max_length=128, return_tensors="pt")
-        enc = {k: v.to(device) for k, v in enc.items()}
-        out = model(enc["input_ids"], enc["attention_mask"])
-        all_embs.append(out["full"].cpu().float().numpy())
-    return np.concatenate(all_embs, axis=0)
+# ─────────────────────── FAISS index helpers ─────────────────────────────────
 
-
-@torch.no_grad()
-def encode_queries_bam(model, query_texts: List[str], bloom_labels_0idx: List[int],
-                        tokenizer, device, batch_size: int = 64):
-    """
-    Returns (full_embs, masks, active_dims, is_prefix).
-
-    is_prefix=True  → Option A (discrete dim), use prefix truncation at retrieval.
-    is_prefix=False → Option B (scattered binary mask), apply mask at retrieval.
-    """
-    all_full, all_masks, all_active, all_dims = [], [], [], []
-    for i in tqdm(range(0, len(query_texts), batch_size),
-                  desc="  queries-bam", leave=False):
-        batch_texts = query_texts[i: i + batch_size]
-        batch_bloom = bloom_labels_0idx[i: i + batch_size]
-
-        enc = tokenizer(batch_texts, padding=True, truncation=True,
-                        max_length=128, return_tensors="pt")
-        enc = {k: v.to(device) for k, v in enc.items()}
-        bloom_t = torch.tensor(batch_bloom, dtype=torch.long, device=device)
-
-        out = model.encode_queries(enc["input_ids"], enc["attention_mask"],
-                                   bloom_labels=bloom_t)
-
-        full = out.get("full_embedding", out.get("masked_embedding"))
-        all_full.append(full.cpu().float().numpy())
-
-        if "mask" in out:
-            hard = (out["mask"] > 0.5).float()
-            all_masks.append(hard.cpu().float().numpy())
-            all_active.append(hard.sum(dim=-1).cpu().float().numpy())
-        if "discrete_dim" in out:
-            all_dims.append(out["discrete_dim"].cpu().float().numpy())
-
-    full_embs = np.concatenate(all_full, axis=0)
-    masks = np.concatenate(all_masks, axis=0) if all_masks else None
-    active = np.concatenate(all_active, axis=0) if all_active else None
-    dims = np.concatenate(all_dims, axis=0) if all_dims else None
-    is_prefix = (dims is not None and masks is None)
-    return full_embs, masks, active, dims, is_prefix
-
-
-# ─────────────────────── Retrieval ───────────────────────────────────────────
-
-def _build_index(corpus_embs: np.ndarray):
-    embs = np.ascontiguousarray(corpus_embs.astype(np.float32))
+def _build_faiss(embs_f16: np.ndarray) -> object:
+    """Build FAISS IndexFlatIP from float16 array (cast to float32 internally)."""
+    embs_f32 = np.ascontiguousarray(embs_f16.astype(np.float32))
     if HAS_FAISS:
-        idx = faiss.IndexFlatIP(embs.shape[1])
-        idx.add(embs)
+        idx = faiss.IndexFlatIP(embs_f32.shape[1])
+        idx.add(embs_f32)
         return ("faiss", idx)
-    return ("numpy", embs)
+    return ("numpy", embs_f32)
 
 
-def _search(index_tuple, query_embs: np.ndarray, k: int) -> np.ndarray:
+def _search_index(index_tuple, q_f32: np.ndarray, k: int) -> np.ndarray:
     kind, idx = index_tuple
-    q = np.ascontiguousarray(query_embs.astype(np.float32))
+    q = np.ascontiguousarray(q_f32.astype(np.float32))
     if kind == "faiss":
         _, I = idx.search(q, k)
         return I
-    # numpy fallback
+    # numpy fallback (chunked to avoid RAM spike)
+    c = torch.from_numpy(idx)
     q_t = torch.from_numpy(q)
-    c_t = torch.from_numpy(idx)
-    all_idx = []
+    out = []
     for i in range(0, len(q_t), 256):
-        sim = q_t[i: i + 256] @ c_t.T
-        all_idx.append(sim.topk(k, dim=-1).indices.numpy())
-    return np.concatenate(all_idx, axis=0)
+        sim = q_t[i: i + 256] @ c.T
+        out.append(sim.topk(k, dim=-1).indices.numpy())
+    return np.concatenate(out, axis=0)
 
 
-def retrieve_mrl(q_embs_full: np.ndarray, c_embs_full: np.ndarray,
-                 dim: int, k: int = 100) -> np.ndarray:
-    """Retrieve using prefix-truncated MRL embeddings."""
-    d = min(dim, q_embs_full.shape[1])
-    q = q_embs_full[:, :d]
-    c = c_embs_full[:, :d]
-    # L2-normalize
-    q_n = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-9)
-    c_n = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-9)
-    idx = _build_index(c_n)
-    return _search(idx, q_n, k)
+def _norm(x: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(x.astype(np.float32), axis=1, keepdims=True)
+    return (x.astype(np.float32) / (norms + 1e-9))
 
 
-def retrieve_bam_scattered(q_full: np.ndarray, masks: np.ndarray,
-                            c_full: np.ndarray, k: int = 100) -> np.ndarray:
+# ─────────────────────── MRL retrieval ───────────────────────────────────────
+
+def retrieve_mrl_dims(q_embs_f16: np.ndarray, c_embs_f16: np.ndarray,
+                      dims: List[int], k: int = 100) -> Dict[int, np.ndarray]:
+    """Build one FAISS per dim and return {dim: topk_indices}."""
+    results = {}
+    for d in dims:
+        d = min(d, q_embs_f16.shape[1])
+        q_n = _norm(q_embs_f16[:, :d])
+        c_n = _norm(c_embs_f16[:, :d])
+        idx = _build_faiss(c_n)
+        results[d] = _search_index(idx, q_n, k)
+        del idx
+    return results
+
+
+# ─────────────────────── BAM retrieval ───────────────────────────────────────
+
+@torch.no_grad()
+def extract_level_masks(bam_model, embedding_dim: int, device) -> Dict[int, np.ndarray]:
     """
-    Option B: each query gets its own scattered mask applied to both query and corpus.
-    Because the mask varies per query we do per-query retrieval (no global index).
+    Extract the hard binary mask for each Bloom level (0-5).
+    BAM-B has 6 unique masks — one per level. We get them by passing a dummy query
+    with each bloom_label; the mask depends only on the label, not the query text.
     """
-    N = len(q_full)
-    C = len(c_full)
+    masks = {}
+    dummy_ids  = torch.zeros(1, 4, dtype=torch.long, device=device)
+    dummy_mask = torch.ones(1, 4, dtype=torch.long, device=device)
+    for level in range(6):
+        bloom_t = torch.tensor([level], dtype=torch.long, device=device)
+        out = bam_model.encode_queries(dummy_ids, dummy_mask, bloom_labels=bloom_t)
+        if "mask" in out:
+            hard = (out["mask"] > 0.5).float().squeeze(0).cpu().numpy()
+            masks[level] = hard
+        elif "discrete_dim" in out:
+            # Option A — prefix mask: active dims = first d dims
+            d = int(out["discrete_dim"].item())
+            hard = np.zeros(embedding_dim, dtype=np.float32)
+            hard[:d] = 1.0
+            masks[level] = hard
+    return masks
+
+
+def retrieve_bam_scattered(q_full_f16: np.ndarray,
+                            bam_q_bloom: np.ndarray,
+                            level_masks: Dict[int, np.ndarray],
+                            c_full_f16: np.ndarray,
+                            k: int = 100) -> np.ndarray:
+    """
+    Per-level FAISS retrieval for BAM-B scattered mask.
+    Builds 6 indexed corpus variants (one per level mask) and routes each query.
+    """
+    N = len(q_full_f16)
     all_topk = np.zeros((N, k), dtype=np.int64)
 
-    c_t = torch.from_numpy(c_full.astype(np.float32))
-    for i in tqdm(range(N), desc="  BAM-B retrieval", leave=False):
-        m = torch.from_numpy(masks[i].astype(np.float32))  # [D]
-        q_v = torch.from_numpy(q_full[i].astype(np.float32)) * m  # [D]
-        q_v = F.normalize(q_v.unsqueeze(0), p=2, dim=-1)
-        c_v = F.normalize(c_t * m.unsqueeze(0), p=2, dim=-1)
-        sim = (q_v @ c_v.T).squeeze(0)
-        all_topk[i] = sim.topk(min(k, C), dim=-1).indices.numpy()
+    # Build one FAISS index per level (only for levels that appear in queries)
+    present_levels = set(bam_q_bloom.tolist())
+    level_indices = {}
+    for lev in present_levels:
+        if lev not in level_masks:
+            continue
+        m = level_masks[lev].astype(np.float32)              # [D]
+        c_masked = c_full_f16.astype(np.float32) * m[None, :]
+        c_norm   = _norm(c_masked)
+        level_indices[lev] = _build_index_obj(c_norm)
+        print(f"    Level {BLOOM_NAMES.get(lev, lev)}: "
+              f"active_dims={int(m.sum())}  corpus indexed")
+
+    # Query routing
+    for lev in present_levels:
+        if lev not in level_indices:
+            continue
+        qmask = bam_q_bloom == lev
+        q_idx = np.where(qmask)[0]
+        m = level_masks[lev].astype(np.float32)
+        q_masked = q_full_f16[q_idx].astype(np.float32) * m[None, :]
+        q_norm   = _norm(q_masked)
+        topk = _search_index(level_indices[lev], q_norm, k)
+        all_topk[q_idx] = topk
+
     return all_topk
 
 
-def retrieve_bam_prefix(q_full: np.ndarray, dims: np.ndarray,
-                         c_full: np.ndarray, k: int = 100) -> np.ndarray:
-    """Option A: per-query prefix truncation."""
-    N = len(q_full)
-    C = len(c_full)
+def _build_index_obj(c_norm: np.ndarray):
+    """Alias for _build_faiss that accepts pre-normalised float32 array."""
+    c_f32 = np.ascontiguousarray(c_norm.astype(np.float32))
+    if HAS_FAISS:
+        idx = faiss.IndexFlatIP(c_f32.shape[1])
+        idx.add(c_f32)
+        return ("faiss", idx)
+    return ("numpy", c_f32)
+
+
+def retrieve_bam_prefix(q_full_f16: np.ndarray,
+                         bam_q_bloom: np.ndarray,
+                         level_masks: Dict[int, np.ndarray],
+                         c_full_f16: np.ndarray,
+                         k: int = 100) -> np.ndarray:
+    """Option A: prefix truncation using per-level discrete dim."""
+    N = len(q_full_f16)
     all_topk = np.zeros((N, k), dtype=np.int64)
-    c_t = torch.from_numpy(c_full.astype(np.float32))
-    for i in tqdm(range(N), desc="  BAM-A retrieval", leave=False):
-        d = max(1, int(dims[i]))
-        q_v = F.normalize(
-            torch.from_numpy(q_full[i, :d].astype(np.float32)).unsqueeze(0), p=2, dim=-1)
-        c_v = F.normalize(c_t[:, :d], p=2, dim=-1)
-        sim = (q_v @ c_v.T).squeeze(0)
-        all_topk[i] = sim.topk(min(k, C), dim=-1).indices.numpy()
+
+    present_levels = set(bam_q_bloom.tolist())
+    level_indices = {}
+    for lev in present_levels:
+        if lev not in level_masks:
+            continue
+        d = int(level_masks[lev].sum())            # number of active dims (prefix len)
+        c_norm = _norm(c_full_f16[:, :d])
+        level_indices[lev] = (_build_index_obj(c_norm), d)
+
+    for lev in present_levels:
+        if lev not in level_indices:
+            continue
+        faiss_idx, d = level_indices[lev]
+        qmask = bam_q_bloom == lev
+        q_idx = np.where(qmask)[0]
+        q_norm = _norm(q_full_f16[q_idx, :d])
+        all_topk[q_idx] = _search_index(faiss_idx, q_norm, k)
+
     return all_topk
 
 
-# ─────────────────────── Metrics ─────────────────────────────────────────────
+# ─────────────────────── Metrics (sparse qrels) ──────────────────────────────
 
-def compute_ndcg(topk_indices: np.ndarray, qrel_vector: np.ndarray,
-                 k: int = 10) -> float:
-    """Compute NDCG@k for a single query.
-    qrel_vector: relevance scores indexed by corpus position (0 = not relevant).
-    """
-    gains = qrel_vector[topk_indices[:k]]
-    dcg = sum(g / math.log2(r + 2) for r, g in enumerate(gains))
-    ideal = sorted(qrel_vector, reverse=True)[:k]
-    idcg = sum(g / math.log2(r + 2) for r, g in enumerate(ideal) if g > 0)
+def compute_ndcg_sparse(topk_indices: np.ndarray,
+                         qrel_dict: Dict[int, float], k: int) -> float:
+    gains = [qrel_dict.get(int(idx), 0.0) for idx in topk_indices[:k]]
+    dcg  = sum(g / math.log2(r + 2) for r, g in enumerate(gains))
+    idcg = sum(g / math.log2(r + 2)
+               for r, g in enumerate(sorted(qrel_dict.values(), reverse=True)[:k])
+               if g > 0)
     return dcg / idcg if idcg > 0 else 0.0
 
 
-def compute_recall(topk_indices: np.ndarray, qrel_vector: np.ndarray,
-                   k: int = 10) -> float:
-    return float((qrel_vector[topk_indices[:k]] > 0).any())
+def compute_recall_sparse(topk_indices: np.ndarray,
+                           qrel_dict: Dict[int, float], k: int) -> float:
+    return float(any(qrel_dict.get(int(idx), 0) > 0 for idx in topk_indices[:k]))
 
 
 def evaluate_retrieval(topk_indices: np.ndarray,
-                       qrels_array: np.ndarray,
+                       qrels_sparse: List[Dict[int, float]],
                        bloom_labels: np.ndarray,
                        ks: Tuple[int, ...] = (1, 5, 10)) -> Dict:
-    """
-    topk_indices: [N, max_k]
-    qrels_array:  [N, C] sparse — relevance of corpus doc for each query
-    bloom_labels: [N] 0-indexed Bloom level
-    """
     N = len(topk_indices)
     results = {}
 
     for k in ks:
-        hits = np.array([
-            compute_recall(topk_indices[i], qrels_array[i], k)
-            for i in range(N)
-        ])
-        results[f"recall@{k}"] = float(hits.mean())
+        r_arr    = np.array([compute_recall_sparse(topk_indices[i], qrels_sparse[i], k)
+                             for i in range(N)])
+        ndcg_arr = np.array([compute_ndcg_sparse(topk_indices[i], qrels_sparse[i], k)
+                             for i in range(N)])
+        results[f"recall@{k}"]  = float(r_arr.mean())
+        results[f"ndcg@{k}"]    = float(ndcg_arr.mean())
 
-        ndcg_scores = np.array([
-            compute_ndcg(topk_indices[i], qrels_array[i], k)
-            for i in range(N)
-        ])
-        results[f"ndcg@{k}"] = float(ndcg_scores.mean())
-
-    # Per-Bloom breakdown (ndcg@10 + recall@10)
     for b in range(6):
         mask = bloom_labels == b
         n_b = int(mask.sum())
         if n_b == 0:
             continue
-        b_name = BLOOM_NAMES[b]
-        b_hits = np.array([
-            compute_recall(topk_indices[i], qrels_array[i], 10)
-            for i in np.where(mask)[0]
-        ])
-        b_ndcg = np.array([
-            compute_ndcg(topk_indices[i], qrels_array[i], 10)
-            for i in np.where(mask)[0]
-        ])
-        results[f"bloom_{b_name}_n"] = n_b
-        results[f"bloom_{b_name}_recall@10"] = float(b_hits.mean())
-        results[f"bloom_{b_name}_ndcg@10"] = float(b_ndcg.mean())
+        idx_b = np.where(mask)[0]
+        bname = BLOOM_NAMES[b]
+        results[f"bloom_{bname}_n"] = n_b
+        results[f"bloom_{bname}_recall@10"] = float(np.mean([
+            compute_recall_sparse(topk_indices[i], qrels_sparse[i], 10) for i in idx_b]))
+        results[f"bloom_{bname}_ndcg@10"]   = float(np.mean([
+            compute_ndcg_sparse(topk_indices[i], qrels_sparse[i], 10)   for i in idx_b]))
 
     return results
 
 
-# ─────────────────────── Main evaluation per dataset ─────────────────────────
+# ─────────────────────── Per-dataset runner ──────────────────────────────────
 
 def run_dataset(dataset_name: str, args, device) -> Dict:
     print(f"\n{'='*70}")
     print(f"  Dataset: {dataset_name}")
     print(f"{'='*70}")
 
-    # 1. Load BEIR data
-    corpus, queries, qrels = load_beir_dataset(dataset_name)
+    max_corp = args.max_corpus_size if args.max_corpus_size > 0 else None
+    corpus, queries, qrels, truncated = load_beir_dataset(
+        dataset_name, max_corpus_size=max_corp)
     if corpus is None:
         print(f"  SKIPPING {dataset_name} — could not load.")
         return {}
 
-    # Filter queries that have at least one relevant doc
     query_ids = [qid for qid in queries if qid in qrels and len(qrels[qid]) > 0]
-    print(f"  Corpus: {len(corpus):,}  Queries: {len(query_ids):,}")
+    print(f"  Corpus: {len(corpus):,}  Queries (with qrels): {len(query_ids):,}"
+          + ("  [TRUNCATED]" if truncated else ""))
 
     corpus_ids = list(corpus.keys())
     corpus_id_to_idx = {cid: i for i, cid in enumerate(corpus_ids)}
@@ -428,242 +474,214 @@ def run_dataset(dataset_name: str, args, device) -> Dict:
     corpus_texts = []
     for cid in corpus_ids:
         title = corpus[cid].get("title", "").strip()
-        text  = corpus[cid].get("text", "").strip()
+        text  = corpus[cid].get("text",  "").strip()
         corpus_texts.append((title + " " + text).strip() if title else text)
 
     query_texts = [queries[qid] for qid in query_ids]
 
-    # Build qrels dense array [N_queries, N_corpus] — sparse matrix in numpy
-    # For large corpora we store as a list of dicts and compute per-query
-    qrels_list: List[np.ndarray] = []
+    # Sparse qrels (not dense arrays — essential for large corpora)
+    qrels_sparse: List[Dict[int, float]] = []
     for qid in query_ids:
-        rel_dict = qrels.get(qid, {})
-        qrel_vec = np.zeros(len(corpus_ids), dtype=np.float32)
-        for doc_id, score in rel_dict.items():
-            if doc_id in corpus_id_to_idx:
-                qrel_vec[corpus_id_to_idx[doc_id]] = float(score)
-        qrels_list.append(qrel_vec)
+        sparse = {corpus_id_to_idx[did]: float(sc)
+                  for did, sc in qrels.get(qid, {}).items()
+                  if did in corpus_id_to_idx}
+        qrels_sparse.append(sparse)
 
-    # 2. Bloom annotation
-    bloom_labels_0idx = annotate_bloom_nli(
+    # Bloom annotation
+    bloom_labels = np.array(annotate_bloom_nli(
         query_texts, device,
         model_name=args.nli_model,
         batch_size=args.nli_batch_size,
-    )
-    bloom_arr = np.array(bloom_labels_0idx, dtype=np.int64)
+    ), dtype=np.int64)
 
-    results_dict: Dict[str, Dict] = {}
     MAX_K = 100
+    results_dict: Dict[str, Dict] = {}
+    meta = {"dataset": dataset_name, "n_corpus": len(corpus_ids),
+            "n_queries": len(query_ids), "corpus_truncated": truncated}
 
-    # ── MRL evaluation ───────────────────────────────────────────────────────
+    # ── MRL ─────────────────────────────────────────────────────────────────
     mrl_config = load_config(args.mrl_config)
-    tokenizer_mrl = AutoTokenizer.from_pretrained(mrl_config["model"]["backbone"])
+    tok_mrl    = AutoTokenizer.from_pretrained(mrl_config["model"]["backbone"])
+    print("\n[MRL] Loading and encoding ...")
+    mrl_model  = load_mrl_model(mrl_config, args.mrl_checkpoint, device)
 
-    print("\n[MRL] Loading model and encoding ...")
-    mrl_model = load_mrl_model(mrl_config, args.mrl_checkpoint, device)
-
-    mrl_corpus_embs = encode_corpus(mrl_model, corpus_texts, tokenizer_mrl, device)
-    mrl_query_embs  = encode_queries_mrl(mrl_model, query_texts, tokenizer_mrl, device)
-
+    mrl_c_embs = encode_texts_to_array(mrl_model, corpus_texts, tok_mrl, device,
+                                        batch_size=128)
+    mrl_q_embs = encode_texts_to_array(mrl_model, query_texts, tok_mrl, device,
+                                        is_query=True, batch_size=64)
     del mrl_model
     if device.type == "cuda": torch.cuda.empty_cache()
 
-    full_dim = mrl_query_embs.shape[1]
-    mrl_eval_dims = [d for d in mrl_config["model"].get("mrl_dims", [64,128,256,512,768,1024])
-                     if d <= full_dim] + [full_dim]
-    mrl_eval_dims = sorted(set(mrl_eval_dims))
+    full_dim = mrl_q_embs.shape[1]
+    eval_dims = sorted(set(
+        [d for d in mrl_config["model"].get("mrl_dims", [64,128,256,512,768,1024])
+         if d <= full_dim] + [full_dim]))
 
-    print(f"  MRL retrieval at dims: {mrl_eval_dims}")
-    for dim in mrl_eval_dims:
-        print(f"  MRL-{dim} ...", end=" ", flush=True)
-        topk = retrieve_mrl(mrl_query_embs, mrl_corpus_embs, dim, MAX_K)
-        metrics = evaluate_retrieval(topk, qrels_list, bloom_arr)
-        results_dict[f"MRL-{dim}"] = metrics
-        print(f"  R@10={metrics['recall@10']:.4f}  NDCG@10={metrics['ndcg@10']:.4f}")
+    print(f"  Evaluating MRL at dims: {eval_dims}")
+    dim_topks = retrieve_mrl_dims(mrl_q_embs, mrl_c_embs, eval_dims, MAX_K)
+    for d, topk in dim_topks.items():
+        m = evaluate_retrieval(topk, qrels_sparse, bloom_labels)
+        results_dict[f"MRL-{d}"] = m
+        print(f"  MRL-{d:4d}  R@10={m['recall@10']:.4f}  NDCG@10={m['ndcg@10']:.4f}")
+    del mrl_c_embs, mrl_q_embs, dim_topks
 
-    del mrl_corpus_embs, mrl_query_embs
-
-    # ── BAM-B evaluation ─────────────────────────────────────────────────────
+    # ── BAM-B ────────────────────────────────────────────────────────────────
     bam_b_config = load_config(args.bam_b_config)
-    tokenizer_bam_b = AutoTokenizer.from_pretrained(bam_b_config["model"]["backbone"])
+    tok_bam_b    = AutoTokenizer.from_pretrained(bam_b_config["model"]["backbone"])
+    print("\n[BAM-B] Loading and encoding ...")
+    bam_b_model  = load_bam_model(bam_b_config, args.bam_b_checkpoint, device)
 
-    print("\n[BAM-B] Loading model and encoding ...")
-    bam_b_model = load_bam_model(bam_b_config, args.bam_b_checkpoint, device)
+    emb_dim = bam_b_config["model"].get("embedding_dim", 1024)
+    level_masks_b = extract_level_masks(bam_b_model, emb_dim, device)
+    is_prefix_b = all((m.sum() == m[:int(m.sum())].sum()) for m in level_masks_b.values())
 
-    bam_b_corpus_embs = encode_corpus(bam_b_model, corpus_texts, tokenizer_bam_b, device)
-    bam_b_q_full, bam_b_masks, bam_b_active, bam_b_dims, bam_b_prefix = \
-        encode_queries_bam(bam_b_model, query_texts, bloom_labels_0idx,
-                           tokenizer_bam_b, device)
-
+    bam_b_c_embs = encode_texts_to_array(bam_b_model, corpus_texts, tok_bam_b, device,
+                                          batch_size=128)
+    bam_b_q_embs = encode_texts_to_array(bam_b_model, query_texts, tok_bam_b, device,
+                                          is_query=True,
+                                          bloom_labels=bloom_labels.tolist(),
+                                          batch_size=64)
     del bam_b_model
     if device.type == "cuda": torch.cuda.empty_cache()
 
-    # Average active dims per level for reporting
-    avg_dims_per_level = {}
-    for b in range(6):
-        mask = bloom_arr == b
-        if mask.sum() == 0:
-            continue
-        if bam_b_active is not None:
-            avg_dims_per_level[BLOOM_NAMES[b]] = float(bam_b_active[mask].mean())
-        elif bam_b_dims is not None:
-            avg_dims_per_level[BLOOM_NAMES[b]] = float(bam_b_dims[mask].mean())
-
-    if bam_b_prefix:
-        print("  BAM-B mode: prefix (Option A)")
-        topk_bam_b = retrieve_bam_prefix(bam_b_q_full, bam_b_dims,
-                                          bam_b_corpus_embs, MAX_K)
+    print(f"  BAM-B mode: {'prefix' if is_prefix_b else 'scattered mask'}")
+    if is_prefix_b:
+        topk_b = retrieve_bam_prefix(bam_b_q_embs, bloom_labels, level_masks_b,
+                                      bam_b_c_embs, MAX_K)
     else:
-        print("  BAM-B mode: scattered mask (Option B)")
-        topk_bam_b = retrieve_bam_scattered(bam_b_q_full, bam_b_masks,
-                                             bam_b_corpus_embs, MAX_K)
+        topk_b = retrieve_bam_scattered(bam_b_q_embs, bloom_labels, level_masks_b,
+                                         bam_b_c_embs, MAX_K)
 
-    metrics_bam_b = evaluate_retrieval(topk_bam_b, qrels_list, bloom_arr)
-    metrics_bam_b["avg_active_dims_per_level"] = avg_dims_per_level
-    results_dict["BAM-B"] = metrics_bam_b
-    print(f"  BAM-B  R@10={metrics_bam_b['recall@10']:.4f}  "
-          f"NDCG@10={metrics_bam_b['ndcg@10']:.4f}  "
-          f"avg_dims={avg_dims_per_level}")
+    m_b = evaluate_retrieval(topk_b, qrels_sparse, bloom_labels)
+    avg_dims = {BLOOM_NAMES[lev]: int(level_masks_b[lev].sum())
+                for lev in level_masks_b}
+    m_b["avg_active_dims_per_level"] = avg_dims
+    results_dict["BAM-B"] = m_b
+    print(f"  BAM-B  R@10={m_b['recall@10']:.4f}  NDCG@10={m_b['ndcg@10']:.4f}  "
+          f"dims={avg_dims}")
+    del bam_b_c_embs, bam_b_q_embs, topk_b
 
-    del bam_b_corpus_embs, bam_b_q_full, bam_b_masks
-
-    # ── BAM-A evaluation (optional) ──────────────────────────────────────────
+    # ── BAM-A (optional) ─────────────────────────────────────────────────────
     if args.bam_a_checkpoint and args.bam_a_config:
-        bam_a_ckpt_file = os.path.join(args.bam_a_checkpoint, "checkpoint.pt")
-        if os.path.exists(bam_a_ckpt_file):
+        ckpt_f = os.path.join(args.bam_a_checkpoint, "checkpoint.pt")
+        if os.path.exists(ckpt_f):
             bam_a_config = load_config(args.bam_a_config)
-            tokenizer_bam_a = AutoTokenizer.from_pretrained(
+            tok_bam_a    = AutoTokenizer.from_pretrained(
                 bam_a_config["model"]["backbone"])
+            print("\n[BAM-A] Loading and encoding ...")
+            bam_a_model  = load_bam_model(bam_a_config, args.bam_a_checkpoint, device)
 
-            print("\n[BAM-A] Loading model and encoding ...")
-            bam_a_model = load_bam_model(bam_a_config, args.bam_a_checkpoint, device)
+            emb_dim_a = bam_a_config["model"].get("embedding_dim", 1024)
+            level_masks_a = extract_level_masks(bam_a_model, emb_dim_a, device)
 
-            bam_a_corpus_embs = encode_corpus(
-                bam_a_model, corpus_texts, tokenizer_bam_a, device)
-            bam_a_q_full, bam_a_masks, bam_a_active, bam_a_dims, bam_a_prefix = \
-                encode_queries_bam(bam_a_model, query_texts, bloom_labels_0idx,
-                                   tokenizer_bam_a, device)
-
+            bam_a_c_embs = encode_texts_to_array(
+                bam_a_model, corpus_texts, tok_bam_a, device, batch_size=128)
+            bam_a_q_embs = encode_texts_to_array(
+                bam_a_model, query_texts, tok_bam_a, device,
+                is_query=True, bloom_labels=bloom_labels.tolist(), batch_size=64)
             del bam_a_model
             if device.type == "cuda": torch.cuda.empty_cache()
 
-            if bam_a_prefix:
-                topk_bam_a = retrieve_bam_prefix(bam_a_q_full, bam_a_dims,
-                                                  bam_a_corpus_embs, MAX_K)
+            is_prefix_a = all((m.sum() == m[:int(m.sum())].sum())
+                               for m in level_masks_a.values())
+            if is_prefix_a:
+                topk_a = retrieve_bam_prefix(bam_a_q_embs, bloom_labels, level_masks_a,
+                                              bam_a_c_embs, MAX_K)
             else:
-                topk_bam_a = retrieve_bam_scattered(bam_a_q_full, bam_a_masks,
-                                                     bam_a_corpus_embs, MAX_K)
-
-            metrics_bam_a = evaluate_retrieval(topk_bam_a, qrels_list, bloom_arr)
-            results_dict["BAM-A"] = metrics_bam_a
-            print(f"  BAM-A  R@10={metrics_bam_a['recall@10']:.4f}  "
-                  f"NDCG@10={metrics_bam_a['ndcg@10']:.4f}")
+                topk_a = retrieve_bam_scattered(bam_a_q_embs, bloom_labels, level_masks_a,
+                                                 bam_a_c_embs, MAX_K)
+            m_a = evaluate_retrieval(topk_a, qrels_sparse, bloom_labels)
+            results_dict["BAM-A"] = m_a
+            print(f"  BAM-A  R@10={m_a['recall@10']:.4f}  NDCG@10={m_a['ndcg@10']:.4f}")
+            del bam_a_c_embs, bam_a_q_embs, topk_a
         else:
-            print(f"\n[BAM-A] checkpoint not found at {bam_a_ckpt_file} — skipping.")
+            print(f"\n[BAM-A] checkpoint not found at {ckpt_f} — skipping.")
 
     # ── Print summary table ──────────────────────────────────────────────────
     print(f"\n  {'Model':<16}  {'R@1':>6}  {'R@5':>6}  {'R@10':>6}  {'NDCG@10':>8}")
     print("  " + "-" * 48)
     for name, m in results_dict.items():
-        r1   = m.get("recall@1",  float("nan"))
-        r5   = m.get("recall@5",  float("nan"))
-        r10  = m.get("recall@10", float("nan"))
-        n10  = m.get("ndcg@10",   float("nan"))
+        r1  = m.get("recall@1",  float("nan"))
+        r5  = m.get("recall@5",  float("nan"))
+        r10 = m.get("recall@10", float("nan"))
+        n10 = m.get("ndcg@10",   float("nan"))
         print(f"  {name:<16}  {r1:6.4f}  {r5:6.4f}  {r10:6.4f}  {n10:8.4f}")
 
-    # ── Print Bloom breakdown for BAM-B ─────────────────────────────────────
+    # BAM-B Bloom breakdown
     if "BAM-B" in results_dict:
         print(f"\n  BAM-B per-Bloom breakdown (NDCG@10 | R@10):")
         for b in range(6):
             bname = BLOOM_NAMES[b]
-            n_key = f"bloom_{bname}_n"
-            n_key_r = f"bloom_{bname}_recall@10"
-            n_key_d = f"bloom_{bname}_ndcg@10"
             m = results_dict["BAM-B"]
-            if n_key in m:
-                print(f"    {bname:<12} n={m[n_key]:5d}  "
-                      f"NDCG@10={m[n_key_d]:.4f}  R@10={m[n_key_r]:.4f}")
+            if f"bloom_{bname}_n" in m:
+                print(f"    {bname:<12} n={m[f'bloom_{bname}_n']:5d}  "
+                      f"NDCG@10={m[f'bloom_{bname}_ndcg@10']:.4f}  "
+                      f"R@10={m[f'bloom_{bname}_recall@10']:.4f}")
 
+    results_dict["_meta"] = meta
     return results_dict
 
 
 # ─────────────────────── Main ─────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Zero-shot evaluation on TREC-COVID, SciDocs, Climate-FEVER")
-
-    # Checkpoints
-    parser.add_argument("--mrl_checkpoint", required=True,
-                        help="Path to MRL checkpoint dir (contains checkpoint.pt)")
-    parser.add_argument("--mrl_config", required=True,
-                        help="MRL config YAML (for backbone + mrl_dims)")
-    parser.add_argument("--bam_b_checkpoint", required=True,
-                        help="Path to BAM-B checkpoint dir")
-    parser.add_argument("--bam_b_config", required=True,
-                        help="BAM-B config YAML")
-    parser.add_argument("--bam_a_checkpoint", default=None,
-                        help="(Optional) BAM-A checkpoint dir")
-    parser.add_argument("--bam_a_config", default=None,
-                        help="(Optional) BAM-A config YAML")
-
-    # Datasets + output
-    parser.add_argument("--datasets", nargs="+",
-                        default=ZERO_SHOT_DATASETS,
-                        help="BEIR dataset names to evaluate")
-    parser.add_argument("--output_dir", default="results/zero_shot/")
-
-    # NLI annotator
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mrl_checkpoint",    required=True)
+    parser.add_argument("--mrl_config",        required=True)
+    parser.add_argument("--bam_b_checkpoint",  required=True)
+    parser.add_argument("--bam_b_config",      required=True)
+    parser.add_argument("--bam_a_checkpoint",  default=None)
+    parser.add_argument("--bam_a_config",      default=None)
+    parser.add_argument("--datasets", nargs="+", default=ZERO_SHOT_DATASETS)
+    parser.add_argument("--output_dir",        default="results/zero_shot/")
     parser.add_argument("--nli_model",
-                        default="MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
-                        help="HuggingFace model for zero-shot Bloom annotation")
-    parser.add_argument("--nli_batch_size", type=int, default=32)
-
+        default="MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli")
+    parser.add_argument("--nli_batch_size",    type=int, default=32)
+    parser.add_argument("--max_corpus_size",   type=int, default=500000,
+                        help="Cap corpus size for very large datasets. "
+                             "0 = no limit. climate-fever has 5.4M docs.")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     os.makedirs(args.output_dir, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+    if args.max_corpus_size > 0:
+        print(f"Max corpus size: {args.max_corpus_size:,} "
+              f"(climate-fever will be subsampled; all relevant docs kept)")
 
     all_results = {}
     for ds in args.datasets:
         ds_results = run_dataset(ds, args, device)
         all_results[ds] = ds_results
-
-        # Save per-dataset JSON
         ds_out = os.path.join(args.output_dir, f"{ds}.json")
         with open(ds_out, "w") as f:
             json.dump(ds_results, f, indent=2)
-        print(f"\n  Results saved to {ds_out}")
+        print(f"\n  Saved → {ds_out}")
 
-    # Save combined JSON
     combined_out = os.path.join(args.output_dir, "zero_shot_results.json")
     with open(combined_out, "w") as f:
         json.dump(all_results, f, indent=2)
 
-    # Print final summary across all datasets
+    # Final summary
     print(f"\n\n{'='*70}")
-    print("  ZERO-SHOT SUMMARY (NDCG@10 / R@10)")
+    print("  ZERO-SHOT SUMMARY  (NDCG@10 / R@10)")
     print(f"{'='*70}")
-    print(f"  {'Model':<16}" + "".join(f"  {ds[:12]:>14}" for ds in args.datasets))
-    print("  " + "-" * (16 + 16 * len(args.datasets)))
-
-    all_models = []
-    for ds in args.datasets:
-        all_models += list(all_results.get(ds, {}).keys())
-    all_models = list(dict.fromkeys(all_models))
-
+    all_models = list(dict.fromkeys(
+        m for ds in args.datasets for m in all_results.get(ds, {}) if not m.startswith("_")))
+    header = f"  {'Model':<16}" + "".join(f"  {ds[:14]:>16}" for ds in args.datasets)
+    print(header)
+    print("  " + "-" * len(header))
     for model_name in all_models:
         row = f"  {model_name:<16}"
         for ds in args.datasets:
             m = all_results.get(ds, {}).get(model_name, {})
-            r10  = m.get("recall@10",  float("nan"))
-            n10  = m.get("ndcg@10",    float("nan"))
-            row += f"  {n10:6.4f}/{r10:6.4f}"
+            n10 = m.get("ndcg@10",   float("nan"))
+            r10 = m.get("recall@10", float("nan"))
+            row += f"  {n10:6.4f}/{r10:6.4f}  "
         print(row)
 
     print(f"\nAll results saved to {combined_out}")
