@@ -241,8 +241,11 @@ class BloomMaskSparsityLoss(nn.Module):
     Override with level_targets dict {0: target0, ...} or global_target for uniform.
     """
 
-    # Cognitively-motivated defaults: more dims for higher Bloom levels
-    _COGNITIVE_DEFAULTS = {0: 0.40, 1: 0.45, 2: 0.50, 3: 0.55, 4: 0.60, 5: 0.65}
+    # Cognitively-motivated defaults: higher Bloom = more complex = more dims.
+    # Values include ~10% upward buffer because empirically the model drifts below
+    # its target (contrastive loss pushes toward max sparsity).
+    # These are dataset-agnostic — do not override in per-dataset configs.
+    _COGNITIVE_DEFAULTS = {0: 0.35, 1: 0.50, 2: 0.60, 3: 0.65, 4: 0.72, 5: 0.55}
 
     def __init__(
         self,
