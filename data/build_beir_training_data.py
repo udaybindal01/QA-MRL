@@ -68,11 +68,68 @@ def load_beir_qrels(dataset_name: str, split: str) -> tuple:
     return queries, qrels
 
 
-def mine_negatives(query_text: str, positive_ids: set, corpus: dict, num_neg: int = 7) -> list:
-    """Sample hard negatives randomly from non-relevant passages."""
-    rng = random.Random(hash(query_text))
-    candidates = [pid for pid in corpus if pid not in positive_ids]
-    return rng.sample(candidates, min(num_neg, len(candidates)))
+STOPWORDS = {"the", "and", "for", "are", "was", "were", "that", "this",
+             "with", "from", "have", "has", "had", "not", "but", "what",
+             "which", "when", "where", "how", "who", "why", "can", "will",
+             "would", "could", "should", "does", "did", "been", "being",
+             "than", "then", "them", "they", "their", "there", "these",
+             "those", "into", "about", "between", "through", "during",
+             "before", "after", "above", "below", "each", "every",
+             "some", "such", "only", "other", "also", "most", "more"}
+
+
+def _keywords(text: str) -> set:
+    words = text.lower().split()
+    return {w.strip(".,!?;:\"'()[]{}") for w in words
+            if len(w) >= 3 and w.strip(".,!?;:\"'()[]{}").isalpha()} - STOPWORDS
+
+
+def mine_negatives_bm25(query_text: str, positive_ids: set,
+                        corpus: dict, corpus_kw: dict,
+                        num_neg: int = 7, seed: int = 42) -> list:
+    """
+    BM25-style curriculum hard negatives — same strategy as educational data.
+
+    Tiers by keyword overlap with query:
+      Tier 1 (hardest): high overlap — lexically confusing
+      Tier 2 (medium):  low/nonzero overlap
+      Tier 3 (easy):    zero overlap — unrelated
+
+    Mix: 3 hard + 2 medium + 2 easy (adjusts if corpus is small).
+    """
+    rng = random.Random(seed ^ hash(query_text))
+    query_kw = _keywords(query_text)
+
+    hard, medium, easy = [], [], []
+    for pid, pkw in corpus_kw.items():
+        if pid in positive_ids:
+            continue
+        overlap = len(query_kw & pkw)
+        if overlap > 2:
+            hard.append(pid)
+        elif overlap > 0:
+            medium.append(pid)
+        else:
+            easy.append(pid)
+
+    rng.shuffle(hard)
+    rng.shuffle(medium)
+    rng.shuffle(easy)
+
+    # Target mix: ~43% hard, ~29% medium, ~29% easy
+    n_hard   = min(len(hard),   max(1, num_neg * 3 // 7))
+    n_medium = min(len(medium), max(1, num_neg * 2 // 7))
+    n_easy   = num_neg - n_hard - n_medium
+
+    selected = hard[:n_hard] + medium[:n_medium] + easy[:max(0, n_easy)]
+
+    # Pad with random if not enough in any tier
+    if len(selected) < num_neg:
+        remaining = [p for p in corpus if p not in positive_ids and p not in selected]
+        rng.shuffle(remaining)
+        selected += remaining[:num_neg - len(selected)]
+
+    return selected[:num_neg]
 
 
 def annotate_bloom(query_texts: list, device: str) -> list:
@@ -84,8 +141,9 @@ def annotate_bloom(query_texts: list, device: str) -> list:
 
 
 def build_pairs(queries: dict, qrels: dict, corpus: dict,
-                bloom_map: dict, num_neg: int, dataset_name: str) -> list:
-    """Build training/eval pair records from queries + qrels."""
+                corpus_kw: dict, bloom_map: dict,
+                num_neg: int, dataset_name: str) -> list:
+    """Build training/eval pair records using BM25 curriculum hard negatives."""
     records = []
     for qid, query_text in queries.items():
         if qid not in qrels:
@@ -96,7 +154,8 @@ def build_pairs(queries: dict, qrels: dict, corpus: dict,
         positive_id = list(positive_ids)[0]
         if positive_id not in corpus:
             continue
-        negative_ids = mine_negatives(query_text, positive_ids, corpus, num_neg)
+        negative_ids = mine_negatives_bm25(query_text, positive_ids,
+                                            corpus, corpus_kw, num_neg)
         records.append({
             "query":          query_text,
             "positive_text":  corpus[positive_id]["text"],
@@ -141,6 +200,10 @@ def build_dataset(dataset_name: str, output_dir: str, num_neg: int,
             f.write(json.dumps(pdata) + "\n")
     print(f"  Corpus: {len(corpus)} passages → {corpus_path}")
 
+    # Precompute keyword sets once — reused for all splits
+    print(f"  Precomputing corpus keyword index...")
+    corpus_kw = {pid: _keywords(p["text"]) for pid, p in corpus.items()}
+
     # ── Train + Val ──────────────────────────────────────────────────────────
     train_queries, train_qrels = load_beir_qrels(dataset_name, "train")
     if train_queries is None:
@@ -172,8 +235,8 @@ def build_dataset(dataset_name: str, output_dir: str, num_neg: int,
     train_q = {qid: train_queries[qid] for qid in train_qids}
     val_q   = {qid: train_queries[qid] for qid in val_qids}
 
-    train_records = build_pairs(train_q, train_qrels, corpus, bloom_map, num_neg, dataset_name)
-    val_records   = build_pairs(val_q,   train_qrels, corpus, bloom_map, num_neg, dataset_name)
+    train_records = build_pairs(train_q, train_qrels, corpus, corpus_kw, bloom_map, num_neg, dataset_name)
+    val_records   = build_pairs(val_q,   train_qrels, corpus, corpus_kw, bloom_map, num_neg, dataset_name)
 
     write_jsonl(train_records, os.path.join(ds_dir, "train.jsonl"))
     write_jsonl(val_records,   os.path.join(ds_dir, "val.jsonl"))
@@ -189,7 +252,7 @@ def build_dataset(dataset_name: str, output_dir: str, num_neg: int,
         test_texts = [test_queries[qid] for qid in test_qids]
         test_bloom = annotate_bloom(test_texts, device)
         test_bloom_map = {qid: label for qid, label in zip(test_qids, test_bloom)}
-        test_records = build_pairs(test_queries, test_qrels, corpus,
+        test_records = build_pairs(test_queries, test_qrels, corpus, corpus_kw,
                                    test_bloom_map, num_neg, dataset_name)
         write_jsonl(test_records, os.path.join(ds_dir, "test.jsonl"))
 
