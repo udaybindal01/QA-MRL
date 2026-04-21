@@ -174,14 +174,12 @@ def load_winogrande(max_n):
 
 
 # ─────────────── Evaluate-heavy datasets ───────────────
-# These contain argument quality, ethical reasoning, debate —
-# tasks that naturally require judging, assessing, evaluating.
 
 def load_arg_quality(max_n):
     """IBM argument quality ranking — "is this argument convincing?" = Evaluate."""
     from datasets import load_dataset
-    ds = load_dataset("ibm/argument_quality_ranking_30k", split="train")
-    # Frame as evaluation queries about argument strength
+    ds = load_dataset("ibm/argument_quality_ranking_30k", "argument_quality_ranking",
+                      split="train")
     queries = []
     for row in ds:
         arg = row.get("argument", "").strip()
@@ -193,82 +191,31 @@ def load_arg_quality(max_n):
     return "ArgQuality-30k", queries[:max_n]
 
 
-def load_kialo(max_n):
-    """Kialo debates — pros/cons arguments that require evaluation."""
+def load_prosocial(max_n):
+    """Prosocial dialog — evaluate social behavior, judge appropriateness."""
     from datasets import load_dataset
-    ds = load_dataset("Kialo/kialo-delib", split="train", trust_remote_code=True)
+    ds = load_dataset("allenai/prosocial-dialog", split="train")
     queries = []
     for row in ds:
-        claim = row.get("claim", "").strip()
-        if claim:
-            queries.append(f"Evaluate this claim: {claim}")
+        ctx = row.get("context", "").strip()
+        rots = row.get("rots", [])
+        if ctx and rots:
+            # Rules-of-thumb are moral judgments — frame as evaluation
+            queries.append(f"Evaluate the appropriateness of this behavior: {ctx[:200]}")
         if len(queries) >= max_n:
             break
-    return "Kialo-Debates", queries[:max_n]
+    return "ProsocialDialog", queries[:max_n]
 
 
-def load_persuasion(max_n):
-    """Persuasion techniques — requires evaluating rhetorical strategies."""
+def load_strategyqa(max_n):
+    """StrategyQA — multi-hop yes/no requiring strategic judgment."""
     from datasets import load_dataset
-    ds = load_dataset("sem_eval_2024_task_4", split="train", trust_remote_code=True)
-    queries = []
-    for row in ds:
-        text = row.get("text", "").strip()
-        if text:
-            queries.append(f"Evaluate the persuasion technique used: {text}")
-        if len(queries) >= max_n:
-            break
-    return "Persuasion", queries[:max_n]
-
-
-def load_ethics_cm(max_n):
-    """Ethics commonsense morality — judge if action is right/wrong = Evaluate."""
-    from datasets import load_dataset
-    ds = load_dataset("hendrycks/ethics", "commonsense", split="train", trust_remote_code=True)
-    queries = []
-    for row in ds:
-        text = row.get("input", "") or row.get("text", "") or row.get("sentence", "")
-        text = text.strip()
-        if text:
-            queries.append(f"Evaluate whether this action is ethical: {text}")
-        if len(queries) >= max_n:
-            break
-    return "Ethics-CM", queries[:max_n]
-
-
-def load_ethics_justice(max_n):
-    """Ethics justice — assess fairness = Evaluate."""
-    from datasets import load_dataset
-    ds = load_dataset("hendrycks/ethics", "justice", split="train", trust_remote_code=True)
-    queries = []
-    for row in ds:
-        text = row.get("input", "") or row.get("text", "") or row.get("sentence", "")
-        text = text.strip()
-        if text:
-            queries.append(f"Judge the fairness of this situation: {text}")
-        if len(queries) >= max_n:
-            break
-    return "Ethics-Justice", queries[:max_n]
-
-
-def load_scruples_anecdotes(max_n):
-    """Scruples — judge social norm violations = Evaluate."""
-    from datasets import load_dataset
-    ds = load_dataset("allenai/scruples", "anecdotes", split="train", trust_remote_code=True)
-    queries = []
-    for row in ds:
-        text = row.get("text", "").strip()
-        if text and len(text) > 30:
-            # Truncate long anecdotes to first 200 chars for classifier
-            queries.append(f"Evaluate the ethics of this situation: {text[:200]}")
-        if len(queries) >= max_n:
-            break
-    return "Scruples", queries[:max_n]
+    ds = load_dataset("ChilleD/StrategyQA", split="train")
+    queries = [row["question"].strip() for row in ds if row.get("question")]
+    return "StrategyQA", queries[:max_n]
 
 
 # ─────────────── Create-heavy datasets ───────────────
-# These contain design tasks, writing prompts, synthesis questions —
-# tasks that require producing something new.
 
 def load_writingprompts(max_n):
     """Reddit WritingPrompts — creative writing tasks = Create."""
@@ -284,96 +231,131 @@ def load_writingprompts(max_n):
     return "WritingPrompts", queries[:max_n]
 
 
-def load_eli5(max_n):
-    """ELI5 — explain like I'm 5, some questions require creative synthesis."""
+def load_dolly_creative(max_n):
+    """Dolly brainstorming + creative_writing categories → Create."""
     from datasets import load_dataset
-    ds = load_dataset("eli5_category", split="train", trust_remote_code=True)
+    ds = load_dataset("argilla/databricks-dolly-15k-curated-en", split="train")
     queries = []
     for row in ds:
-        title = row.get("title", "").strip()
-        if title:
-            queries.append(title)
+        cat = row.get("category", "")
+        instr = row.get("original-instruction", "").strip()
+        if cat in ("brainstorming", "creative_writing") and instr:
+            queries.append(instr)
         if len(queries) >= max_n:
             break
-    return "ELI5", queries[:max_n]
+    return "Dolly-Creative", queries[:max_n]
 
 
-def load_peer_read(max_n):
-    """PeerRead paper reviews — evaluate quality + suggest improvements = Evaluate/Create."""
+def load_dolly_all(max_n):
+    """Dolly full dataset — all categories for distribution analysis."""
     from datasets import load_dataset
-    ds = load_dataset("allenai/peer_read", split="train", trust_remote_code=True)
+    ds = load_dataset("argilla/databricks-dolly-15k-curated-en", split="train")
+    queries = [row["original-instruction"].strip() for row in ds
+               if row.get("original-instruction", "").strip()]
+    return "Dolly-All", queries[:max_n]
+
+
+def load_alpaca(max_n):
+    """Alpaca instructions — diverse tasks including design, create, generate."""
+    from datasets import load_dataset
+    ds = load_dataset("tatsu-lab/alpaca", split="train")
     queries = []
     for row in ds:
-        abstract = row.get("abstract", "").strip()
-        if abstract:
-            queries.append(f"Design an experiment to test: {abstract[:200]}")
+        instr = row.get("instruction", "").strip()
+        inp = row.get("input", "").strip()
+        if instr:
+            q = f"{instr} {inp}" if inp else instr
+            queries.append(q[:300])
         if len(queries) >= max_n:
             break
-    return "PeerRead-Design", queries[:max_n]
+    return "Alpaca", queries[:max_n]
 
 
-def load_big_bench_hard(max_n):
-    """BIG-Bench Hard — challenging reasoning requiring novel problem solving."""
+def load_alpaca_create(max_n):
+    """Alpaca — filtered to instructions with create/design/generate/write verbs."""
     from datasets import load_dataset
-    ds = load_dataset("maveriq/bigbenchhard", "causal_judgement", split="train",
-                      trust_remote_code=True)
-    queries = [row.get("input", "").strip() for row in ds if row.get("input")]
-    return "BBH-Causal", queries[:max_n]
-
-
-def load_social_iqa(max_n):
-    """Social IQa — social reasoning questions."""
-    from datasets import load_dataset
-    ds = load_dataset("allenai/social_i_qa", split="train")
+    ds = load_dataset("tatsu-lab/alpaca", split="train")
+    create_verbs = {"create", "design", "generate", "write", "compose", "develop",
+                    "propose", "invent", "construct", "formulate", "draft", "build",
+                    "produce", "synthesize", "imagine", "devise"}
     queries = []
     for row in ds:
-        ctx = row.get("context", "").strip()
-        q = row.get("question", "").strip()
-        if ctx and q:
-            queries.append(f"{ctx} {q}")
+        instr = row.get("instruction", "").strip()
+        if instr:
+            first_word = instr.split()[0].lower().rstrip(".,!?")
+            if first_word in create_verbs:
+                inp = row.get("input", "").strip()
+                q = f"{instr} {inp}" if inp else instr
+                queries.append(q[:300])
         if len(queries) >= max_n:
             break
-    return "SocialIQa", queries[:max_n]
+    return "Alpaca-Create", queries[:max_n]
 
 
-def load_strategyqa(max_n):
-    """StrategyQA — multi-hop yes/no questions requiring strategic reasoning."""
+def load_alpaca_evaluate(max_n):
+    """Alpaca — filtered to instructions with evaluate/judge/assess/critique verbs."""
     from datasets import load_dataset
-    ds = load_dataset("wics/strategy-qa", split="train", trust_remote_code=True)
-    queries = [row.get("question", "").strip() for row in ds if row.get("question")]
-    return "StrategyQA", queries[:max_n]
-
-
-def load_logiqa(max_n):
-    """LogiQA — logical reasoning questions from civil service exams."""
-    from datasets import load_dataset
-    ds = load_dataset("lucasmccabe/logiqa", split="train", trust_remote_code=True)
+    ds = load_dataset("tatsu-lab/alpaca", split="train")
+    eval_verbs = {"evaluate", "judge", "assess", "critique", "rate", "rank",
+                  "compare", "review", "justify", "defend", "argue", "debate",
+                  "determine", "decide", "weigh"}
     queries = []
     for row in ds:
-        ctx = row.get("context", "").strip()
-        q = row.get("query", "") or row.get("question", "")
-        q = q.strip()
-        if q:
-            queries.append(q if not ctx else f"{ctx[:150]} {q}")
+        instr = row.get("instruction", "").strip()
+        if instr:
+            first_word = instr.split()[0].lower().rstrip(".,!?")
+            if first_word in eval_verbs:
+                inp = row.get("input", "").strip()
+                q = f"{instr} {inp}" if inp else instr
+                queries.append(q[:300])
         if len(queries) >= max_n:
             break
-    return "LogiQA", queries[:max_n]
+    return "Alpaca-Evaluate", queries[:max_n]
+
+
+def load_flan_v2(max_n):
+    """FLAN v2 — diverse NLP tasks, broad Bloom coverage."""
+    from datasets import load_dataset
+    ds = load_dataset("SirNeural/flan_v2", split="train", streaming=True)
+    queries = []
+    for row in ds:
+        text = row.get("inputs", "").strip()
+        if text and 20 < len(text) < 500:
+            queries.append(text[:300])
+        if len(queries) >= max_n:
+            break
+    return "FLAN-v2", queries[:max_n]
+
+
+def load_oasst_prompts(max_n):
+    """OpenAssistant — human prompts (first messages) span all Bloom levels."""
+    from datasets import load_dataset
+    ds = load_dataset("OpenAssistant/oasst1", split="train")
+    queries = []
+    for row in ds:
+        if row.get("role") == "prompter" and row.get("parent_id") is None:
+            text = row.get("text", "").strip()
+            if text and len(text) > 15:
+                queries.append(text[:300])
+        if len(queries) >= max_n:
+            break
+    return "OASST-Prompts", queries[:max_n]
 
 
 ALL_LOADERS = [
     # Already used in repo
     load_sciq, load_arc_easy, load_arc_challenge, load_openbookqa, load_qasc,
-    # Additional educational
+    # Additional educational QA
     load_scienceqa, load_race_middle, load_race_high,
     load_commonsenseqa, load_piqa, load_boolq, load_cosmosqa,
     load_dream, load_quail, load_triviaqa, load_mmlu, load_winogrande,
-    # Evaluate-heavy (argument, ethics, judgment)
-    load_arg_quality, load_kialo, load_persuasion,
-    load_ethics_cm, load_ethics_justice, load_scruples_anecdotes,
-    # Create-heavy (writing, design, synthesis)
-    load_writingprompts, load_eli5, load_peer_read,
-    # Reasoning-heavy (Analyze/Evaluate)
-    load_big_bench_hard, load_social_iqa, load_strategyqa, load_logiqa,
+    # Evaluate-heavy
+    load_arg_quality, load_prosocial, load_strategyqa,
+    # Create-heavy
+    load_writingprompts, load_dolly_creative, load_dolly_all,
+    load_alpaca, load_alpaca_create, load_alpaca_evaluate,
+    # Broad coverage
+    load_flan_v2, load_oasst_prompts,
 ]
 
 
