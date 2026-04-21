@@ -6,7 +6,8 @@ Queries are Bloom-annotated with the NLI classifier so per-level breakdowns work
 
 Models evaluated:
   MRL    — MRL encoder at 64/128/256/512/768/1024 and full dims
-  BAM-B  — Bloom scattered mask (Option B)
+  BAM-B  — Bloom scattered mask (Option B), per-level FAISS
+  BAM-PQ — Bloom + per-query residual mask, single FAISS against full corpus
   BAM-A  — Bloom prefix mask (Option A, optional — skipped if checkpoint absent)
 
 Metrics: R@1, R@5, R@10, NDCG@10 — overall and stratified by Bloom level.
@@ -16,6 +17,7 @@ Memory handling:
   - corpus embeddings stored as float16 (half memory)
   - retrieval done in chunks so full corpus never needs to be in GPU VRAM
   - BAM-B uses per-level FAISS indices (6 unique masks × 1 FAISS build each)
+  - BAM-PQ uses one FAISS index (full corpus) + per-query masked queries
   - --max_corpus_size caps very large corpora (default 500k; climate-fever has 5.4M)
 
 Usage:
@@ -24,6 +26,8 @@ Usage:
         --mrl_config     results/multi_domain/educational/configs/mrl.yaml \
         --bam_b_checkpoint /tmp/multi-domain/educational/bam_b/best_bsr/ \
         --bam_b_config     results/multi_domain/educational/configs/bam_b.yaml \
+        --bam_pq_checkpoint /tmp/multi-domain/educational/bam_pq/best_bsr/ \
+        --bam_pq_config     results/multi_domain/educational/configs/bam_pq.yaml \
         --datasets trec-covid scidocs climate-fever \
         --output_dir results/zero_shot/
 """
@@ -406,6 +410,56 @@ def retrieve_bam_prefix(q_full_f16: np.ndarray,
     return all_topk
 
 
+# ─────────────────────── BAM-PQ retrieval ────────────────────────────────────
+
+@torch.no_grad()
+def encode_bam_pq_queries(model, query_texts: List[str], bloom_labels: List[int],
+                           tokenizer, device, batch_size: int = 64
+                           ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Encode queries with BAM-PQ, returning masked embeddings + per-query active dim counts.
+    BAM-PQ masks differ per query (bloom anchor + query residual), so we capture
+    masked_embedding directly rather than applying level masks post-hoc.
+    """
+    all_embs: List[np.ndarray] = []
+    all_dims: List[int] = []
+    for i in tqdm(range(0, len(query_texts), batch_size),
+                  desc="  BAM-PQ queries", leave=False):
+        batch_texts = query_texts[i: i + batch_size]
+        batch_bloom = bloom_labels[i: i + batch_size]
+        enc = tokenizer(batch_texts, padding=True, truncation=True,
+                        max_length=128, return_tensors="pt")
+        enc = {k: v.to(device) for k, v in enc.items()}
+        bloom_t = torch.tensor(batch_bloom, dtype=torch.long, device=device)
+        out = model.encode_queries(enc["input_ids"], enc["attention_mask"],
+                                   bloom_labels=bloom_t)
+        masked = out.get("masked_embedding", out.get("full_embedding"))
+        all_embs.append(masked.cpu().half().numpy())
+        if "mask" in out:
+            dims = (out["mask"] > 0.5).float().sum(dim=-1).long().cpu().tolist()
+        elif "discrete_dim" in out:
+            dims = out["discrete_dim"].long().cpu().tolist()
+        else:
+            dims = [masked.shape[-1]] * len(batch_texts)
+        all_dims.extend(dims if isinstance(dims, list) else [dims] * len(batch_texts))
+
+    return np.concatenate(all_embs, axis=0), np.array(all_dims, dtype=np.int64)
+
+
+def retrieve_bam_pq(pq_q_embs_f16: np.ndarray,
+                    c_full_f16: np.ndarray,
+                    k: int = 100) -> np.ndarray:
+    """
+    BAM-PQ retrieval: masked query embeddings vs full corpus embeddings.
+    Since query zeros out irrelevant dims, a single FAISS flat index works.
+    Queries are already masked — score = q_masked · d_full ignores zero dims.
+    """
+    c_norm = _norm(c_full_f16)
+    index = _build_index_obj(c_norm)
+    q_norm = _norm(pq_q_embs_f16)
+    return _search_index(index, q_norm, k)
+
+
 # ─────────────────────── Metrics (sparse qrels) ──────────────────────────────
 
 def compute_ndcg_sparse(topk_indices: np.ndarray,
@@ -565,6 +619,46 @@ def run_dataset(dataset_name: str, args, device) -> Dict:
           f"dims={avg_dims}")
     del bam_b_c_embs, bam_b_q_embs, topk_b
 
+    # ── BAM-PQ (optional) ────────────────────────────────────────────────────
+    if args.bam_pq_checkpoint and args.bam_pq_config:
+        ckpt_f = os.path.join(args.bam_pq_checkpoint, "checkpoint.pt")
+        if os.path.exists(ckpt_f):
+            bam_pq_config = load_config(args.bam_pq_config)
+            tok_bam_pq    = AutoTokenizer.from_pretrained(
+                bam_pq_config["model"]["backbone"])
+            print("\n[BAM-PQ] Loading and encoding ...")
+            bam_pq_model  = load_bam_model(bam_pq_config, args.bam_pq_checkpoint, device)
+
+            # Corpus: full unmasked embeddings (masking happens on query side)
+            bam_pq_c_embs = encode_texts_to_array(
+                bam_pq_model, corpus_texts, tok_bam_pq, device, batch_size=128)
+
+            # Queries: masked embeddings (bloom anchor + query residual)
+            bam_pq_q_embs, pq_per_query_dims = encode_bam_pq_queries(
+                bam_pq_model, query_texts, bloom_labels.tolist(),
+                tok_bam_pq, device)
+            del bam_pq_model
+            if device.type == "cuda": torch.cuda.empty_cache()
+
+            topk_pq = retrieve_bam_pq(bam_pq_q_embs, bam_pq_c_embs, MAX_K)
+            m_pq = evaluate_retrieval(topk_pq, qrels_sparse, bloom_labels)
+
+            # Per-level active dim stats
+            pq_level_dims = {}
+            for lev in range(6):
+                mask_lev = bloom_labels == lev
+                if mask_lev.any():
+                    pq_level_dims[BLOOM_NAMES[lev]] = float(
+                        pq_per_query_dims[mask_lev].mean())
+            m_pq["avg_active_dims_per_level"] = pq_level_dims
+            m_pq["avg_active_dims_overall"] = float(pq_per_query_dims.mean())
+            results_dict["BAM-PQ"] = m_pq
+            print(f"  BAM-PQ R@10={m_pq['recall@10']:.4f}  NDCG@10={m_pq['ndcg@10']:.4f}  "
+                  f"avg_dims={m_pq['avg_active_dims_overall']:.1f}  per_level={pq_level_dims}")
+            del bam_pq_c_embs, bam_pq_q_embs, topk_pq
+        else:
+            print(f"\n[BAM-PQ] checkpoint not found at {ckpt_f} — skipping.")
+
     # ── BAM-A (optional) ─────────────────────────────────────────────────────
     if args.bam_a_checkpoint and args.bam_a_config:
         ckpt_f = os.path.join(args.bam_a_checkpoint, "checkpoint.pt")
@@ -611,16 +705,20 @@ def run_dataset(dataset_name: str, args, device) -> Dict:
         n10 = m.get("ndcg@10",   float("nan"))
         print(f"  {name:<16}  {r1:6.4f}  {r5:6.4f}  {r10:6.4f}  {n10:8.4f}")
 
-    # BAM-B Bloom breakdown
-    if "BAM-B" in results_dict:
-        print(f"\n  BAM-B per-Bloom breakdown (NDCG@10 | R@10):")
-        for b in range(6):
-            bname = BLOOM_NAMES[b]
-            m = results_dict["BAM-B"]
-            if f"bloom_{bname}_n" in m:
-                print(f"    {bname:<12} n={m[f'bloom_{bname}_n']:5d}  "
-                      f"NDCG@10={m[f'bloom_{bname}_ndcg@10']:.4f}  "
-                      f"R@10={m[f'bloom_{bname}_recall@10']:.4f}")
+    # Per-model Bloom breakdown
+    for model_key in ("BAM-B", "BAM-PQ"):
+        if model_key in results_dict:
+            print(f"\n  {model_key} per-Bloom breakdown (NDCG@10 | R@10 | avg_dims):")
+            m = results_dict[model_key]
+            level_dims = m.get("avg_active_dims_per_level", {})
+            for b in range(6):
+                bname = BLOOM_NAMES[b]
+                if f"bloom_{bname}_n" in m:
+                    dims_str = (f"  dims={level_dims[bname]:.0f}"
+                                if bname in level_dims else "")
+                    print(f"    {bname:<12} n={m[f'bloom_{bname}_n']:5d}  "
+                          f"NDCG@10={m[f'bloom_{bname}_ndcg@10']:.4f}  "
+                          f"R@10={m[f'bloom_{bname}_recall@10']:.4f}{dims_str}")
 
     results_dict["_meta"] = meta
     return results_dict
@@ -634,6 +732,8 @@ def main():
     parser.add_argument("--mrl_config",        required=True)
     parser.add_argument("--bam_b_checkpoint",  required=True)
     parser.add_argument("--bam_b_config",      required=True)
+    parser.add_argument("--bam_pq_checkpoint", default=None)
+    parser.add_argument("--bam_pq_config",     default=None)
     parser.add_argument("--bam_a_checkpoint",  default=None)
     parser.add_argument("--bam_a_config",      default=None)
     parser.add_argument("--datasets", nargs="+", default=ZERO_SHOT_DATASETS)
