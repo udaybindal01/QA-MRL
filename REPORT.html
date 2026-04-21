@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 2cm; }
+  @media print { body { -webkit-print-color-adjust: exact; } }
+  body { font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 11pt; line-height: 1.6; color: #222; max-width: 800px; margin: 0 auto; padding: 20px; }
+  h1 { font-size: 20pt; border-bottom: 2px solid #333; padding-bottom: 6px; }
+  h2 { font-size: 15pt; color: #1a1a1a; margin-top: 32px; border-bottom: 1px solid #ccc; padding-bottom: 4px; page-break-after: avoid; }
+  h3 { font-size: 12pt; }
+  code { background: #f4f4f4; padding: 1px 4px; border-radius: 3px; font-size: 10pt; font-family: "SF Mono", Menlo, monospace; }
+  pre { background: #f4f4f4; padding: 12px; border-radius: 5px; font-size: 9.5pt; line-height: 1.4; overflow-x: auto; white-space: pre-wrap; page-break-inside: avoid; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 10pt; page-break-inside: avoid; }
+  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+  th { background: #f0f0f0; font-weight: 600; }
+  tr:nth-child(even) { background: #fafafa; }
+  strong { color: #111; }
+  hr { border: none; border-top: 1px solid #ddd; margin: 24px 0; }
+</style>
+</head>
+<body><h1>BAM: Bloom-Aligned Matryoshka Representation Learning for Query-Adaptive Retrieval</h1>
+<hr />
+<h2>1. What is MRL?</h2>
+<p>Dense retrieval encodes queries and documents into fixed-dimensional embeddings (e.g., 768 dims) and retrieves via dot-product similarity. <strong>Matryoshka Representation Learning (MRL)</strong> trains embeddings so that the first <em>d</em> dimensions form a valid lower-dimensional representation — you can truncate to 256 dims and still retrieve reasonably well.</p>
+<p>MRL enforces a <strong>dimensional hierarchy</strong> during training: it applies contrastive loss at multiple truncation points (64, 128, 256, 512, 768), teaching the encoder to pack the most important information into early dimensions.</p>
+<pre><code>Full embedding:  [d₁, d₂, d₃, ..., d₂₅₆, ..., d₇₆₈]
+                  ←── most important ──────── least important ──→
+
+Truncate to 256: [d₁, d₂, d₃, ..., d₂₅₆]  ✓ still works
+Truncate to 64:  [d₁, ..., d₆₄]              ✓ still works (lower quality)
+</code></pre>
+<p><strong>Result:</strong> One encoder, multiple operating points. Choose 256 dims for speed or 768 for quality — no retraining needed.</p>
+<hr />
+<h2>2. The Problem with MRL</h2>
+<p>MRL uses <strong>the same truncation for every query</strong>. Dimension 1 is always "most important," dimension 768 always least — regardless of what you're asking.</p>
+<p>But different queries have fundamentally different information needs:</p>
+<table>
+<thead>
+<tr>
+<th>Query</th>
+<th>Complexity</th>
+<th>Dims Needed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>"What is photosynthesis?"</td>
+<td>Low (factual recall)</td>
+<td>Few — just match a definition</td>
+</tr>
+<tr>
+<td>"Compare C3 vs C4 pathways under drought"</td>
+<td>High (analysis)</td>
+<td>Many — capture nuanced relationships</td>
+</tr>
+</tbody>
+</table>
+<p>We frame this through <strong>Bloom's cognitive taxonomy</strong> — six levels of cognitive complexity:</p>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>Name</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Remember</td>
+<td>"Define osmosis"</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Understand</td>
+<td>"Explain how osmosis works"</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Apply</td>
+<td>"Calculate osmotic pressure for this solution"</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Analyze</td>
+<td>"Compare osmosis and diffusion"</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Evaluate</td>
+<td>"Is reverse osmosis effective for desalination?"</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Create</td>
+<td>"Design an experiment to demonstrate osmosis"</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Our hypothesis:</strong> Higher cognitive complexity → more dimensions needed. Lower complexity → fewer dimensions without quality loss. A system that <strong>adapts dimensions per query</strong> can beat fixed MRL truncation.</p>
+<p><strong>The challenge:</strong> Learning this routing without degrading retrieval quality, using a mechanism lightweight enough to preserve efficiency gains.</p>
+<hr />
+<h2>3. BAM Option A — Prefix Routing</h2>
+<p><strong>Idea:</strong> Instead of one fixed truncation point for all queries, learn a <strong>different truncation point per Bloom level</strong>. Remember queries truncate to ~300 dims; Create queries use ~600 dims.</p>
+<p><strong>How it works:</strong></p>
+<pre><code>Query → Bloom classifier → level (1-6)
+                              ↓
+                        BloomDimRouter
+                          bloom_emb = Embedding(6, 32)     # one vector per level
+                          dim_head  = MLP(32 → 16 → 1)    # → scalar
+                          continuous_dim = sigmoid(scalar) × (768 − 128) + 128
+                              ↓
+                        Prefix mask: [1,1,1,...,1,0,0,...,0]
+                              ↓
+                        masked_emb = normalize(full_emb × mask)
+</code></pre>
+<p><strong>Forward pass:</strong> Hard binary prefix mask (dims 0..d are 1, rest are 0).
+<strong>Backward pass:</strong> Soft sigmoid gradients flow through via Straight-Through Estimator (STE).</p>
+<p><strong>Key properties:</strong>
+- Only ~1K parameters added (negligible vs 110M encoder)
+- Active dimensions are contiguous [0..d] → FAISS-compatible, no efficiency penalty at retrieval
+- Bloom is query-only — documents always encoded at full dimensionality; dot product naturally ignores zeroed query dims</p>
+<p><strong>Training losses:</strong>
+- <strong>Contrastive</strong> — InfoNCE in masked subspace (class-weighted by 1/√freq for Bloom imbalance)
+- <strong>Efficiency</strong> — pushes lower-complexity levels to fewer dims (Remember weight=1.0, Create weight=0.167)
+- <strong>Diversity</strong> — spreads the 6 learned truncation points apart
+- <strong>MRL anchor</strong> — keeps encoder sharp at standard MRL truncation points</p>
+<p><strong>Pipeline:</strong> MRL warm-start → train Option A with efficiency gated off for first 5 epochs (encoder builds quality before compression pressure begins).</p>
+<hr />
+<h2>4. Why Option B?</h2>
+<p>Option A is constrained to <strong>prefix masks</strong> — active dims must be contiguous [0..d]. This means:</p>
+<ul>
+<li>It can say "use dims 0 to 300" or "use dims 0 to 600"</li>
+<li>It <strong>cannot</strong> say "use dims 7, 42, 103, 511 but skip dims 0-6"</li>
+</ul>
+<p>The MRL hierarchy (early dims = most important) is a useful prior, but it's <strong>not always true</strong>. Some later dimensions might capture analytical or evaluative information better than some early dimensions. For a "Compare X and Y" query, dim 511 might be more relevant than dim 12.</p>
+<p><strong>The prefix constraint limits the model's expressiveness.</strong> What if we let the model select <strong>any subset</strong> of dimensions per Bloom level?</p>
+<hr />
+<h2>5. BAM Option B — Scattered Mask Routing</h2>
+<p><strong>Idea:</strong> Learn a <strong>scattered binary mask</strong> per Bloom level. Any combination of dimensions can be active — dimension 7, 42, 103, 511 might all be on while 0, 1, 2 are off.</p>
+<p><strong>How it works:</strong></p>
+<pre><code>Query → Bloom classifier → level (1-6)
+                              ↓
+                        BloomMaskHead
+                          bloom_logits = Embedding(6, 768)   # one 768-dim logit vector per level
+                              ↓
+                          soft_mask = Gumbel-Sigmoid(logits, temperature=τ)
+                          hard_mask = (soft_mask &gt; 0.5).float()    # STE
+                              ↓
+                        Scattered mask: [0,1,0,1,1,0,...,1,0,1]
+                              ↓
+                        masked_emb = normalize(full_emb × mask)
+</code></pre>
+<p>Each Bloom level gets its own learned mask initialized to a target sparsity:
+- Remember → 30% active (~230 dims)
+- Understand → 56% active (~430 dims)
+- Apply → 66% active (~507 dims)
+- Analyze → 76% active (~584 dims)
+- Evaluate → 86% active (~660 dims)
+- Create → 27% active (~207 dims)</p>
+<p><strong>The MRL prefix bias problem:</strong></p>
+<p>The MRL warm-start gives Option B a strong encoder — but that encoder has learned to concentrate information in early dimensions. Without intervention, the mask learning discovers prefix dims are high-quality and converges to a prefix-like pattern, defeating the purpose.</p>
+<p>Two mechanisms combat this:
+1. <strong>DropMask</strong> (rate=10%): Randomly flip 10% of mask bits during training. Forces the encoder to spread information across all dimensions because any single dim might be masked out.
+2. <strong>DimVarianceRedistribution</strong>: Penalizes the encoder when early dimensions have higher variance than late dimensions — a direct anti-prefix signal.</p>
+<p><strong>Reverse two-stage training:</strong></p>
+<p>If both mask and encoder train simultaneously, the mask chases a moving target → instability. Option B reverses the traditional approach:
+- <strong>Stage 1 (epochs 0-7):</strong> Encoder FROZEN, only BloomMaskHead trains. Mask converges to stable per-level patterns on top of frozen encoder quality.
+- <strong>Stage 2 (epochs 8-19):</strong> Encoder UNFREEZES at very low LR (1e-6). Gentle adaptation pushes information into mask-selected dimensions.</p>
+<p><strong>Additional losses:</strong>
+- <strong>Mask sparsity</strong> — enforces per-level target active dims
+- <strong>Mask diversity</strong> — penalizes different Bloom levels from learning identical masks
+- <strong>Mask variance</strong> — each dim should be useful to some levels but not all
+- <strong>Mask distillation</strong> — similarity structure in masked subspace should preserve full-embedding similarity structure</p>
+<hr />
+<h2>6. Why BAM-PQ?</h2>
+<p>Option B assigns <strong>one fixed mask per Bloom level</strong> — all "Analyze" queries share the same mask regardless of content. But:</p>
+<ul>
+<li>"Compare mitosis vs meiosis" (biology)</li>
+<li>"Compare GDP of US vs China" (economics)</li>
+</ul>
+<p>Both are Analyze-level, but they need <strong>different dimensions</strong> because they operate in different semantic spaces. The Bloom level alone doesn't capture the full routing signal.</p>
+<p><strong>What if the mask could adapt to the specific query, not just its Bloom level?</strong></p>
+<hr />
+<h2>7. BAM-PQ — Per-Query Routing</h2>
+<p><strong>Idea:</strong> The mask is the Bloom-level base <strong>plus a query-specific adjustment</strong>. The Bloom level provides a strong prior; a lightweight MLP adds a per-query residual.</p>
+<p><strong>How it works:</strong></p>
+<pre><code>Query → Encoder → CLS token (768-dim)
+     → Bloom classifier → level (1-6)
+                              ↓
+                        BloomQueryMaskHead
+                          bloom_logits = Embedding(6, 768)           # coarse Bloom prior
+                          query_mlp = Linear(768→256) → GELU → LN → Linear(256→768)  # per-query signal
+                          alpha = sigmoid(alpha_raw)                 # learned mixing weight
+                              ↓
+                          final_logits = bloom_logits[level] + α × query_mlp(CLS)
+                              ↓
+                          mask = Gumbel-STE(final_logits)
+                              ↓
+                        masked_emb = normalize(full_emb × mask)
+</code></pre>
+<p><strong>Why this works where pure per-query routing fails:</strong></p>
+<p>Previous attempts at self-supervised per-query routing (SoftRouter, GroupRouter in earlier QA-MRL versions) suffered from <strong>collapse</strong> — without a strong prior, the router either assigns all queries the same mask or oscillates chaotically.</p>
+<p>BAM-PQ solves this via the <strong>Bloom anchor</strong>:
+- At initialization, α ≈ 0.05 (init alpha_raw = -3.0) → model behaves identically to Option B
+- Query MLP output layer is zero-initialized → no per-query signal at epoch 0
+- α grows <strong>only if</strong> per-query adjustment genuinely improves retrieval
+- Bloom anchor provides stable gradients for sparsity/diversity losses even early in training</p>
+<p><strong>What alpha tells you at convergence:</strong>
+- α ≈ 0.1 → per-query routing adds 10% on top of Bloom prior (query content matters)
+- α ≈ 0.05 → Bloom level alone captures most of the routing signal
+- This is directly interpretable — you can measure how much per-query information helps</p>
+<p><strong>Training:</strong> Same reverse two-stage as Option B (8 epochs frozen + 12 unfrozen).</p>
+<hr />
+<h2>8. Summary: How Each Approach Builds on the Previous</h2>
+<pre><code>MRL Baseline
+  │
+  │  Problem: Fixed truncation — same dims for every query
+  │
+  ▼
+Option A (BloomDimRouter)
+  │  ✓ Learns per-Bloom-level prefix truncation
+  │  ✓ FAISS-compatible (contiguous dims)
+  │  ✗ Prefix constraint — can only use dims [0..d]
+  │
+  │  Problem: Cannot select scattered dims
+  │
+  ▼
+Option B (BloomMaskHead)
+  │  ✓ Scattered binary mask per Bloom level
+  │  ✓ DropMask + DimRedist to combat MRL prefix bias
+  │  ✓ Reverse two-stage training for stability
+  │  ✗ One fixed mask per Bloom level
+  │
+  │  Problem: Same Bloom level ≠ same information need
+  │
+  ▼
+BAM-PQ (BloomQueryMaskHead)
+     ✓ Bloom anchor + per-query MLP residual
+     ✓ Learned alpha controls mixing
+     ✓ Prevents collapse via strong Bloom prior
+     ✓ Interpretable: alpha magnitude = per-query routing value
+</code></pre>
+<p>Each step adds expressiveness while maintaining the gains of the previous step. The Bloom taxonomy provides the structural prior that prevents routing collapse — the key failure mode of earlier approaches.</p></body>
+</html>
