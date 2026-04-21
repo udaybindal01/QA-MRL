@@ -31,6 +31,63 @@ Truncate to 256: [d₁, d₂, d₃, ..., d₂₅₆]  ✓ still works
 Truncate to 64:  [d₁, ..., d₆₄]              ✓ still works (lower quality)
 </code></pre>
 <p><strong>Result:</strong> One encoder, multiple operating points. Choose 256 dims for speed or 768 for quality — no retraining needed.</p>
+<h3>Datasets</h3>
+<p>We train on educational science QA datasets that provide query-passage pairs:</p>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Source</th>
+<th>What it provides</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>SciQ</strong> (allenai/sciq)</td>
+<td>Science textbook questions</td>
+<td>Support passages + questions across biology, chemistry, physics</td>
+</tr>
+<tr>
+<td><strong>ARC-Easy / ARC-Challenge</strong> (allenai/ai2_arc)</td>
+<td>Standardized science exams</td>
+<td>Multiple-choice science questions at two difficulty levels</td>
+</tr>
+<tr>
+<td><strong>OpenBookQA</strong> (allenai/openbookqa)</td>
+<td>Open-book science facts</td>
+<td>Questions requiring reasoning over provided science facts</td>
+</tr>
+<tr>
+<td><strong>QASC</strong> (allenai/qasc)</td>
+<td>Multi-hop science reasoning</td>
+<td>Questions requiring combining two facts to answer</td>
+</tr>
+</tbody>
+</table>
+<p>Hard negatives are mined using <strong>BM25-based curriculum mining</strong> — the most lexically similar non-relevant passages are the hardest negatives (default: 7 negatives per query, curriculum stage 0.7).</p>
+<h3>MRL Losses</h3>
+<table>
+<thead>
+<tr>
+<th>Loss</th>
+<th>Formula</th>
+<th>Why it's used</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>InfoNCE (full dim)</strong></td>
+<td><code>-log(exp(sim(q,p⁺)/τ) / Σ exp(sim(q,pᵢ)/τ))</code></td>
+<td>The core contrastive objective — pulls query-positive pairs together, pushes negatives apart at full 768 dimensions</td>
+</tr>
+<tr>
+<td><strong>MRL Anchor Loss</strong></td>
+<td>Same InfoNCE applied at truncation points [64, 128, 256, 512, 768], weighted by <code>D/√d</code></td>
+<td>Forces the encoder to produce valid representations at every truncation point. Smaller truncations get higher weight because they're harder to learn. This creates the dimensional hierarchy where early dims carry the most information</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Backbone:</strong> BAAI/bge-base-en-v1.5 (768-dim, 110M params) or intfloat/e5-large-v2 (1024-dim, 335M params).</p>
 <hr />
 <h2>2. The Problem with MRL</h2>
 <p>MRL uses <strong>the same truncation for every query</strong>. Dimension 1 is always "most important," dimension 768 always least — regardless of what you're asking.</p>
@@ -100,6 +157,43 @@ Truncate to 64:  [d₁, ..., d₆₄]              ✓ still works (lower qualit
 </table>
 <p><strong>Our hypothesis:</strong> Higher cognitive complexity → more dimensions needed. Lower complexity → fewer dimensions without quality loss. A system that <strong>adapts dimensions per query</strong> can beat fixed MRL truncation.</p>
 <p><strong>The challenge:</strong> Learning this routing without degrading retrieval quality, using a mechanism lightweight enough to preserve efficiency gains.</p>
+<h3>Bloom Annotation</h3>
+<p>Queries are classified into Bloom levels using <strong>zero-shot NLI</strong> (MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli). Each Bloom level is framed as a hypothesis; the NLI model scores entailment probability and picks the highest:</p>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>Hypothesis</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Remember</td>
+<td>"This query is asking to recall or retrieve a specific fact, name, or definition"</td>
+</tr>
+<tr>
+<td>Understand</td>
+<td>"This query is asking to explain, describe, or summarize how something works"</td>
+</tr>
+<tr>
+<td>Apply</td>
+<td>"This query is asking how to use or apply knowledge to solve a practical problem"</td>
+</tr>
+<tr>
+<td>Analyze</td>
+<td>"This query is asking to compare, contrast, or examine the relationship between things"</td>
+</tr>
+<tr>
+<td>Evaluate</td>
+<td>"This query requires making a decision or forming an opinion about the worth or validity of something"</td>
+</tr>
+<tr>
+<td>Create</td>
+<td>"This query is asking to design, propose, or synthesize something new"</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Bloom is query-only</strong> — documents have no cognitive level. The same passage about photosynthesis serves a "Remember" query and a "Create" query differently. Only the query determines routing.</p>
 <hr />
 <h2>3. BAM Option A — Prefix Routing</h2>
 <p><strong>Idea:</strong> Instead of one fixed truncation point for all queries, learn a <strong>different truncation point per Bloom level</strong>. Remember queries truncate to ~300 dims; Create queries use ~600 dims.</p>
@@ -120,13 +214,46 @@ Truncate to 64:  [d₁, ..., d₆₄]              ✓ still works (lower qualit
 <p><strong>Key properties:</strong>
 - Only ~1K parameters added (negligible vs 110M encoder)
 - Active dimensions are contiguous [0..d] → FAISS-compatible, no efficiency penalty at retrieval
-- Bloom is query-only — documents always encoded at full dimensionality; dot product naturally ignores zeroed query dims</p>
-<p><strong>Training losses:</strong>
-- <strong>Contrastive</strong> — InfoNCE in masked subspace (class-weighted by 1/√freq for Bloom imbalance)
-- <strong>Efficiency</strong> — pushes lower-complexity levels to fewer dims (Remember weight=1.0, Create weight=0.167)
-- <strong>Diversity</strong> — spreads the 6 learned truncation points apart
-- <strong>MRL anchor</strong> — keeps encoder sharp at standard MRL truncation points</p>
-<p><strong>Pipeline:</strong> MRL warm-start → train Option A with efficiency gated off for first 5 epochs (encoder builds quality before compression pressure begins).</p>
+- Documents always encoded at full dimensionality; dot product naturally ignores zeroed query dims</p>
+<h3>Option A Losses</h3>
+<table>
+<thead>
+<tr>
+<th>Loss</th>
+<th>Weight</th>
+<th>What it does</th>
+<th>Why it's needed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Bloom-Masked Contrastive</strong></td>
+<td>1.0</td>
+<td>InfoNCE computed in the masked subspace: <code>sim(q*mask, p*mask)</code>. Class-weighted by <code>1/√freq</code> per Bloom level + difficulty weighting (harder samples get more weight)</td>
+<td>The primary retrieval objective — ensures the model retrieves correctly even with reduced dimensions. Class weighting prevents rare Bloom levels (Evaluate, Create) from being drowned out by common ones (Remember)</td>
+</tr>
+<tr>
+<td><strong>Efficiency</strong></td>
+<td>0.2</td>
+<td>Per-class averaged penalty: <code>mean_b[cognitive(b) × mean_dim_b / D]</code> where <code>cognitive(b) = 1 - b/6</code> (Remember=1.0, Create=0.167)</td>
+<td>Pushes lower cognitive levels to use fewer dimensions. Remember gets 6× more compression pressure than Create, encoding the hypothesis that simple queries need fewer dims. Per-class averaging ensures rare levels get equal gradient updates</td>
+</tr>
+<tr>
+<td><strong>Router Diversity</strong></td>
+<td>0.0</td>
+<td><code>-mean_{i&lt;j}(\|dim_i - dim_j\|)</code> — maximizes pairwise distance between the 6 learned truncation points</td>
+<td>Prevents all Bloom levels from collapsing to the same dimension. Set to 0.0 because efficiency loss alone provides correct cognitive ordering once initialization is fixed</td>
+</tr>
+<tr>
+<td><strong>MRL Anchor Regularization</strong></td>
+<td>0.3</td>
+<td>InfoNCE at standard MRL truncation points [64, 128, 256, 512, 768], weighted <code>D/√d</code></td>
+<td>Prevents the encoder from "forgetting" its multi-resolution structure during BAM fine-tuning. Smaller truncations get higher weight since they're the most fragile</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Training detail:</strong> Efficiency loss is <strong>gated off for the first 5 epochs</strong> (<code>encoder_warmup_epochs</code>). This lets the encoder first build high-quality representations in the masked subspace, then efficiency pressure gradually compresses lower levels.</p>
+<p><strong>Pipeline:</strong> MRL warm-start → train Option A (15 epochs, save all checkpoints) → post-hoc epoch selection via BSR.</p>
 <hr />
 <h2>4. Why Option B?</h2>
 <p>Option A is constrained to <strong>prefix masks</strong> — active dims must be contiguous [0..d]. This means:</p>
@@ -152,13 +279,7 @@ Truncate to 64:  [d₁, ..., d₆₄]              ✓ still works (lower qualit
                               ↓
                         masked_emb = normalize(full_emb × mask)
 </code></pre>
-<p>Each Bloom level gets its own learned mask initialized to a target sparsity:
-- Remember → 30% active (~230 dims)
-- Understand → 56% active (~430 dims)
-- Apply → 66% active (~507 dims)
-- Analyze → 76% active (~584 dims)
-- Evaluate → 86% active (~660 dims)
-- Create → 27% active (~207 dims)</p>
+<p>Each Bloom level gets its own learned mask initialized to a target sparsity via Gaussian quantile initialization.</p>
 <p><strong>The MRL prefix bias problem:</strong></p>
 <p>The MRL warm-start gives Option B a strong encoder — but that encoder has learned to concentrate information in early dimensions. Without intervention, the mask learning discovers prefix dims are high-quality and converges to a prefix-like pattern, defeating the purpose.</p>
 <p>Two mechanisms combat this:
@@ -168,11 +289,76 @@ Truncate to 64:  [d₁, ..., d₆₄]              ✓ still works (lower qualit
 <p>If both mask and encoder train simultaneously, the mask chases a moving target → instability. Option B reverses the traditional approach:
 - <strong>Stage 1 (epochs 0-7):</strong> Encoder FROZEN, only BloomMaskHead trains. Mask converges to stable per-level patterns on top of frozen encoder quality.
 - <strong>Stage 2 (epochs 8-19):</strong> Encoder UNFREEZES at very low LR (1e-6). Gentle adaptation pushes information into mask-selected dimensions.</p>
-<p><strong>Additional losses:</strong>
-- <strong>Mask sparsity</strong> — enforces per-level target active dims
-- <strong>Mask diversity</strong> — penalizes different Bloom levels from learning identical masks
-- <strong>Mask variance</strong> — each dim should be useful to some levels but not all
-- <strong>Mask distillation</strong> — similarity structure in masked subspace should preserve full-embedding similarity structure</p>
+<h3>Option B Losses</h3>
+<p>Option B uses all of Option A's losses (contrastive, efficiency, MRL anchor) plus five additional losses for scattered mask learning:</p>
+<table>
+<thead>
+<tr>
+<th>Loss</th>
+<th>Weight</th>
+<th>What it does</th>
+<th>Why it's needed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Bloom-Masked Contrastive</strong></td>
+<td>1.0</td>
+<td>Same as Option A — InfoNCE in masked subspace with class weighting</td>
+<td>Primary retrieval objective</td>
+</tr>
+<tr>
+<td><strong>Efficiency</strong></td>
+<td>0.1</td>
+<td>Same cognitive-weighted compression as Option A</td>
+<td>Encourages lower Bloom levels to activate fewer dimensions</td>
+</tr>
+<tr>
+<td><strong>MRL Anchor Regularization</strong></td>
+<td>0.3</td>
+<td>Same as Option A — InfoNCE at MRL truncation points</td>
+<td>Preserves encoder's multi-resolution quality</td>
+</tr>
+<tr>
+<td><strong>Mask Sparsity</strong></td>
+<td>1.0</td>
+<td><code>mean_b[\|mean_active_frac_b - target_b\|]</code> with per-level targets (Remember→35%, Understand→50%, Apply→60%, Analyze→65%, Evaluate→72%, Create→55%)</td>
+<td>Without this, the mask drifts to all-ones (full dims) or collapses. Per-level targets directly encode the cognitive load hypothesis into the mask structure</td>
+</tr>
+<tr>
+<td><strong>Mask Diversity</strong></td>
+<td>0.5</td>
+<td><code>mean_{i&lt;j} max(0, cosine_sim(mask_i, mask_j) - margin)</code> across Bloom levels</td>
+<td>Prevents all 6 masks from learning identical patterns. Without it, all levels converge to the same "safe" mask (high cosine similarity ~0.97). Margin=0.3 provides strong gradient to push masks apart</td>
+</tr>
+<tr>
+<td><strong>Mask Variance</strong></td>
+<td>0.5</td>
+<td><code>-mean_d(Var_b(mean_activation[b,d]))</code> — maximizes per-dimension variance across Bloom levels</td>
+<td>Rewards dimension specialization: dim d should be active for some Bloom levels but not others. Operates at dimension level (768 gradient signals) vs pair level (15 signals), providing much richer optimization signal than diversity alone</td>
+</tr>
+<tr>
+<td><strong>Mask Distillation</strong></td>
+<td>0.3</td>
+<td><code>mean_{i≠j} \|sim_full(i,j) - sim_masked(i,j)\|</code> — masked similarity should preserve full-embedding similarity structure</td>
+<td>Unsupervised teacher-student signal — the full 768-dim encoder is the "teacher", masked output is the "student". Forces the mask to select dims that preserve semantic neighborhoods. Fires from epoch 0, giving the mask early signal before sparsity pressure</td>
+</tr>
+<tr>
+<td><strong>DimVariance Redistribution</strong></td>
+<td>0.05</td>
+<td><code>ReLU(mean_var(early_dims) - mean_var(late_dims))</code> on full embeddings</td>
+<td>Directly combats MRL prefix bias — penalizes the encoder when early dimensions have higher information content than late dimensions. Forces the encoder to spread useful information across all 768 dims so the scattered mask has high-quality dims everywhere to choose from</td>
+</tr>
+</tbody>
+</table>
+<h3>Why so many losses?</h3>
+<p>Scattered masks are much harder to learn than prefix masks. Option A has one scalar per level — 6 values to optimize. Option B has 6 × 768 = 4,608 binary decisions. Without careful loss design:
+- Masks collapse to identical patterns (need diversity + variance)
+- Masks drift to all-on or all-off (need sparsity)
+- Masks rediscover the MRL prefix (need DropMask + DimRedist)
+- Masks destroy the encoder's similarity structure (need distillation)
+- Encoder forgets multi-resolution quality (need MRL anchor)</p>
+<p>Each loss addresses a specific failure mode observed during development.</p>
 <hr />
 <h2>6. Why BAM-PQ?</h2>
 <p>Option B assigns <strong>one fixed mask per Bloom level</strong> — all "Analyze" queries share the same mask regardless of content. But:</p>
@@ -211,15 +397,43 @@ Truncate to 64:  [d₁, ..., d₆₄]              ✓ still works (lower qualit
 - α ≈ 0.1 → per-query routing adds 10% on top of Bloom prior (query content matters)
 - α ≈ 0.05 → Bloom level alone captures most of the routing signal
 - This is directly interpretable — you can measure how much per-query information helps</p>
+<h3>BAM-PQ Losses</h3>
+<p>BAM-PQ uses all of Option B's losses (same weights) plus one additional loss:</p>
+<table>
+<thead>
+<tr>
+<th>Loss</th>
+<th>Weight</th>
+<th>What it does</th>
+<th>Why it's needed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>All Option B losses</td>
+<td>(same)</td>
+<td>Contrastive, efficiency, MRL anchor, sparsity, diversity, variance, distillation, DimRedist</td>
+<td>Same reasons as Option B — the Bloom-level mask still needs all the same constraints</td>
+</tr>
+<tr>
+<td><strong>Query Routing Contrastive</strong></td>
+<td>0.1</td>
+<td>InfoNCE where the per-query MLP signal is contrasted against random other queries' signals</td>
+<td>Ensures the per-query adjustment produces distinct masks for semantically different queries within the same Bloom level, preventing the MLP from outputting the same residual for all queries</td>
+</tr>
+</tbody>
+</table>
 <p><strong>Training:</strong> Same reverse two-stage as Option B (8 epochs frozen + 12 unfrozen).</p>
 <hr />
 <h2>8. Summary: How Each Approach Builds on the Previous</h2>
 <pre><code>MRL Baseline
+  │  Losses: InfoNCE + MRL Anchor (2 losses)
   │
   │  Problem: Fixed truncation — same dims for every query
   │
   ▼
 Option A (BloomDimRouter)
+  │  Losses: + Efficiency + Diversity (4 losses)
   │  ✓ Learns per-Bloom-level prefix truncation
   │  ✓ FAISS-compatible (contiguous dims)
   │  ✗ Prefix constraint — can only use dims [0..d]
@@ -228,6 +442,8 @@ Option A (BloomDimRouter)
   │
   ▼
 Option B (BloomMaskHead)
+  │  Losses: + Sparsity + Mask Diversity + Mask Variance
+  │          + Distillation + DimRedist (9 losses)
   │  ✓ Scattered binary mask per Bloom level
   │  ✓ DropMask + DimRedist to combat MRL prefix bias
   │  ✓ Reverse two-stage training for stability
@@ -237,10 +453,20 @@ Option B (BloomMaskHead)
   │
   ▼
 BAM-PQ (BloomQueryMaskHead)
+     Losses: + Query Routing Contrastive (10 losses)
      ✓ Bloom anchor + per-query MLP residual
      ✓ Learned alpha controls mixing
      ✓ Prevents collapse via strong Bloom prior
      ✓ Interpretable: alpha magnitude = per-query routing value
 </code></pre>
-<p>Each step adds expressiveness while maintaining the gains of the previous step. The Bloom taxonomy provides the structural prior that prevents routing collapse — the key failure mode of earlier approaches.</p></body>
+<p>Each step adds expressiveness while maintaining the gains of the previous step. The Bloom taxonomy provides the structural prior that prevents routing collapse — the key failure mode of earlier approaches.</p>
+<hr />
+<h2>9. Evaluation</h2>
+<p><strong>Metrics:</strong>
+- <strong>Retrieval quality:</strong> Recall@K (k=1,5,10,20,50,100), NDCG@10, MAP
+- <strong>Bloom-stratified:</strong> Per-Bloom-level Recall@10 with 95% bootstrap confidence intervals
+- <strong>Efficiency:</strong> Average active dimensions, sparse ratio (fraction of zeroed dims)
+- <strong>BSR (Bloom Stratified Recall):</strong> quality × (1 + α × efficiency) — balances retrieval quality against dimension compression for checkpoint selection</p>
+<p><strong>Out-of-domain (BEIR):</strong> Trained on educational science data → evaluated on HotpotQA, SciFact, NFCorpus, TREC-COVID, SciDocs, Climate-FEVER. BEIR queries are auto-annotated with Bloom levels using the NLI classifier so BAM routing adapts per-query.</p>
+<p><strong>Fair comparison:</strong> BAM vs MRL at the <strong>same dimension budget</strong> per Bloom level — MRL truncated to match BAM's average active dims, isolating the effect of dimension <em>selection</em> (scattered vs prefix) from dimension <em>count</em>.</p></body>
 </html>
