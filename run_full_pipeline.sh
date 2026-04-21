@@ -76,7 +76,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$SINGLE_DATASET" ]] && DATASETS="$SINGLE_DATASET"
 
-ALL_STEPS=(build annotate train_mrl find_mrl train_bam_b find_bam_b train_bam_pq find_bam_pq eval fair_cmp eff_curves)
+ALL_STEPS=(build annotate train_mrl find_mrl train_bam_b find_bam_b train_bam_pq find_bam_pq eval fair_cmp eff_curves eval_bam_pq fair_cmp_pq)
 
 should_run() {
     local step="$1"
@@ -380,6 +380,43 @@ for DS in $DATASETS; do
         echo "  Curves → $DS_RESULTS/efficiency_curves/"
     fi
 
+    # ── STEP 10: eval_bam_pq ─────────────────────────────────────────────────
+    if should_run eval_bam_pq; then
+        log "[$DS] STANDARD EVALUATION — BAM-PQ vs MRL"
+        if [[ ! -f "$BAM_PQ_BEST/checkpoint.pt" ]]; then
+            echo "  BAM-PQ best_bsr not found at $BAM_PQ_BEST — skipping eval_bam_pq."
+        else
+            [[ -f "$MRL_BEST/checkpoint.pt" ]] || die "[$DS] MRL best not found"
+            mkdir -p "$DS_RESULTS/bam_pq"
+            python3 scripts/eval_bam.py \
+                --config        "$BAM_PQ_CFG" \
+                --checkpoint    "$BAM_PQ_BEST" \
+                --baseline      "$MRL_BEST" \
+                --output_dir    "$DS_RESULTS/bam_pq/" \
+                || die "[$DS] eval_bam.py (BAM-PQ) failed"
+            echo "  Results → $DS_RESULTS/bam_pq/results.json"
+        fi
+    fi
+
+    # ── STEP 11: fair_cmp_pq ─────────────────────────────────────────────────
+    if should_run fair_cmp_pq; then
+        log "[$DS] FAIR COMPARISON — BAM-PQ vs MRL at same per-Bloom dim budget"
+        if [[ ! -f "$BAM_PQ_BEST/checkpoint.pt" ]]; then
+            echo "  BAM-PQ best_bsr not found at $BAM_PQ_BEST — skipping fair_cmp_pq."
+        else
+            [[ -f "$MRL_BEST/checkpoint.pt" ]] || die "[$DS] MRL best not found"
+            mkdir -p "$DS_RESULTS/bam_pq/fair_comparison"
+            python3 scripts/eval_fair_comparison.py \
+                --config         "$BAM_PQ_CFG" \
+                --bam_checkpoint "$BAM_PQ_BEST" \
+                --mrl_checkpoint "$MRL_BEST" \
+                --bam_results    "$DS_RESULTS/bam_pq/results.json" \
+                --output_dir     "$DS_RESULTS/bam_pq/fair_comparison/" \
+                || die "[$DS] eval_fair_comparison.py (BAM-PQ) failed"
+            echo "  Results → $DS_RESULTS/bam_pq/fair_comparison/fair_comparison.json"
+        fi
+    fi
+
 done  # end per-dataset loop
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -412,6 +449,26 @@ for ds in datasets:
     print(f"  {ds:14s} {mrl_r10:>10.4f} {bam_r10:>12.4f} {dims:>8.0f} {sign}{delta*100:>6.2f}%")
 
 print()
+print("  Standard: BAM-PQ vs MRL at full dims")
+print(f"  {'Dataset':14s} {'MRL R@10':>10s} {'BAM-PQ R@10':>13s} {'Dims':>8s} {'Δ':>8s}")
+print("  " + "─" * 60)
+for ds in datasets:
+    path = os.path.join(results_root, ds, "bam_pq", "results.json")
+    if not os.path.exists(path):
+        print(f"  {ds:14s}  (not run)")
+        continue
+    with open(path) as f:
+        r = json.load(f)
+    mrl_r10 = r.get("MRL Baseline", {}).get("recall@10", 0)
+    pq_r10  = r.get("BAM v4 (Option B)", {}).get("recall@10",
+              r.get("BAM-PQ", {}).get("recall@10", 0))
+    dims    = r.get("BAM v4 (Option B)", {}).get("avg_active_dims",
+              r.get("BAM-PQ", {}).get("avg_active_dims", 0))
+    delta   = pq_r10 - mrl_r10
+    sign    = "+" if delta >= 0 else ""
+    print(f"  {ds:14s} {mrl_r10:>10.4f} {pq_r10:>13.4f} {dims:>8.0f} {sign}{delta*100:>6.2f}%")
+
+print()
 print("  Fair: BAM-B vs MRL truncated to same per-Bloom budget")
 print(f"  {'Dataset':14s} {'Avg Δ':>10s} {'BAM wins':>10s}")
 print("  " + "─" * 38)
@@ -428,11 +485,30 @@ for ds in datasets:
     sign  = "+" if avg_d >= 0 else ""
     print(f"  {ds:14s} {sign}{avg_d*100:>8.2f}%  {wins}/{total}")
 
+print()
+print("  Fair: BAM-PQ vs MRL truncated to same per-Bloom budget")
+print(f"  {'Dataset':14s} {'Avg Δ':>10s} {'BAM wins':>10s}")
+print("  " + "─" * 38)
+for ds in datasets:
+    fc_path = os.path.join(results_root, ds, "bam_pq", "fair_comparison", "fair_comparison.json")
+    if not os.path.exists(fc_path):
+        print(f"  {ds:14s}  (not run)")
+        continue
+    with open(fc_path) as f:
+        fc = json.load(f)
+    avg_d = fc.get("avg_delta_bam_minus_mrl_trunc", math.nan)
+    wins  = fc.get("bam_wins", 0)
+    total = fc.get("total_levels", 6)
+    sign  = "+" if avg_d >= 0 else ""
+    print(f"  {ds:14s} {sign}{avg_d*100:>8.2f}%  {wins}/{total}")
+
 PYEOF
 
 log "PIPELINE COMPLETE"
 echo ""
-echo "  Checkpoints : $CKPT_ROOT/{dataset}/{mrl,bam_b}/"
-echo "  Results     : $RESULTS_ROOT/{dataset}/"
+echo "  Checkpoints : $CKPT_ROOT/{dataset}/{mrl,bam_b,bam_pq}/"
+echo "  Results     : $RESULTS_ROOT/{dataset}/results.json           (BAM-B)"
+echo "  Results PQ  : $RESULTS_ROOT/{dataset}/bam_pq/results.json   (BAM-PQ)"
 echo "  Fair cmp    : $RESULTS_ROOT/{dataset}/fair_comparison/"
+echo "  Fair cmp PQ : $RESULTS_ROOT/{dataset}/bam_pq/fair_comparison/"
 echo "  Eff curves  : $RESULTS_ROOT/{dataset}/efficiency_curves/"
