@@ -42,12 +42,12 @@ BLOOM_NAMES = {1: "Remember", 2: "Understand", 3: "Apply",
 # Phrased as "This query is about X" — works well with NLI entailment framing.
 # Kept concrete and distinct to avoid NLI model conflating adjacent levels.
 BLOOM_HYPOTHESES = [
-    "This query is asking to recall or retrieve a specific fact, name, or definition.",       # 1 Remember
-    "This query is asking to explain, describe, or summarize how something works.",            # 2 Understand
-    "This query is asking how to use or apply knowledge to solve a practical problem.",        # 3 Apply
-    "This query is asking to compare, contrast, or examine the relationship between things.",  # 4 Analyze
-    "This query is asking to evaluate evidence, assess effectiveness, or judge quality.",      # 5 Evaluate
-    "This query is asking to design, propose, or synthesize something new.",                   # 6 Create
+    "This query is asking to recall or retrieve a specific fact, name, or definition.",                    # 1 Remember
+    "This query is asking to explain, describe, or summarize how something works.",                        # 2 Understand
+    "This query is asking how to use or apply knowledge to solve a practical problem.",                    # 3 Apply
+    "This query is asking to compare, contrast, or examine the relationship between things.",              # 4 Analyze
+    "This query requires making a decision or forming an opinion about the worth or validity of something.",  # 5 Evaluate
+    "This query is asking to design, propose, or synthesize something new.",                               # 6 Create
 ]
 
 # Model options:
