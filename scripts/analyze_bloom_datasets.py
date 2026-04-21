@@ -2,7 +2,9 @@
 Bloom-Level Dataset Analysis for Balanced Educational Training Data.
 
 Loads question/query texts from a wide range of educational QA datasets,
-classifies each with cip29/bert-blooms-taxonomy-classifier, and reports
+classifies each with MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli
+(zero-shot NLI — much better Bloom distribution than cip29 which collapses
+to 82% Remember on non-educational queries), and reports
 per-dataset Bloom distribution. This tells you which datasets to mix
 for a balanced 6-level training set.
 
@@ -40,15 +42,10 @@ import json
 import os
 import sys
 from collections import Counter, defaultdict
-from typing import List, Tuple
-
-from tqdm import tqdm
+from typing import List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data.bloom_classifier import classify_bloom_batch
-
-BLOOM_NAMES = {1: "Remember", 2: "Understand", 3: "Apply",
-               4: "Analyze", 5: "Evaluate", 6: "Create"}
+from data.annotate_bloom_local import load_classifier, classify_batch, BLOOM_NAMES
 
 
 # ─────────────────────── Dataset Loaders ───────────────────────
@@ -188,12 +185,12 @@ ALL_LOADERS = [
 
 # ─────────────────────── Analysis ───────────────────────
 
-def analyze_dataset(name: str, queries: List[str]) -> dict:
+def analyze_dataset(name: str, queries: List[str], clf) -> dict:
     """Classify queries and return Bloom distribution stats."""
     if not queries:
         return {"name": name, "total": 0, "distribution": {}, "percentages": {}}
 
-    levels = classify_bloom_batch(queries)
+    levels = classify_batch(queries, clf)
     dist = Counter(levels)
 
     pcts = {}
@@ -335,20 +332,34 @@ def main():
                         help="Save JSON results (default: print only)")
     parser.add_argument("--target_per_level", type=int, default=2000,
                         help="Target queries per Bloom level for mix suggestion")
+    parser.add_argument("--device", default=None,
+                        help="Device: 'cuda', 'cpu', or int GPU index. Auto-detected if omitted.")
+    parser.add_argument("--batch_size", type=int, default=64,
+                        help="Inference batch size (reduce if OOM)")
     args = parser.parse_args()
+
+    # Auto-detect device
+    if args.device is None:
+        import torch
+        device = 0 if torch.cuda.is_available() else "cpu"
+    else:
+        device = int(args.device) if args.device.isdigit() else args.device
 
     print("=" * 70)
     print("BLOOM DATASET ANALYSIS")
-    print(f"Classifier: cip29/bert-blooms-taxonomy-classifier")
+    print(f"Classifier: MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli")
+    print(f"Device: {device}")
     print(f"Max per dataset: {args.max_per_dataset}")
     print("=" * 70)
+
+    clf = load_classifier("MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli", device)
 
     results = []
     for loader in ALL_LOADERS:
         try:
             name, queries = loader(args.max_per_dataset)
             print(f"\n  {name}: {len(queries)} queries loaded")
-            r = analyze_dataset(name, queries)
+            r = analyze_dataset(name, queries, clf)
             collect_samples(r, n_samples=3)
             results.append(r)
         except Exception as e:
