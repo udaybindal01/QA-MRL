@@ -21,7 +21,7 @@
 #   ./run_full_pipeline.sh                            # all datasets, all steps
 #   ./run_full_pipeline.sh --from annotate            # skip build, start at annotate
 #   ./run_full_pipeline.sh --from train_bam_b         # skip to BAM-B training
-#   ./run_full_pipeline.sh --datasets "scifact fiqa"  # subset of datasets
+#   ./run_full_pipeline.sh --datasets "scifact fiqa bioasq"  # subset of datasets
 #   ./run_full_pipeline.sh --from eval                # re-eval only
 #   ./run_full_pipeline.sh --force                    # same as default annotate + also wipe any
 #                                                       leftover ckpts before train (belt-and-suspenders)
@@ -39,7 +39,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION — edit paths here if needed
 # ─────────────────────────────────────────────────────────────────────────────
-DATASETS="${DATASETS:-educational scifact nfcorpus fiqa}"
+DATASETS="${DATASETS:-educational scifact nfcorpus fiqa bioasq}"
 BEIR_DATA_ROOT="/tmp/data/beir"
 EDU_DATA_DIR="./data/real"
 CKPT_ROOT="/tmp/multi-domain"

@@ -43,7 +43,7 @@ if [[ ! -f "$BAM_B_CFG" ]]; then
 fi
 
 # ─── Evaluation settings ─────────────────────────────────────────────────────
-DATASETS="${DATASETS:-trec-covid scidocs climate-fever}"
+DATASETS="${DATASETS:-trec-covid scidocs climate-fever}"   # bioasq excluded: trained in-domain
 OUTPUT_DIR="${OUTPUT_DIR:-results/zero_shot}"
 NLI_MODEL="${NLI_MODEL:-MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli}"
 NLI_BATCH_SIZE="${NLI_BATCH_SIZE:-32}"
