@@ -173,13 +173,207 @@ def load_winogrande(max_n):
     return "WinoGrande", queries[:max_n]
 
 
+# ─────────────── Evaluate-heavy datasets ───────────────
+# These contain argument quality, ethical reasoning, debate —
+# tasks that naturally require judging, assessing, evaluating.
+
+def load_arg_quality(max_n):
+    """IBM argument quality ranking — "is this argument convincing?" = Evaluate."""
+    from datasets import load_dataset
+    ds = load_dataset("ibm/argument_quality_ranking_30k", split="train")
+    # Frame as evaluation queries about argument strength
+    queries = []
+    for row in ds:
+        arg = row.get("argument", "").strip()
+        topic = row.get("topic", "").strip()
+        if arg and topic:
+            queries.append(f"Evaluate the strength of this argument about {topic}: {arg}")
+        if len(queries) >= max_n:
+            break
+    return "ArgQuality-30k", queries[:max_n]
+
+
+def load_kialo(max_n):
+    """Kialo debates — pros/cons arguments that require evaluation."""
+    from datasets import load_dataset
+    ds = load_dataset("Kialo/kialo-delib", split="train", trust_remote_code=True)
+    queries = []
+    for row in ds:
+        claim = row.get("claim", "").strip()
+        if claim:
+            queries.append(f"Evaluate this claim: {claim}")
+        if len(queries) >= max_n:
+            break
+    return "Kialo-Debates", queries[:max_n]
+
+
+def load_persuasion(max_n):
+    """Persuasion techniques — requires evaluating rhetorical strategies."""
+    from datasets import load_dataset
+    ds = load_dataset("sem_eval_2024_task_4", split="train", trust_remote_code=True)
+    queries = []
+    for row in ds:
+        text = row.get("text", "").strip()
+        if text:
+            queries.append(f"Evaluate the persuasion technique used: {text}")
+        if len(queries) >= max_n:
+            break
+    return "Persuasion", queries[:max_n]
+
+
+def load_ethics_cm(max_n):
+    """Ethics commonsense morality — judge if action is right/wrong = Evaluate."""
+    from datasets import load_dataset
+    ds = load_dataset("hendrycks/ethics", "commonsense", split="train", trust_remote_code=True)
+    queries = []
+    for row in ds:
+        text = row.get("input", "") or row.get("text", "") or row.get("sentence", "")
+        text = text.strip()
+        if text:
+            queries.append(f"Evaluate whether this action is ethical: {text}")
+        if len(queries) >= max_n:
+            break
+    return "Ethics-CM", queries[:max_n]
+
+
+def load_ethics_justice(max_n):
+    """Ethics justice — assess fairness = Evaluate."""
+    from datasets import load_dataset
+    ds = load_dataset("hendrycks/ethics", "justice", split="train", trust_remote_code=True)
+    queries = []
+    for row in ds:
+        text = row.get("input", "") or row.get("text", "") or row.get("sentence", "")
+        text = text.strip()
+        if text:
+            queries.append(f"Judge the fairness of this situation: {text}")
+        if len(queries) >= max_n:
+            break
+    return "Ethics-Justice", queries[:max_n]
+
+
+def load_scruples_anecdotes(max_n):
+    """Scruples — judge social norm violations = Evaluate."""
+    from datasets import load_dataset
+    ds = load_dataset("allenai/scruples", "anecdotes", split="train", trust_remote_code=True)
+    queries = []
+    for row in ds:
+        text = row.get("text", "").strip()
+        if text and len(text) > 30:
+            # Truncate long anecdotes to first 200 chars for classifier
+            queries.append(f"Evaluate the ethics of this situation: {text[:200]}")
+        if len(queries) >= max_n:
+            break
+    return "Scruples", queries[:max_n]
+
+
+# ─────────────── Create-heavy datasets ───────────────
+# These contain design tasks, writing prompts, synthesis questions —
+# tasks that require producing something new.
+
+def load_writingprompts(max_n):
+    """Reddit WritingPrompts — creative writing tasks = Create."""
+    from datasets import load_dataset
+    ds = load_dataset("euclaise/writingprompts", split="train", trust_remote_code=True)
+    queries = []
+    for row in ds:
+        prompt = row.get("prompt", "").strip()
+        if prompt and len(prompt) > 20:
+            queries.append(prompt[:300])
+        if len(queries) >= max_n:
+            break
+    return "WritingPrompts", queries[:max_n]
+
+
+def load_eli5(max_n):
+    """ELI5 — explain like I'm 5, some questions require creative synthesis."""
+    from datasets import load_dataset
+    ds = load_dataset("eli5_category", split="train", trust_remote_code=True)
+    queries = []
+    for row in ds:
+        title = row.get("title", "").strip()
+        if title:
+            queries.append(title)
+        if len(queries) >= max_n:
+            break
+    return "ELI5", queries[:max_n]
+
+
+def load_peer_read(max_n):
+    """PeerRead paper reviews — evaluate quality + suggest improvements = Evaluate/Create."""
+    from datasets import load_dataset
+    ds = load_dataset("allenai/peer_read", split="train", trust_remote_code=True)
+    queries = []
+    for row in ds:
+        abstract = row.get("abstract", "").strip()
+        if abstract:
+            queries.append(f"Design an experiment to test: {abstract[:200]}")
+        if len(queries) >= max_n:
+            break
+    return "PeerRead-Design", queries[:max_n]
+
+
+def load_big_bench_hard(max_n):
+    """BIG-Bench Hard — challenging reasoning requiring novel problem solving."""
+    from datasets import load_dataset
+    ds = load_dataset("maveriq/bigbenchhard", "causal_judgement", split="train",
+                      trust_remote_code=True)
+    queries = [row.get("input", "").strip() for row in ds if row.get("input")]
+    return "BBH-Causal", queries[:max_n]
+
+
+def load_social_iqa(max_n):
+    """Social IQa — social reasoning questions."""
+    from datasets import load_dataset
+    ds = load_dataset("allenai/social_i_qa", split="train")
+    queries = []
+    for row in ds:
+        ctx = row.get("context", "").strip()
+        q = row.get("question", "").strip()
+        if ctx and q:
+            queries.append(f"{ctx} {q}")
+        if len(queries) >= max_n:
+            break
+    return "SocialIQa", queries[:max_n]
+
+
+def load_strategyqa(max_n):
+    """StrategyQA — multi-hop yes/no questions requiring strategic reasoning."""
+    from datasets import load_dataset
+    ds = load_dataset("wics/strategy-qa", split="train", trust_remote_code=True)
+    queries = [row.get("question", "").strip() for row in ds if row.get("question")]
+    return "StrategyQA", queries[:max_n]
+
+
+def load_logiqa(max_n):
+    """LogiQA — logical reasoning questions from civil service exams."""
+    from datasets import load_dataset
+    ds = load_dataset("lucasmccabe/logiqa", split="train", trust_remote_code=True)
+    queries = []
+    for row in ds:
+        ctx = row.get("context", "").strip()
+        q = row.get("query", "") or row.get("question", "")
+        q = q.strip()
+        if q:
+            queries.append(q if not ctx else f"{ctx[:150]} {q}")
+        if len(queries) >= max_n:
+            break
+    return "LogiQA", queries[:max_n]
+
+
 ALL_LOADERS = [
-    # Already used
+    # Already used in repo
     load_sciq, load_arc_easy, load_arc_challenge, load_openbookqa, load_qasc,
     # Additional educational
     load_scienceqa, load_race_middle, load_race_high,
     load_commonsenseqa, load_piqa, load_boolq, load_cosmosqa,
     load_dream, load_quail, load_triviaqa, load_mmlu, load_winogrande,
+    # Evaluate-heavy (argument, ethics, judgment)
+    load_arg_quality, load_kialo, load_persuasion,
+    load_ethics_cm, load_ethics_justice, load_scruples_anecdotes,
+    # Create-heavy (writing, design, synthesis)
+    load_writingprompts, load_eli5, load_peer_read,
+    # Reasoning-heavy (Analyze/Evaluate)
+    load_big_bench_hard, load_social_iqa, load_strategyqa, load_logiqa,
 ]
 
 
