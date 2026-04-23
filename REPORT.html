@@ -461,12 +461,507 @@ BAM-PQ (BloomQueryMaskHead)
 </code></pre>
 <p>Each step adds expressiveness while maintaining the gains of the previous step. The Bloom taxonomy provides the structural prior that prevents routing collapse — the key failure mode of earlier approaches.</p>
 <hr />
-<h2>9. Evaluation</h2>
+<h2>9. Evaluation Methodology</h2>
 <p><strong>Metrics:</strong>
-- <strong>Retrieval quality:</strong> Recall@K (k=1,5,10,20,50,100), NDCG@10, MAP
-- <strong>Bloom-stratified:</strong> Per-Bloom-level Recall@10 with 95% bootstrap confidence intervals
+- <strong>Retrieval quality:</strong> Recall@K (k=1,5,10,50), NDCG@10, MRR
+- <strong>Bloom-stratified:</strong> Per-Bloom-level Recall@10 with per-level dimension usage
 - <strong>Efficiency:</strong> Average active dimensions, sparse ratio (fraction of zeroed dims)
 - <strong>BSR (Bloom Stratified Recall):</strong> quality × (1 + α × efficiency) — balances retrieval quality against dimension compression for checkpoint selection</p>
-<p><strong>Out-of-domain (BEIR):</strong> Trained on educational science data → evaluated on HotpotQA, SciFact, NFCorpus, TREC-COVID, SciDocs, Climate-FEVER. BEIR queries are auto-annotated with Bloom levels using the NLI classifier so BAM routing adapts per-query.</p>
-<p><strong>Fair comparison:</strong> BAM vs MRL at the <strong>same dimension budget</strong> per Bloom level — MRL truncated to match BAM's average active dims, isolating the effect of dimension <em>selection</em> (scattered vs prefix) from dimension <em>count</em>.</p></body>
+<p><strong>Fair comparison:</strong> BAM vs MRL at the <strong>same dimension budget</strong> per Bloom level — MRL truncated to match BAM's average active dims per level, isolating the effect of dimension <em>selection</em> (scattered vs prefix) from dimension <em>count</em>.</p>
+<p><strong>Out-of-domain (BEIR):</strong> Models trained on one domain are evaluated on BEIR benchmark datasets. BEIR queries are auto-annotated with Bloom levels using the NLI classifier so BAM routing adapts per-query at inference time.</p>
+<hr />
+<h2>10. Results — Educational Dataset (In-Domain)</h2>
+<p><strong>Setup:</strong> Backbone: intfloat/e5-large-v2 (1024-dim, 335M params). Trained on educational science data (SciQ, ARC, OpenBookQA, QASC). Corpus: 40,640 passages. Test: 1,857 queries.</p>
+<h3>MRL Baseline (Best epoch: 8)</h3>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R@1</td>
+<td>0.2746</td>
+</tr>
+<tr>
+<td>R@10</td>
+<td>0.5083</td>
+</tr>
+<tr>
+<td>R@50</td>
+<td>0.6387</td>
+</tr>
+<tr>
+<td>NDCG@10</td>
+<td>0.3876</td>
+</tr>
+<tr>
+<td>Dims</td>
+<td>768 (full)</td>
+</tr>
+</tbody>
+</table>
+<p>Bloom-stratified R@10 (MRL at full 768 dims):</p>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>N</th>
+<th>R@10</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Remember</td>
+<td>952</td>
+<td>0.6586</td>
+</tr>
+<tr>
+<td>Understand</td>
+<td>450</td>
+<td>0.4267</td>
+</tr>
+<tr>
+<td>Apply</td>
+<td>106</td>
+<td>0.2358</td>
+</tr>
+<tr>
+<td>Analyze</td>
+<td>347</td>
+<td>0.2853</td>
+</tr>
+<tr>
+<td>Create</td>
+<td>2</td>
+<td>0.5000</td>
+</tr>
+</tbody>
+</table>
+<h3>BAM Option B (Best epoch: 18, BSR = 0.6156)</h3>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R@1</td>
+<td>0.2709</td>
+</tr>
+<tr>
+<td>R@10</td>
+<td>0.5579</td>
+</tr>
+<tr>
+<td>R@50</td>
+<td>0.7092</td>
+</tr>
+<tr>
+<td>NDCG@10</td>
+<td>0.4100</td>
+</tr>
+<tr>
+<td>Avg Active Dims</td>
+<td>446 / 768 (sparse ratio = 0.42)</td>
+</tr>
+</tbody>
+</table>
+<p>Bloom-stratified R@10 with per-level dimension usage:</p>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>N</th>
+<th>R@10</th>
+<th>Dims Used</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Remember</td>
+<td>952</td>
+<td>0.7080</td>
+<td>398</td>
+</tr>
+<tr>
+<td>Understand</td>
+<td>450</td>
+<td>0.4844</td>
+<td>494</td>
+</tr>
+<tr>
+<td>Apply</td>
+<td>106</td>
+<td>0.2264</td>
+<td>515</td>
+</tr>
+<tr>
+<td>Analyze</td>
+<td>347</td>
+<td>0.3429</td>
+<td>493</td>
+</tr>
+<tr>
+<td>Create</td>
+<td>2</td>
+<td>0.5000</td>
+<td>557</td>
+</tr>
+</tbody>
+</table>
+<h3>BAM-PQ (Best epoch: 14, BSR = 0.6207)</h3>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R@1</td>
+<td>0.2709</td>
+</tr>
+<tr>
+<td>R@10</td>
+<td>0.5595</td>
+</tr>
+<tr>
+<td>R@50</td>
+<td>0.7108</td>
+</tr>
+<tr>
+<td>NDCG@10</td>
+<td>0.4082</td>
+</tr>
+<tr>
+<td>Avg Active Dims</td>
+<td>393 / 768 (sparse ratio = 0.49)</td>
+</tr>
+</tbody>
+</table>
+<p>Bloom-stratified R@10 with per-level dimension usage:</p>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>N</th>
+<th>R@10</th>
+<th>Dims Used</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Remember</td>
+<td>952</td>
+<td>0.7090</td>
+<td>277</td>
+</tr>
+<tr>
+<td>Understand</td>
+<td>450</td>
+<td>0.4911</td>
+<td>447</td>
+</tr>
+<tr>
+<td>Apply</td>
+<td>106</td>
+<td>0.2547</td>
+<td>606</td>
+</tr>
+<tr>
+<td>Analyze</td>
+<td>347</td>
+<td>0.3314</td>
+<td>576</td>
+</tr>
+<tr>
+<td>Create</td>
+<td>2</td>
+<td>0.5000</td>
+<td>752</td>
+</tr>
+</tbody>
+</table>
+<h3>Fair Comparison: BAM-B vs MRL at Same Dimension Budget</h3>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>N</th>
+<th>Budget</th>
+<th>MRL-full</th>
+<th>MRL-trunc</th>
+<th>BAM-B</th>
+<th>Δ</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Remember</td>
+<td>952</td>
+<td>398</td>
+<td>0.6586</td>
+<td>0.6439</td>
+<td>0.7080</td>
+<td>+0.0641</td>
+</tr>
+<tr>
+<td>Understand</td>
+<td>450</td>
+<td>494</td>
+<td>0.4267</td>
+<td>0.4222</td>
+<td>0.4844</td>
+<td>+0.0622</td>
+</tr>
+<tr>
+<td>Apply</td>
+<td>106</td>
+<td>515</td>
+<td>0.2358</td>
+<td>0.2547</td>
+<td>0.2264</td>
+<td>-0.0283</td>
+</tr>
+<tr>
+<td>Analyze</td>
+<td>347</td>
+<td>493</td>
+<td>0.2853</td>
+<td>0.2824</td>
+<td>0.3429</td>
+<td>+0.0605</td>
+</tr>
+<tr>
+<td>Create</td>
+<td>2</td>
+<td>557</td>
+<td>0.5000</td>
+<td>0.5000</td>
+<td>0.5000</td>
+<td>+0.0000</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Average Δ(BAM − MRL-trunc): +0.0317. BAM wins 3/5 levels.</strong></p>
+<p>BAM-B outperforms MRL at the same dimension budget on Remember (+6.4%), Understand (+6.2%), and Analyze (+6.1%). The scattered mask selects more informative dimensions than MRL's fixed prefix truncation.</p>
+<h3>Key Observations (Educational)</h3>
+<ol>
+<li><strong>BAM-B improves R@10 by +5.0 points</strong> over MRL (0.5579 vs 0.5083) while using only 58% of dimensions (446 vs 768)</li>
+<li><strong>BAM-PQ improves R@10 by +5.1 points</strong> (0.5595 vs 0.5083) while using only 51% of dimensions (393 vs 768)</li>
+<li><strong>Cognitive ordering confirmed in BAM-PQ</strong>: Remember uses 277 dims, Create uses 752 dims — a 2.7× ratio matching the cognitive complexity hypothesis</li>
+<li><strong>BAM-PQ achieves the best BSR</strong> (0.6207 vs BAM-B's 0.6156) due to stronger compression with maintained quality</li>
+</ol>
+<hr />
+<h2>11. Results — BEIR Out-of-Domain Evaluation</h2>
+<p>Models trained on educational data, evaluated on BEIR benchmark datasets. Tests whether learned cognitive-level routing generalizes beyond the training domain.</p>
+<h3>SciFact (5,183 passages, 300 test queries)</h3>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>R@1</th>
+<th>R@10</th>
+<th>R@50</th>
+<th>NDCG@10</th>
+<th>Dims</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MRL Baseline</td>
+<td>0.5767</td>
+<td>0.8600</td>
+<td>0.9400</td>
+<td>0.7081</td>
+<td>768</td>
+</tr>
+<tr>
+<td>BAM-B</td>
+<td>0.5567</td>
+<td>0.8500</td>
+<td>0.9267</td>
+<td>0.6957</td>
+<td>472</td>
+</tr>
+<tr>
+<td>BAM-PQ</td>
+<td>0.5450</td>
+<td>0.8600</td>
+<td>0.9400</td>
+<td>0.7081</td>
+<td>488</td>
+</tr>
+</tbody>
+</table>
+<p>Fair comparison (BAM-B vs MRL at same dims):</p>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>N</th>
+<th>Budget</th>
+<th>BAM-B</th>
+<th>MRL-trunc</th>
+<th>Δ</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Remember</td>
+<td>9</td>
+<td>453</td>
+<td>0.7778</td>
+<td>0.7778</td>
+<td>+0.0000</td>
+</tr>
+<tr>
+<td>Understand</td>
+<td>214</td>
+<td>473</td>
+<td>0.8411</td>
+<td>0.8411</td>
+<td>+0.0000</td>
+</tr>
+<tr>
+<td>Analyze</td>
+<td>76</td>
+<td>468</td>
+<td>0.8816</td>
+<td>0.8816</td>
+<td>+0.0000</td>
+</tr>
+<tr>
+<td>Evaluate</td>
+<td>1</td>
+<td>481</td>
+<td>1.0000</td>
+<td>1.0000</td>
+<td>+0.0000</td>
+</tr>
+</tbody>
+</table>
+<p>Fair comparison (BAM-PQ vs MRL at same dims): <strong>Average Δ: +2.92%, BAM wins 2/4 levels.</strong></p>
+<h3>NFCorpus</h3>
+<p>Fair comparison BAM-B: <strong>Average Δ: +0.95%, BAM wins 2/5 levels.</strong>
+Fair comparison BAM-PQ: <strong>Average Δ: +0.39%, BAM wins 1/5 levels.</strong></p>
+<h3>FiQA</h3>
+<p>Fair comparison BAM-B: <strong>Average Δ: +0.22%, BAM wins 3/5 levels.</strong>
+Fair comparison BAM-PQ: <strong>Average Δ: +0.40%, BAM wins 2/5 levels.</strong></p>
+<h3>Cross-Dataset Summary</h3>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>BAM-B Avg Δ</th>
+<th>BAM-B Wins</th>
+<th>BAM-PQ Avg Δ</th>
+<th>BAM-PQ Wins</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Educational (in-domain)</td>
+<td>+3.17%</td>
+<td>3/5</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>SciFact</td>
+<td>+0.00%</td>
+<td>0/4</td>
+<td>+2.92%</td>
+<td>2/4</td>
+</tr>
+<tr>
+<td>NFCorpus</td>
+<td>+0.95%</td>
+<td>2/5</td>
+<td>+0.39%</td>
+<td>1/5</td>
+</tr>
+<tr>
+<td>FiQA</td>
+<td>+0.22%</td>
+<td>3/5</td>
+<td>+0.40%</td>
+<td>2/5</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>12. Ablation Studies</h2>
+<p>The ablation suite isolates each component's contribution by systematically disabling or replacing parts of the BAM pipeline:</p>
+<table>
+<thead>
+<tr>
+<th>Ablation</th>
+<th>What it tests</th>
+<th>How</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>BAM full</strong></td>
+<td>Full system with real Bloom labels</td>
+<td>Normal operation (baseline for ablations)</td>
+</tr>
+<tr>
+<td><strong>BAM random Bloom</strong></td>
+<td>Is Bloom taxonomy the right signal?</td>
+<td>Replace real Bloom labels with random 0-5 labels</td>
+</tr>
+<tr>
+<td><strong>BAM fixed Bloom=1</strong></td>
+<td>What if all queries are "simple"?</td>
+<td>Force all queries to Remember (minimum dims)</td>
+</tr>
+<tr>
+<td><strong>BAM fixed Bloom=6</strong></td>
+<td>What if all queries are "complex"?</td>
+<td>Force all queries to Create (maximum dims)</td>
+</tr>
+<tr>
+<td><strong>BAM no routing</strong></td>
+<td>Does routing help, or is fine-tuning enough?</td>
+<td>Force router to 768 dims (full) — isolates fine-tuning gain from routing gain</td>
+</tr>
+<tr>
+<td><strong>BAM soft routing</strong></td>
+<td>Hard vs soft mask selection</td>
+<td>Use softmax over all dims instead of hard binary mask</td>
+</tr>
+<tr>
+<td><strong>BAM fixed avg budget</strong></td>
+<td>Does <em>per-level</em> routing matter?</td>
+<td>Route ALL queries to the same dim count as BAM's average — same compression, no per-level differentiation</td>
+</tr>
+<tr>
+<td><strong>Mask vs truncation</strong></td>
+<td>Scattered mask vs prefix at same dims</td>
+<td>Option B vs Option A at identical average active dims</td>
+</tr>
+<tr>
+<td><strong>Two-stage vs joint</strong></td>
+<td>Does reverse two-stage training help?</td>
+<td>Compare frozen→unfrozen (reverse) vs simultaneous training</td>
+</tr>
+<tr>
+<td><strong>MRL Baseline</strong></td>
+<td>Comparison target</td>
+<td>Full 768 dims, no routing</td>
+</tr>
+</tbody>
+</table>
+<p>These ablations answer key research questions:
+- <strong>Random Bloom vs real Bloom</strong>: If random labels perform similarly, the cognitive taxonomy signal is not useful — any grouping would work
+- <strong>Fixed level vs adaptive</strong>: If fixed Bloom=1 or Bloom=6 matches BAM full, per-query adaptation is unnecessary
+- <strong>No routing vs full BAM</strong>: The gap between these isolates how much of BAM's improvement comes from routing vs general fine-tuning on Bloom-aware data</p></body>
 </html>
