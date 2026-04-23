@@ -442,7 +442,7 @@ Fair comparison BAM-PQ: **Average Δ: +0.39%, BAM wins 1/5 levels.**
 Fair comparison BAM-B: **Average Δ: +0.22%, BAM wins 3/5 levels.**
 Fair comparison BAM-PQ: **Average Δ: +0.40%, BAM wins 2/5 levels.**
 
-### Cross-Dataset Summary
+### Cross-Dataset Summary (Out-of-Domain)
 
 | Dataset | BAM-B Avg Δ | BAM-B Wins | BAM-PQ Avg Δ | BAM-PQ Wins |
 |---------|------------|------------|-------------|-------------|
@@ -453,7 +453,322 @@ Fair comparison BAM-PQ: **Average Δ: +0.40%, BAM wins 2/5 levels.**
 
 ---
 
-## 12. Ablation Studies
+## 12. Results — BEIR In-Domain Training
+
+For each BEIR dataset below, models were trained **and** evaluated on the same dataset. This isolates domain-specific routing behavior from cross-domain transfer effects. Bloom labels were assigned via zero-shot NLI classification (DeBERTa-v3-large).
+
+### SciFact (5,183 passages, 300 test queries)
+
+Bloom distribution: Remember (9), Understand (214), Analyze (76), Evaluate (1). No Apply or Create queries in this dataset.
+
+**MRL Baseline (Best epoch: 14, R@10 = 0.8600)**
+
+| Metric | Value |
+|--------|-------|
+| R@1 | 0.5767 |
+| R@5 | 0.7667 |
+| R@10 | 0.8600 |
+| R@50 | 0.9400 |
+| MRR | 0.6661 |
+| NDCG@10 | 0.7081 |
+| Dims | 768 (full) |
+
+Bloom-stratified R@10:
+
+| Level | N | R@10 |
+|-------|---|------|
+| Remember | 9 | 0.7778 |
+| Understand | 214 | 0.8505 |
+| Analyze | 76 | 0.8947 |
+| Evaluate | 1 | 1.0000 |
+
+**BAM Option B (Best epoch: 14, BSR = 1.1644)**
+
+| Metric | Value |
+|--------|-------|
+| R@1 | 0.5567 |
+| R@5 | 0.7500 |
+| R@10 | 0.8500 |
+| R@50 | 0.9267 |
+| MRR | 0.6522 |
+| NDCG@10 | 0.6957 |
+| Active dims | 472 / 768 (38.5% savings) |
+
+Bloom-stratified R@10 with learned dimensions:
+
+| Level | N | R@10 | Dims |
+|-------|---|------|------|
+| Remember | 9 | 0.7778 | 453 |
+| Understand | 214 | 0.8411 | 473 |
+| Analyze | 76 | 0.8816 | 470 |
+| Evaluate | 1 | 1.0000 | 481 |
+
+**BAM-PQ (Best epoch: 19, BSR = 1.2019)**
+
+| Metric | Value |
+|--------|-------|
+| R@1 | 0.5733 |
+| R@5 | 0.7667 |
+| R@10 | 0.8667 |
+| R@50 | 0.9500 |
+| MRR | 0.6624 |
+| NDCG@10 | 0.7069 |
+| Active dims | 481 / 768 (37.4% savings) |
+
+Bloom-stratified R@10 with learned dimensions:
+
+| Level | N | R@10 | Dims |
+|-------|---|------|------|
+| Remember | 9 | 0.8889 | 462 |
+| Understand | 214 | 0.8551 | 476 |
+| Analyze | 76 | 0.8947 | 497 |
+| Evaluate | 1 | 1.0000 | 519 |
+
+**Fair Comparison: BAM-B vs MRL at Same Dimension Budget**
+
+| Level | N | Budget | MRL-full | MRL-trunc | BAM-B | Δ |
+|-------|---|--------|----------|-----------|-------|---|
+| Remember | 9 | 453 | 0.7778 | 0.7778 | 0.7778 | +0.0000 |
+| Understand | 214 | 473 | 0.8505 | 0.8411 | 0.8411 | +0.0000 |
+| Analyze | 76 | 468 | 0.8947 | 0.8816 | 0.8816 | +0.0000 |
+| Evaluate | 1 | 481 | 1.0000 | 1.0000 | 1.0000 | +0.0000 |
+
+Average Δ: +0.0000, BAM wins 0/4 levels.
+
+**Fair Comparison: BAM-PQ vs MRL at Same Dimension Budget**
+
+| Level | N | Budget | MRL-full | MRL-trunc | BAM-PQ | Δ |
+|-------|---|--------|----------|-----------|--------|---|
+| Remember | 9 | 462 | 0.7778 | 0.7778 | 0.8889 | +0.1111 |
+| Understand | 214 | 476 | 0.8505 | 0.8411 | 0.8598 | +0.0187 |
+| Analyze | 76 | 497 | 0.8947 | 0.8947 | 0.8816 | -0.0132 |
+| Evaluate | 1 | 519 | 1.0000 | 1.0000 | 1.0000 | +0.0000 |
+
+Average Δ: +0.0292, BAM-PQ wins 2/4 levels.
+
+**Key Observations (SciFact):**
+- BAM-PQ **matches or exceeds MRL** on R@10 (0.8667 vs 0.8600) while using 37% fewer dims
+- BAM-PQ Remember recall jumps from 0.7778 → 0.8889 (+11.1%) at the per-level fair comparison
+- BAM-B is more conservative — identical performance to MRL-truncated at every level
+- SciFact's narrow Bloom distribution (71% Understand) limits routing differentiation
+
+### NFCorpus (3,633 passages, 323 test queries)
+
+Bloom distribution: Remember (20), Understand (80), Apply (3), Analyze (188), Evaluate (32). No Create queries.
+
+**MRL Baseline (Best epoch: 9, R@10 = 0.2105)**
+
+| Metric | Value |
+|--------|-------|
+| R@1 | 0.0495 |
+| R@5 | 0.1455 |
+| R@10 | 0.2105 |
+| R@50 | 0.3127 |
+| MRR | 0.0975 |
+| NDCG@10 | 0.1193 |
+| Dims | 768 (full) |
+
+Bloom-stratified R@10:
+
+| Level | N | R@10 |
+|-------|---|------|
+| Remember | 20 | 0.4500 |
+| Understand | 80 | 0.1625 |
+| Apply | 3 | 0.3333 |
+| Analyze | 188 | 0.1915 |
+| Evaluate | 32 | 0.2812 |
+
+**BAM Option B (Best epoch: 4, BSR = 0.4105)**
+
+| Metric | Value |
+|--------|-------|
+| R@1 | 0.0526 |
+| R@5 | 0.1362 |
+| R@10 | 0.1950 |
+| R@50 | 0.3127 |
+| MRR | 0.0957 |
+| NDCG@10 | 0.1139 |
+| Active dims | 468 / 768 (39.1% savings) |
+
+Bloom-stratified R@10 with learned dimensions:
+
+| Level | N | R@10 | Dims |
+|-------|---|------|------|
+| Remember | 20 | 0.4500 | 454 |
+| Understand | 80 | 0.1500 | 472 |
+| Apply | 3 | 0.3333 | 478 |
+| Analyze | 188 | 0.1649 | 467 |
+| Evaluate | 32 | 0.3125 | 476 |
+
+**BAM-PQ (Best epoch: 11, BSR = 0.4091)**
+
+| Metric | Value |
+|--------|-------|
+| R@1 | 0.0464 |
+| R@5 | 0.1548 |
+| R@10 | 0.2043 |
+| R@50 | 0.3251 |
+| MRR | 0.0966 |
+| NDCG@10 | 0.1172 |
+| Active dims | 495 / 768 (35.5% savings) |
+
+Bloom-stratified R@10 with learned dimensions:
+
+| Level | N | R@10 | Dims |
+|-------|---|------|------|
+| Remember | 20 | 0.4500 | 473 |
+| Understand | 80 | 0.1500 | 485 |
+| Apply | 3 | 0.3333 | 480 |
+| Analyze | 188 | 0.1809 | 498 |
+| Evaluate | 32 | 0.3125 | 515 |
+
+**Fair Comparison: BAM-B vs MRL at Same Dimension Budget**
+
+| Level | N | Budget | MRL-full | MRL-trunc | BAM-B | Δ |
+|-------|---|--------|----------|-----------|-------|---|
+| Remember | 20 | 454 | 0.4500 | 0.4500 | 0.4500 | +0.0000 |
+| Understand | 80 | 472 | 0.1625 | 0.1125 | 0.1500 | +0.0375 |
+| Apply | 3 | 478 | 0.3333 | 0.3333 | 0.3333 | +0.0000 |
+| Analyze | 188 | 467 | 0.1915 | 0.1862 | 0.1649 | -0.0213 |
+| Evaluate | 32 | 476 | 0.2812 | 0.2812 | 0.3125 | +0.0312 |
+
+Average Δ: +0.0095, BAM wins 2/5 levels.
+
+**Fair Comparison: BAM-PQ vs MRL at Same Dimension Budget**
+
+| Level | N | Budget | MRL-full | MRL-trunc | BAM-PQ | Δ |
+|-------|---|--------|----------|-----------|--------|---|
+| Remember | 20 | 473 | 0.4500 | 0.4500 | 0.4500 | +0.0000 |
+| Understand | 80 | 485 | 0.1625 | 0.1250 | 0.1500 | +0.0250 |
+| Apply | 3 | 480 | 0.3333 | 0.3333 | 0.3333 | +0.0000 |
+| Analyze | 188 | 498 | 0.1915 | 0.1862 | 0.1809 | -0.0053 |
+| Evaluate | 32 | 515 | 0.2812 | 0.2812 | 0.2812 | +0.0000 |
+
+Average Δ: +0.0039, BAM-PQ wins 1/5 levels.
+
+**Key Observations (NFCorpus):**
+- NFCorpus is a challenging medical dataset with multi-label relevance — overall R@10 is low for all models
+- BAM-B selected best at epoch 4 (very early), suggesting routing converges quickly on this domain
+- Both BAM variants improve Understand recall vs MRL-truncated (+3.75% for BAM-B, +2.50% for BAM-PQ)
+- ~35-39% dimension savings with minimal retrieval quality loss
+
+### FiQA (57,638 passages, 648 test queries)
+
+Bloom distribution: Remember (23), Understand (116), Apply (130), Analyze (130), Evaluate (249). No Create queries. Largest and most diverse BEIR dataset in the evaluation.
+
+**MRL Baseline (Best epoch: 10, R@10 = 0.4969)**
+
+| Metric | Value |
+|--------|-------|
+| R@1 | 0.1975 |
+| R@5 | 0.3873 |
+| R@10 | 0.4969 |
+| R@50 | 0.6775 |
+| MRR | 0.2908 |
+| NDCG@10 | 0.3325 |
+| Dims | 768 (full) |
+
+Bloom-stratified R@10:
+
+| Level | N | R@10 |
+|-------|---|------|
+| Remember | 23 | 0.7826 |
+| Understand | 116 | 0.5086 |
+| Apply | 130 | 0.4308 |
+| Analyze | 130 | 0.4923 |
+| Evaluate | 249 | 0.5020 |
+
+**BAM Option B (Best epoch: 11, BSR = 0.7624)**
+
+| Metric | Value |
+|--------|-------|
+| R@1 | 0.1852 |
+| R@5 | 0.3904 |
+| R@10 | 0.4707 |
+| R@50 | 0.6512 |
+| MRR | 0.2815 |
+| NDCG@10 | 0.3191 |
+| Active dims | 478 / 768 (37.8% savings) |
+
+Bloom-stratified R@10 with learned dimensions:
+
+| Level | N | R@10 | Dims |
+|-------|---|------|------|
+| Remember | 23 | 0.8261 | 442 |
+| Understand | 116 | 0.4828 | 476 |
+| Apply | 130 | 0.3692 | 484 |
+| Analyze | 130 | 0.4846 | 471 |
+| Evaluate | 249 | 0.4779 | 482 |
+
+**BAM-PQ (Best epoch: 8, BSR = 0.7255)**
+
+| Metric | Value |
+|--------|-------|
+| R@1 | 0.1821 |
+| R@5 | 0.3827 |
+| R@10 | 0.4753 |
+| R@50 | 0.6667 |
+| MRR | 0.2799 |
+| NDCG@10 | 0.3186 |
+| Active dims | 505 / 768 (34.2% savings) |
+
+Bloom-stratified R@10 with learned dimensions:
+
+| Level | N | R@10 | Dims |
+|-------|---|------|------|
+| Remember | 23 | 0.7391 | 450 |
+| Understand | 116 | 0.5086 | 485 |
+| Apply | 130 | 0.4000 | 483 |
+| Analyze | 130 | 0.4846 | 505 |
+| Evaluate | 249 | 0.4699 | 532 |
+
+**Fair Comparison: BAM-B vs MRL at Same Dimension Budget**
+
+| Level | N | Budget | MRL-full | MRL-trunc | BAM-B | Δ |
+|-------|---|--------|----------|-----------|-------|---|
+| Remember | 23 | 442 | 0.7826 | 0.7826 | 0.8261 | +0.0435 |
+| Understand | 116 | 476 | 0.5086 | 0.5000 | 0.4828 | -0.0172 |
+| Apply | 130 | 484 | 0.4308 | 0.4154 | 0.3692 | -0.0462 |
+| Analyze | 130 | 471 | 0.4923 | 0.4615 | 0.4846 | +0.0231 |
+| Evaluate | 249 | 482 | 0.5020 | 0.4699 | 0.4779 | +0.0080 |
+
+Average Δ: +0.0022, BAM wins 3/5 levels.
+
+**Fair Comparison: BAM-PQ vs MRL at Same Dimension Budget**
+
+| Level | N | Budget | MRL-full | MRL-trunc | BAM-PQ | Δ |
+|-------|---|--------|----------|-----------|--------|---|
+| Remember | 23 | 450 | 0.7826 | 0.7391 | 0.7391 | +0.0000 |
+| Understand | 116 | 485 | 0.5086 | 0.5000 | 0.5172 | +0.0172 |
+| Apply | 130 | 483 | 0.4308 | 0.4231 | 0.4231 | +0.0000 |
+| Analyze | 130 | 505 | 0.4923 | 0.4615 | 0.4923 | +0.0308 |
+| Evaluate | 249 | 532 | 0.5020 | 0.4900 | 0.4618 | -0.0281 |
+
+Average Δ: +0.0040, BAM-PQ wins 2/5 levels.
+
+**Key Observations (FiQA):**
+- FiQA has the most balanced Bloom distribution — all 5 levels well-represented
+- BAM-B Remember recall exceeds MRL-full (0.8261 vs 0.7826) at only 442 dims — a clear win for routing
+- BAM-PQ shows clearest cognitive dimension ordering: Remember (450) < Understand (485) < Analyze (505) < Evaluate (532)
+- Both BAM variants win 2-3/5 levels with ~35-38% dimension savings
+
+### Cross-Dataset Summary (In-Domain)
+
+| Dataset | Queries | Corpus | MRL R@10 | BAM-B R@10 | BAM-B Dims | BAM-PQ R@10 | BAM-PQ Dims |
+|---------|---------|--------|----------|-----------|------------|-------------|-------------|
+| SciFact | 300 | 5,183 | 0.8600 | 0.8500 | 472 | 0.8667 | 481 |
+| NFCorpus | 323 | 3,633 | 0.2105 | 0.1950 | 468 | 0.2043 | 495 |
+| FiQA | 648 | 57,638 | 0.4969 | 0.4707 | 478 | 0.4753 | 505 |
+
+| Dataset | BAM-B Avg Δ | BAM-B Wins | BAM-PQ Avg Δ | BAM-PQ Wins |
+|---------|------------|------------|-------------|-------------|
+| SciFact | +0.00% | 0/4 | +2.92% | 2/4 |
+| NFCorpus | +0.95% | 2/5 | +0.39% | 1/5 |
+| FiQA | +0.22% | 3/5 | +0.40% | 2/5 |
+
+---
+
+## 13. Ablation Studies
 
 The ablation suite isolates each component's contribution by systematically disabling or replacing parts of the BAM pipeline:
 
