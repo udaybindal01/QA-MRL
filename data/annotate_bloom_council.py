@@ -386,7 +386,7 @@ def _load_kaggle_dataset(name: str, output_dir: str) -> Optional[Tuple[List[str]
         return None
 
 
-def calibrate_weights(members: list, device, n_per_dataset: int = 60,
+def calibrate_weights(members: list, device, n_per_dataset: int = 0,
                       cache_path: str = WEIGHTS_CACHE,
                       batch_size: int = 8) -> Dict[str, float]:
     """
@@ -415,8 +415,11 @@ def calibrate_weights(members: list, device, n_per_dataset: int = 60,
         print("  WARNING: No calibration data available. Falling back to uniform weights.")
         return {m.name: 1.0 / len(members) for m in members}
 
-    # Build stratified hold-out per dataset
+    # Build stratified hold-out per dataset.
+    # n <= 0 means use all examples (no subsampling).
     def stratified_sample(texts, labels, n):
+        if n <= 0 or n >= len(texts):
+            return list(texts), list(labels)
         from collections import defaultdict
         import random
         random.seed(42)
@@ -611,9 +614,10 @@ def main():
     parser.add_argument("--pipe_batch_size", type=int, default=4,
                         help="NLI pairs per GPU forward pass — each query expands to "
                              "6 pairs, so GPU load = pipe_batch_size*6 (default 4)")
-    parser.add_argument("--cal_samples", type=int, default=60,
-                        help="Stratified samples per Kaggle dataset for calibration "
-                             "(default 60 = 10/class; use 120+ for more accurate weights)")
+    parser.add_argument("--cal_samples", type=int, default=0,
+                        help="Samples per Kaggle dataset for calibration. "
+                             "0 = use all examples (default). "
+                             "Set to e.g. 60 to cap and speed up calibration.")
     parser.add_argument("--recalibrate", action="store_true",
                         help="Re-run weight calibration even if cache exists")
     parser.add_argument("--calibrate_only", action="store_true",
