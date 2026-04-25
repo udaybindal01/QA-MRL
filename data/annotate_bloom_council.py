@@ -87,26 +87,32 @@ COUNCIL_MEMBERS = [
         "name": "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
         "type": "nli",
         "description": "SOTA zero-shot NLI (440M)",
+        "fallback": None,
     },
     {
         "name": "MoritzLaurer/deberta-v3-base-zeroshot-v2",
         "type": "nli",
         "description": "Improved base zero-shot NLI (180M)",
+        # Falls back to roberta-large-mnli if the model is unavailable
+        "fallback": "roberta-large-mnli",
     },
     {
         "name": "cross-encoder/nli-deberta-v3-base",
         "type": "nli",
         "description": "Cross-encoder DeBERTa NLI (180M)",
+        "fallback": None,
     },
     {
         "name": "facebook/bart-large-mnli",
         "type": "nli",
         "description": "BART NLI, architectural diversity (400M)",
+        "fallback": None,
     },
     {
         "name": "cip29/bert-blooms-taxonomy-classifier",
         "type": "classifier",
         "description": "BERT fine-tuned on Bloom taxonomy data (110M)",
+        "fallback": None,
     },
 ]
 
@@ -240,15 +246,33 @@ def _load_kaggle_dataset(name: str, output_dir: str) -> Optional[Tuple[List[str]
     }
 
     def parse_label(val):
+        # Drop NaN before any conversion
+        try:
+            import math
+            if isinstance(val, float) and math.isnan(val):
+                return -1
+        except Exception:
+            pass
         if isinstance(val, (int, float)):
             v = int(val)
             return v if 1 <= v <= 6 else (v + 1 if 0 <= v <= 5 else -1)
         n = str(val).lower().strip()
+        if n in ("nan", "none", ""):
+            return -1
         for k, lv in _name_map.items():
             if k in n:
                 return lv
+        # Roman numerals
+        roman = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6}
+        if n in roman:
+            return roman[n]
+        # "l1" … "l6" or "level1" … "level6"
+        import re
+        m = re.match(r"l(?:evel)?[ _]?([1-6])", n)
+        if m:
+            return int(m.group(1))
         try:
-            v = int(n)
+            v = int(float(n))
             return v if 1 <= v <= 6 else (v + 1 if 0 <= v <= 5 else -1)
         except ValueError:
             return -1
@@ -258,36 +282,65 @@ def _load_kaggle_dataset(name: str, output_dir: str) -> Optional[Tuple[List[str]
         path = kagglehub.dataset_download(name)
         texts, labels = [], []
         for csv_path in glob.glob(os.path.join(path, "**/*.csv"), recursive=True):
-            df = pd.read_csv(csv_path)
-            # Find text column
-            text_col = next(
-                (c for c in ["Question", "question", "Text", "text", "Sentence",
-                              "sentence", "query", "Query"]
-                 if c in df.columns), None)
+            try:
+                df = pd.read_csv(csv_path, on_bad_lines="skip")
+            except Exception:
+                df = pd.read_csv(csv_path, error_bad_lines=False)
+
+            # Debug: show columns when nothing was detected previously
+            # Find text column — broad search
+            text_candidates = ["Question", "question", "Text", "text", "Sentence",
+                               "sentence", "query", "Query", "Question_Text",
+                               "question_text", "Questions", "questions"]
+            text_col = next((c for c in text_candidates if c in df.columns), None)
             if text_col is None:
-                text_col = next(
-                    (c for c in df.columns
-                     if df[c].dtype == "object" and df[c].str.len().mean() > 15),
-                    None)
-            # Find label column
-            label_col = next(
-                (c for c in ["Bloom's Taxonomy Level", "bloom_level", "Bloom Level",
-                              "Level", "level", "label", "Label", "cognitive_level",
-                              "Category", "category", "class", "Class"]
-                 if c in df.columns), None)
+                # Pick longest average-length object column
+                obj_cols = [c for c in df.columns if df[c].dtype == "object"]
+                if obj_cols:
+                    text_col = max(obj_cols,
+                                   key=lambda c: df[c].dropna().astype(str).str.len().mean())
+
+            # Find label column — broad search
+            label_candidates = [
+                "Bloom's Taxonomy Level", "bloom_level", "Bloom Level",
+                "Bloom's Level", "blooms_level", "Bloom_Level",
+                "Level", "level", "label", "Label", "cognitive_level",
+                "Cognitive Level", "Category", "category", "class", "Class",
+                "Taxonomy", "taxonomy", "BT_Level", "bt_level",
+            ]
+            label_col = next((c for c in label_candidates if c in df.columns), None)
             if label_col is None:
-                label_col = next(
-                    (c for c in df.columns if c != text_col), None)
+                # Pick non-text column with fewest unique values (likely the label)
+                other_cols = [c for c in df.columns if c != text_col]
+                if other_cols:
+                    label_col = min(other_cols, key=lambda c: df[c].nunique())
+
             if text_col is None or label_col is None:
+                print(f"      Skipping {os.path.basename(csv_path)} "
+                      f"— could not detect text/label columns. "
+                      f"Columns: {list(df.columns)}")
                 continue
+
+            # Drop NaN rows in label column before iterating
+            df = df.dropna(subset=[label_col])
+            parsed_count = 0
             for _, row in df.iterrows():
                 lv = parse_label(row[label_col])
                 txt = str(row[text_col]).strip()
                 if lv != -1 and len(txt) > 10:
                     texts.append(txt)
                     labels.append(lv)
+                    parsed_count += 1
+
+            if parsed_count == 0:
+                # Show a sample of label values to aid debugging
+                sample_labels = df[label_col].dropna().unique()[:10].tolist()
+                print(f"      Skipping {os.path.basename(csv_path)} "
+                      f"— 0 valid labels parsed. "
+                      f"Sample label values: {sample_labels}")
+
         print(f"    {name}: {len(texts)} examples")
-        return texts, labels
+        return (texts, labels) if texts else None
     except Exception as e:
         print(f"    WARNING: Could not download {name}: {e}")
         return None
@@ -316,8 +369,7 @@ def calibrate_weights(members: list, device, n_per_dataset: int = 200,
         result = _load_kaggle_dataset(ds_name, "/tmp/bloom_kaggle_cal")
         cal_data.append(result)
 
-    valid = [(texts, labels) for r in cal_data if r is not None
-             for texts, labels in [r]]
+    valid = [r for r in cal_data if r is not None]
     if not valid:
         print("  WARNING: No calibration data available. Falling back to uniform weights.")
         return {m.name: 1.0 / len(members) for m in members}
@@ -341,13 +393,19 @@ def calibrate_weights(members: list, device, n_per_dataset: int = 200,
         return sampled_t, sampled_l
 
     # Evaluate each member
+    # ACC_CAP: any per-dataset accuracy above this is capped before averaging.
+    # Without capping, a fine-tuned classifier that was trained on one of the
+    # Kaggle datasets will score ~1.0 on it, inflating its weight to dominate
+    # the ensemble. The cap keeps weights honest across generalist models too.
+    ACC_CAP = 0.75
+
     weights: Dict[str, float] = {}
     for member in members:
         print(f"\n  Evaluating: {member.name}")
         dataset_accs = []
         for ds_idx, (ds_name, data) in enumerate(zip(kaggle_datasets, cal_data)):
             if data is None:
-                print(f"    Dataset {ds_idx+1} ({ds_name}): SKIPPED (download failed)")
+                print(f"    Dataset {ds_idx+1} ({ds_name.split('/')[0]}): SKIPPED (download failed)")
                 continue
             texts, labels = data
             sample_t, sample_l = stratified_sample(texts, labels, n_per_dataset)
@@ -355,12 +413,14 @@ def calibrate_weights(members: list, device, n_per_dataset: int = 200,
                 continue
             proba = member.predict_proba(sample_t, batch_size=32)
             preds = proba.argmax(axis=1) + 1          # 1-indexed
-            acc = float(np.mean(np.array(preds) == np.array(sample_l)))
+            raw_acc = float(np.mean(np.array(preds) == np.array(sample_l)))
+            acc = min(raw_acc, ACC_CAP)
+            note = f" (capped from {raw_acc:.3f})" if raw_acc > ACC_CAP else ""
             dataset_accs.append(acc)
             print(f"    Dataset {ds_idx+1} ({ds_name.split('/')[0]}): "
-                  f"acc={acc:.3f}  (n={len(sample_t)})")
-        mean_acc = float(np.mean(dataset_accs)) if dataset_accs else 0.1
-        print(f"  → Mean accuracy: {mean_acc:.4f}")
+                  f"acc={acc:.3f}{note}  (n={len(sample_t)})")
+        mean_acc = float(np.mean(dataset_accs)) if dataset_accs else 0.10
+        print(f"  → Mean accuracy (capped): {mean_acc:.4f}")
         weights[member.name] = mean_acc
 
     # Normalize so weights sum to 1
@@ -531,13 +591,21 @@ def main():
     # ── Load all council members ──
     members = []
     for spec in COUNCIL_MEMBERS:
-        try:
-            if spec["type"] == "nli":
-                members.append(NLIMember(spec["name"], device))
-            else:
-                members.append(ClassifierMember(spec["name"], device))
-        except Exception as e:
-            print(f"  WARNING: Could not load {spec['name']}: {e} — skipping")
+        loaded = False
+        for candidate in [spec["name"]] + ([spec["fallback"]] if spec["fallback"] else []):
+            try:
+                if spec["type"] == "nli":
+                    members.append(NLIMember(candidate, device))
+                else:
+                    members.append(ClassifierMember(candidate, device))
+                if candidate != spec["name"]:
+                    print(f"  NOTE: Using fallback {candidate} for {spec['name']}")
+                loaded = True
+                break
+            except Exception as e:
+                print(f"  WARNING: Could not load {candidate}: {e}")
+        if not loaded:
+            print(f"  SKIPPING {spec['name']} (no fallback available)")
 
     if len(members) < 2:
         raise RuntimeError(f"Only {len(members)} member(s) loaded — need at least 2.")
