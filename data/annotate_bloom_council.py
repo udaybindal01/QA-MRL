@@ -93,8 +93,8 @@ COUNCIL_MEMBERS = [
         "name": "MoritzLaurer/deberta-v3-base-zeroshot-v2",
         "type": "nli",
         "description": "Improved base zero-shot NLI (180M)",
-        # Falls back to roberta-large-mnli if the model is unavailable
-        "fallback": "roberta-large-mnli",
+        # deberta-v3-base-zeroshot-v2 can be gated; fall back to a small public model
+        "fallback": "cross-encoder/nli-deberta-v3-small",
     },
     {
         "name": "cross-encoder/nli-deberta-v3-base",
@@ -589,38 +589,67 @@ def main():
     print(f"  Members: {len(COUNCIL_MEMBERS)}")
 
     # ── Load all council members ──
+    # Each candidate is tried on `device` first; on CUDA OOM we clear the cache
+    # and retry on CPU so the council still runs even on a near-full GPU.
     members = []
     for spec in COUNCIL_MEMBERS:
         loaded = False
-        for candidate in [spec["name"]] + ([spec["fallback"]] if spec["fallback"] else []):
-            try:
-                if spec["type"] == "nli":
-                    members.append(NLIMember(candidate, device))
-                else:
-                    members.append(ClassifierMember(candidate, device))
-                if candidate != spec["name"]:
-                    print(f"  NOTE: Using fallback {candidate} for {spec['name']}")
-                loaded = True
+        candidates = [spec["name"]] + ([spec["fallback"]] if spec["fallback"] else [])
+        for candidate in candidates:
+            for try_device in ([device, "cpu"] if device != "cpu" else ["cpu"]):
+                try:
+                    if spec["type"] == "nli":
+                        m = NLIMember(candidate, try_device)
+                    else:
+                        m = ClassifierMember(candidate, try_device)
+                    if candidate != spec["name"]:
+                        print(f"  NOTE: Using fallback {candidate} for {spec['name']}")
+                    if try_device != device:
+                        print(f"  NOTE: {candidate} loaded on CPU (CUDA OOM)")
+                    members.append(m)
+                    loaded = True
+                    break
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower() and try_device != "cpu":
+                        import torch
+                        torch.cuda.empty_cache()
+                        print(f"  CUDA OOM for {candidate} — retrying on CPU ...")
+                    else:
+                        print(f"  WARNING: Could not load {candidate} on {try_device}: "
+                              f"{str(e)[:120]}")
+                        break  # non-OOM error — don't retry on CPU, try next candidate
+                except Exception as e:
+                    print(f"  WARNING: Could not load {candidate}: {str(e)[:120]}")
+                    break  # auth error etc. — skip to fallback model
+            if loaded:
                 break
-            except Exception as e:
-                print(f"  WARNING: Could not load {candidate}: {e}")
         if not loaded:
-            print(f"  SKIPPING {spec['name']} (no fallback available)")
+            print(f"  SKIPPING {spec['name']} (all candidates failed)")
 
     if len(members) < 2:
         raise RuntimeError(f"Only {len(members)} member(s) loaded — need at least 2.")
 
     # ── Calibrate weights ──
+    loaded_names = set(m.name for m in members)
     use_cache = os.path.exists(args.weights_cache) and not args.recalibrate
     if use_cache:
         with open(args.weights_cache) as f:
-            weights = json.load(f)
-        print(f"\n  Loaded cached weights from {args.weights_cache}")
-        print("  (Use --recalibrate to refresh)\n")
-        print("  Cached weights:")
-        for name, w in sorted(weights.items(), key=lambda x: -x[1]):
-            print(f"    {name.split('/')[-1]:<45s} {w:.4f}")
-    else:
+            cached = json.load(f)
+        cached_names = set(cached.keys())
+        # Invalidate cache when the loaded members don't match what was calibrated
+        if not loaded_names.issubset(cached_names):
+            missing = loaded_names - cached_names
+            print(f"\n  Cache miss for members: {missing}")
+            print("  Stale cache — running recalibration ...")
+            use_cache = False
+        else:
+            weights = cached
+            print(f"\n  Loaded cached weights from {args.weights_cache}")
+            print("  (Use --recalibrate to refresh)\n")
+            print("  Cached weights (for loaded members):")
+            for name in sorted(loaded_names, key=lambda n: -weights.get(n, 0)):
+                print(f"    {name.split('/')[-1]:<45s} {weights.get(name, 0):.4f}")
+    if not use_cache:
         weights = calibrate_weights(members, device,
                                     n_per_dataset=200,
                                     cache_path=args.weights_cache)
