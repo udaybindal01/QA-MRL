@@ -386,8 +386,9 @@ def _load_kaggle_dataset(name: str, output_dir: str) -> Optional[Tuple[List[str]
         return None
 
 
-def calibrate_weights(members: list, device, n_per_dataset: int = 200,
-                      cache_path: str = WEIGHTS_CACHE) -> Dict[str, float]:
+def calibrate_weights(members: list, device, n_per_dataset: int = 60,
+                      cache_path: str = WEIGHTS_CACHE,
+                      batch_size: int = 8) -> Dict[str, float]:
     """
     Evaluate each council member on 3 Kaggle Bloom datasets.
     Returns {model_name: weight} where weight = mean accuracy across datasets.
@@ -451,7 +452,7 @@ def calibrate_weights(members: list, device, n_per_dataset: int = 200,
             sample_t, sample_l = stratified_sample(texts, labels, n_per_dataset)
             if not sample_t:
                 continue
-            proba = member.predict_proba(sample_t, batch_size=32)
+            proba = member.predict_proba(sample_t, batch_size=batch_size)
             preds = proba.argmax(axis=1) + 1          # 1-indexed
             raw_acc = float(np.mean(np.array(preds) == np.array(sample_l)))
             acc = min(raw_acc, ACC_CAP)
@@ -610,6 +611,9 @@ def main():
     parser.add_argument("--pipe_batch_size", type=int, default=4,
                         help="NLI pairs per GPU forward pass — each query expands to "
                              "6 pairs, so GPU load = pipe_batch_size*6 (default 4)")
+    parser.add_argument("--cal_samples", type=int, default=60,
+                        help="Stratified samples per Kaggle dataset for calibration "
+                             "(default 60 = 10/class; use 120+ for more accurate weights)")
     parser.add_argument("--recalibrate", action="store_true",
                         help="Re-run weight calibration even if cache exists")
     parser.add_argument("--calibrate_only", action="store_true",
@@ -696,8 +700,9 @@ def main():
                 print(f"    {name.split('/')[-1]:<45s} {weights.get(name, 0):.4f}")
     if not use_cache:
         weights = calibrate_weights(members, device,
-                                    n_per_dataset=200,
-                                    cache_path=args.weights_cache)
+                                    n_per_dataset=args.cal_samples,
+                                    cache_path=args.weights_cache,
+                                    batch_size=args.batch_size)
 
     if args.calibrate_only:
         print("\n  --calibrate_only set. Done.")
