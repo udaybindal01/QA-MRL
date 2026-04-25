@@ -1,29 +1,42 @@
 """
-Bloom Level Annotation — Council of Models (SOTA ensemble).
+Bloom Level Annotation — Council of 5 Models (SOTA ensemble).
 
-Three models vote via weighted soft-voting (averaged probability distributions):
+Five models vote via weighted soft-voting. Weights are calibrated automatically
+by evaluating each model on 3 held-out Kaggle Bloom datasets and averaging
+per-dataset accuracy. Cached to disk after first calibration run.
 
-  1. MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli  (weight 3)
-     SOTA zero-shot NLI (~440M). Best zero-shot Bloom accuracy among local models.
+Council members (model, role):
+  1. MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli  — SOTA zero-shot NLI (440M)
+  2. MoritzLaurer/deberta-v3-base-zeroshot-v2                   — Improved base zero-shot NLI (180M)
+  3. cross-encoder/nli-deberta-v3-base                          — Cross-encoder NLI for diversity (180M)
+  4. facebook/bart-large-mnli                                    — BART NLI, architectural diversity (400M)
+  5. cip29/bert-blooms-taxonomy-classifier                       — BERT fine-tuned on Bloom data (110M)
 
-  2. cross-encoder/nli-deberta-v3-base  (weight 2)
-     Smaller DeBERTa NLI (~180M). Adds architectural diversity at lower compute cost.
+Weight calibration:
+  - Downloads 3 Kaggle Bloom taxonomy datasets (vijaydevane, abhaygotmare, dineshsheelam)
+  - Evaluates each model on a 200-sample stratified hold-out per dataset
+  - Per-model weight = mean accuracy across 3 datasets
+  - Cached to /tmp/bloom_council_weights.json — re-run with --recalibrate to refresh
 
-  3. cip29/bert-blooms-taxonomy-classifier  (weight 1)
-     BERT fine-tuned on educational Bloom data. Domain knowledge but narrow training set.
+Voting:
+  - Each model returns a 6-dim probability vector (one per Bloom level)
+  - Final prediction = argmax(weighted average of all five vectors)
+  - Confidence = max probability in final vector (reflects council agreement)
 
-Voting: each model returns a 6-dim probability vector (one per Bloom level).
-        Final prediction = argmax(weighted average of all three vectors).
-        Confidence = max probability in final vector (reflects council agreement).
-
-Output fields added to each record:
+Output fields added per record:
   bloom_level       — 1-indexed Bloom level (1=Remember … 6=Create)
-  bloom_source      — "council"
-  bloom_confidence  — float 0-1, council agreement confidence
-  bloom_votes       — per-model predictions, for debugging
+  bloom_source      — "council_v2"
+  bloom_confidence  — float 0-1, council ensemble confidence
+  bloom_votes       — per-model predictions (for debugging)
+  bloom_weights     — per-model weights used (for reproducibility)
+
+Calibration datasets:
+  vijaydevane/blooms-taxonomy-dataset
+  abhaygotmare/blooms-taxonomy-questions-level
+  dineshsheelam/blooms-taxonomy-dataset
 
 Usage:
-    # Annotate educational dataset
+    # Annotate educational data (auto-calibrates weights on first run)
     python data/annotate_bloom_council.py --data_dir /tmp/data/real
 
     # Annotate BEIR datasets
@@ -31,10 +44,11 @@ Usage:
         --beir_root /tmp/data/beir \
         --datasets scifact nfcorpus fiqa
 
-    # Use only 2 models (e.g. skip pretrained classifier)
-    python data/annotate_bloom_council.py \
-        --data_dir /tmp/data/real \
-        --skip_classifier
+    # Force weight recalibration
+    python data/annotate_bloom_council.py --data_dir /tmp/data/real --recalibrate
+
+    # Calibrate only (no annotation)
+    python data/annotate_bloom_council.py --calibrate_only
 
     # Annotate a single file
     python data/annotate_bloom_council.py --input /tmp/data/beir/scifact/test.jsonl
@@ -45,7 +59,7 @@ import json
 import os
 import shutil
 from collections import Counter
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
@@ -64,171 +78,353 @@ BLOOM_HYPOTHESES = [
     "This query is asking to design, propose, or synthesize something new.",
 ]
 
+WEIGHTS_CACHE = "/tmp/bloom_council_weights.json"
 
-# ──────────────────── NLI Council Member ────────────────────
+# ─── Council member definitions ───────────────────────────────────────────────
+
+COUNCIL_MEMBERS = [
+    {
+        "name": "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
+        "type": "nli",
+        "description": "SOTA zero-shot NLI (440M)",
+    },
+    {
+        "name": "MoritzLaurer/deberta-v3-base-zeroshot-v2",
+        "type": "nli",
+        "description": "Improved base zero-shot NLI (180M)",
+    },
+    {
+        "name": "cross-encoder/nli-deberta-v3-base",
+        "type": "nli",
+        "description": "Cross-encoder DeBERTa NLI (180M)",
+    },
+    {
+        "name": "facebook/bart-large-mnli",
+        "type": "nli",
+        "description": "BART NLI, architectural diversity (400M)",
+    },
+    {
+        "name": "cip29/bert-blooms-taxonomy-classifier",
+        "type": "classifier",
+        "description": "BERT fine-tuned on Bloom taxonomy data (110M)",
+    },
+]
+
+
+# ─── NLI Member ───────────────────────────────────────────────────────────────
 
 class NLIMember:
-    """
-    Zero-shot NLI model as a council member.
-    Returns a 6-dim probability vector for each query using BLOOM_HYPOTHESES.
-    """
+    """Zero-shot NLI model. Returns (N, 6) probability matrix."""
 
-    def __init__(self, model_name: str, weight: float, device):
+    def __init__(self, model_name: str, device):
         from transformers import pipeline
         print(f"  [NLI] Loading {model_name} ...")
         self.name = model_name
-        self.weight = weight
+        self.weight: float = 1.0          # set after calibration
         self._pipe = pipeline(
             "zero-shot-classification",
             model=model_name,
             device=device,
             batch_size=16,
         )
-        print(f"  [NLI] Loaded {model_name}")
+        print(f"  [NLI] Ready: {model_name}")
 
     def predict_proba(self, queries: List[str], batch_size: int = 32) -> np.ndarray:
-        """Returns (N, 6) array of probabilities, columns = Bloom levels 1-6."""
         all_probs = []
+        tag = self.name.split("/")[-1][:30]
         for i in tqdm(range(0, len(queries), batch_size),
-                      desc=f"  [{self.name.split('/')[-1]}]", leave=False):
+                      desc=f"    [{tag}]", leave=False):
             batch = queries[i:i + batch_size]
             results = self._pipe(batch, BLOOM_HYPOTHESES, multi_label=False)
             if isinstance(results, dict):
                 results = [results]
             for r in results:
-                # r["labels"] and r["scores"] are sorted by score descending.
-                # Re-align to hypothesis order (index = Bloom level - 1).
                 score_map = dict(zip(r["labels"], r["scores"]))
                 probs = np.array([score_map.get(h, 0.0) for h in BLOOM_HYPOTHESES],
                                  dtype=np.float32)
                 probs /= probs.sum() + 1e-9
                 all_probs.append(probs)
-        return np.stack(all_probs)  # (N, 6)
+        return np.stack(all_probs)   # (N, 6)
 
 
-# ──────────────────── Classifier Council Member ────────────────────
+# ─── Classifier Member ────────────────────────────────────────────────────────
 
 class ClassifierMember:
-    """
-    Fine-tuned sequence-classification model as a council member.
-    Returns a 6-dim probability vector via softmax over logits.
-    """
+    """Fine-tuned sequence classifier. Returns (N, 6) probability matrix."""
 
-    def __init__(self, model_name: str, weight: float, device):
+    def __init__(self, model_name: str, device):
         import torch
         from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
         print(f"  [CLS] Loading {model_name} ...")
         self.name = model_name
-        self.weight = weight
+        self.weight: float = 1.0
         self._device = device
         self._tok = AutoTokenizer.from_pretrained(model_name)
         self._model = AutoModelForSequenceClassification.from_pretrained(model_name)
         self._model.to(device).eval()
 
-        # Build index → Bloom-level-1 mapping
         id2label = getattr(self._model.config, "id2label", None)
-        self._idx_to_bloom = self._build_idx_map(id2label)
-        print(f"  [CLS] Loaded {model_name} | idx→bloom: {self._idx_to_bloom}")
-
-    @staticmethod
-    def _build_idx_map(id2label) -> Dict[int, int]:
-        """Map model output indices to 1-6 Bloom levels."""
-        _name_map = {
-            "remember": 1, "remembering": 1, "knowledge": 1,
-            "understand": 2, "understanding": 2, "comprehension": 2,
-            "apply": 3, "applying": 3, "application": 3,
-            "analyze": 4, "analyse": 4, "analysis": 4,
-            "evaluate": 5, "evaluating": 5, "evaluation": 5,
-            "create": 6, "creating": 6, "synthesis": 6,
-        }
-        if id2label is None:
-            return {i: i + 1 for i in range(6)}
-        mapping = {}
-        for idx, name in id2label.items():
-            n = str(name).lower().strip()
-            bloom = next((v for k, v in _name_map.items() if k in n), None)
-            if bloom is None:
-                try:
-                    v = int(n)
-                    bloom = v if 1 <= v <= 6 else (v + 1 if 0 <= v <= 5 else None)
-                except ValueError:
-                    pass
-            if bloom is not None:
-                mapping[int(idx)] = bloom
-        # Fill gaps if mapping is incomplete
-        if len(mapping) < 6:
-            mapping = {i: i + 1 for i in range(6)}
-        return mapping
+        self._idx_to_bloom = _build_classifier_idx_map(id2label)
+        print(f"  [CLS] Ready: {model_name} | idx→bloom: {self._idx_to_bloom}")
 
     def predict_proba(self, queries: List[str], batch_size: int = 64) -> np.ndarray:
-        """Returns (N, 6) array of probabilities aligned to Bloom levels 1-6."""
         import torch
         all_probs = []
+        tag = self.name.split("/")[-1][:30]
         for i in tqdm(range(0, len(queries), batch_size),
-                      desc=f"  [{self.name.split('/')[-1]}]", leave=False):
+                      desc=f"    [{tag}]", leave=False):
             batch = queries[i:i + batch_size]
             enc = self._tok(batch, padding=True, truncation=True,
                             max_length=128, return_tensors="pt")
             enc = {k: v.to(self._device) for k, v in enc.items()}
             with torch.no_grad():
-                logits = self._model(**enc).logits  # (B, num_labels)
-            probs_raw = torch.softmax(logits, dim=-1).cpu().numpy()  # (B, num_labels)
-
+                logits = self._model(**enc).logits
+            probs_raw = torch.softmax(logits, dim=-1).cpu().numpy()
             for row in probs_raw:
-                # Re-map to fixed 6-dim Bloom vector
                 bloom_probs = np.zeros(6, dtype=np.float32)
                 for idx, p in enumerate(row):
                     bl = self._idx_to_bloom.get(idx, idx + 1)
                     if 1 <= bl <= 6:
-                        bloom_probs[bl - 1] += p
+                        bloom_probs[bl - 1] += float(p)
                 bloom_probs /= bloom_probs.sum() + 1e-9
                 all_probs.append(bloom_probs)
-        return np.stack(all_probs)  # (N, 6)
+        return np.stack(all_probs)   # (N, 6)
 
 
-# ──────────────────── Council ────────────────────
+def _build_classifier_idx_map(id2label) -> Dict[int, int]:
+    _name_map = {
+        "remember": 1, "remembering": 1, "knowledge": 1,
+        "understand": 2, "understanding": 2, "comprehension": 2,
+        "apply": 3, "applying": 3, "application": 3,
+        "analyze": 4, "analyse": 4, "analysis": 4,
+        "evaluate": 5, "evaluating": 5, "evaluation": 5,
+        "create": 6, "creating": 6, "synthesis": 6,
+    }
+    if id2label is None:
+        return {i: i + 1 for i in range(6)}
+    mapping = {}
+    for idx, name in id2label.items():
+        n = str(name).lower().strip()
+        bloom = next((v for k, v in _name_map.items() if k in n), None)
+        if bloom is None:
+            try:
+                v = int(n)
+                bloom = v if 1 <= v <= 6 else (v + 1 if 0 <= v <= 5 else None)
+            except ValueError:
+                pass
+        if bloom is not None:
+            mapping[int(idx)] = bloom
+    return mapping if len(mapping) >= 3 else {i: i + 1 for i in range(6)}
+
+
+# ─── Weight Calibration ───────────────────────────────────────────────────────
+
+def _load_kaggle_dataset(name: str, output_dir: str) -> Optional[Tuple[List[str], List[int]]]:
+    """Download one Kaggle Bloom dataset; return (texts, 1-indexed bloom labels)."""
+    import glob
+    import pandas as pd
+    try:
+        import kagglehub
+    except ImportError:
+        os.system("pip install kagglehub --break-system-packages -q")
+        import kagglehub
+
+    _name_map = {
+        "remember": 1, "remembering": 1, "knowledge": 1,
+        "understand": 2, "understanding": 2, "comprehension": 2,
+        "apply": 3, "applying": 3, "application": 3,
+        "analyze": 4, "analyse": 4, "analysis": 4,
+        "evaluate": 5, "evaluating": 5, "evaluation": 5,
+        "create": 6, "creating": 6, "synthesis": 6,
+    }
+
+    def parse_label(val):
+        if isinstance(val, (int, float)):
+            v = int(val)
+            return v if 1 <= v <= 6 else (v + 1 if 0 <= v <= 5 else -1)
+        n = str(val).lower().strip()
+        for k, lv in _name_map.items():
+            if k in n:
+                return lv
+        try:
+            v = int(n)
+            return v if 1 <= v <= 6 else (v + 1 if 0 <= v <= 5 else -1)
+        except ValueError:
+            return -1
+
+    try:
+        print(f"    Downloading {name} ...")
+        path = kagglehub.dataset_download(name)
+        texts, labels = [], []
+        for csv_path in glob.glob(os.path.join(path, "**/*.csv"), recursive=True):
+            df = pd.read_csv(csv_path)
+            # Find text column
+            text_col = next(
+                (c for c in ["Question", "question", "Text", "text", "Sentence",
+                              "sentence", "query", "Query"]
+                 if c in df.columns), None)
+            if text_col is None:
+                text_col = next(
+                    (c for c in df.columns
+                     if df[c].dtype == "object" and df[c].str.len().mean() > 15),
+                    None)
+            # Find label column
+            label_col = next(
+                (c for c in ["Bloom's Taxonomy Level", "bloom_level", "Bloom Level",
+                              "Level", "level", "label", "Label", "cognitive_level",
+                              "Category", "category", "class", "Class"]
+                 if c in df.columns), None)
+            if label_col is None:
+                label_col = next(
+                    (c for c in df.columns if c != text_col), None)
+            if text_col is None or label_col is None:
+                continue
+            for _, row in df.iterrows():
+                lv = parse_label(row[label_col])
+                txt = str(row[text_col]).strip()
+                if lv != -1 and len(txt) > 10:
+                    texts.append(txt)
+                    labels.append(lv)
+        print(f"    {name}: {len(texts)} examples")
+        return texts, labels
+    except Exception as e:
+        print(f"    WARNING: Could not download {name}: {e}")
+        return None
+
+
+def calibrate_weights(members: list, device, n_per_dataset: int = 200,
+                      cache_path: str = WEIGHTS_CACHE) -> Dict[str, float]:
+    """
+    Evaluate each council member on 3 Kaggle Bloom datasets.
+    Returns {model_name: weight} where weight = mean accuracy across datasets.
+    Caches results to cache_path.
+    """
+    print("\n" + "=" * 65)
+    print("CALIBRATING COUNCIL WEIGHTS ON 3 KAGGLE BLOOM DATASETS")
+    print("=" * 65)
+
+    kaggle_datasets = [
+        "vijaydevane/blooms-taxonomy-dataset",
+        "abhaygotmare/blooms-taxonomy-questions-level",
+        "dineshsheelam/blooms-taxonomy-dataset",
+    ]
+
+    # Load all 3 datasets
+    cal_data: List[Optional[Tuple[List[str], List[int]]]] = []
+    for ds_name in kaggle_datasets:
+        result = _load_kaggle_dataset(ds_name, "/tmp/bloom_kaggle_cal")
+        cal_data.append(result)
+
+    valid = [(texts, labels) for r in cal_data if r is not None
+             for texts, labels in [r]]
+    if not valid:
+        print("  WARNING: No calibration data available. Falling back to uniform weights.")
+        return {m.name: 1.0 / len(members) for m in members}
+
+    # Build stratified hold-out per dataset
+    def stratified_sample(texts, labels, n):
+        from collections import defaultdict
+        import random
+        random.seed(42)
+        buckets = defaultdict(list)
+        for t, l in zip(texts, labels):
+            buckets[l].append(t)
+        sampled_t, sampled_l = [], []
+        per_class = max(1, n // 6)
+        for lv in range(1, 7):
+            pool = buckets[lv]
+            random.shuffle(pool)
+            for t in pool[:per_class]:
+                sampled_t.append(t)
+                sampled_l.append(lv)
+        return sampled_t, sampled_l
+
+    # Evaluate each member
+    weights: Dict[str, float] = {}
+    for member in members:
+        print(f"\n  Evaluating: {member.name}")
+        dataset_accs = []
+        for ds_idx, (ds_name, data) in enumerate(zip(kaggle_datasets, cal_data)):
+            if data is None:
+                print(f"    Dataset {ds_idx+1} ({ds_name}): SKIPPED (download failed)")
+                continue
+            texts, labels = data
+            sample_t, sample_l = stratified_sample(texts, labels, n_per_dataset)
+            if not sample_t:
+                continue
+            proba = member.predict_proba(sample_t, batch_size=32)
+            preds = proba.argmax(axis=1) + 1          # 1-indexed
+            acc = float(np.mean(np.array(preds) == np.array(sample_l)))
+            dataset_accs.append(acc)
+            print(f"    Dataset {ds_idx+1} ({ds_name.split('/')[0]}): "
+                  f"acc={acc:.3f}  (n={len(sample_t)})")
+        mean_acc = float(np.mean(dataset_accs)) if dataset_accs else 0.1
+        print(f"  → Mean accuracy: {mean_acc:.4f}")
+        weights[member.name] = mean_acc
+
+    # Normalize so weights sum to 1
+    total = sum(weights.values()) or 1.0
+    weights = {k: v / total for k, v in weights.items()}
+
+    # Cache to disk
+    os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+    with open(cache_path, "w") as f:
+        json.dump(weights, f, indent=2)
+    print(f"\n  Weights saved to {cache_path}")
+
+    print("\n  Final calibrated weights:")
+    for name, w in sorted(weights.items(), key=lambda x: -x[1]):
+        print(f"    {name.split('/')[-1]:<45s} {w:.4f}")
+
+    return weights
+
+
+# ─── Council ──────────────────────────────────────────────────────────────────
 
 class BloomCouncil:
-    """
-    Ensemble of council members. Combines predictions via weighted soft voting.
-    """
+    """Ensemble of 5 council members with calibrated accuracy-based weights."""
 
-    def __init__(self, members: list):
+    def __init__(self, members: list, weights: Dict[str, float]):
         self.members = members
-        total_w = sum(m.weight for m in members)
-        self._weights = [m.weight / total_w for m in members]
-        print(f"\n  Council assembled: {len(members)} members")
+        # Assign weights; fall back to uniform if a member isn't in the weights dict
+        raw = [weights.get(m.name, 1.0 / len(members)) for m in members]
+        total = sum(raw) or 1.0
+        self._weights = [w / total for w in raw]
         for m, w in zip(members, self._weights):
-            print(f"    {m.name.split('/')[-1]}  weight={w:.3f}")
+            m.weight = w
+
+        print(f"\n  Council of {len(members)} — calibrated weights:")
+        for m, w in sorted(zip(members, self._weights), key=lambda x: -x[1]):
+            print(f"    {m.name.split('/')[-1]:<45s} weight={w:.4f}")
 
     def predict(self, queries: List[str], batch_size: int = 32):
         """
         Returns:
-            levels      : List[int], 1-indexed Bloom levels
-            confidences : List[float], max probability in the ensemble distribution
-            votes       : List[List[int]], per-member predictions (for debugging)
+          levels      : List[int]        1-indexed Bloom level per query
+          confidences : List[float]      max probability in ensemble distribution
+          votes       : List[List[int]]  per-member predictions (debugging)
+          weights_used: List[float]      weights in same order as votes
         """
         member_probs = []
         member_preds = []
         for m, w in zip(self.members, self._weights):
             proba = m.predict_proba(queries, batch_size)   # (N, 6)
             member_probs.append(proba * w)
-            member_preds.append(proba.argmax(axis=1) + 1)  # 1-indexed per member
+            member_preds.append((proba.argmax(axis=1) + 1).tolist())
 
-        ensemble = sum(member_probs)                   # weighted average, (N, 6)
+        ensemble = sum(member_probs)                        # (N, 6) weighted avg
         levels = (ensemble.argmax(axis=1) + 1).tolist()
         confidences = ensemble.max(axis=1).tolist()
 
         votes = [
-            [int(member_preds[m_idx][q_idx])
-             for m_idx in range(len(self.members))]
-            for q_idx in range(len(queries))
+            [int(member_preds[mi][qi]) for mi in range(len(self.members))]
+            for qi in range(len(queries))
         ]
-        return levels, confidences, votes
+        return levels, confidences, votes, self._weights
 
 
-# ──────────────────── Annotation helpers ────────────────────
+# ─── Annotation helpers ───────────────────────────────────────────────────────
 
 def annotate_file(input_path: str, output_path: str, council: BloomCouncil,
                   batch_size: int = 32):
@@ -241,29 +437,28 @@ def annotate_file(input_path: str, output_path: str, council: BloomCouncil,
     old_dist = Counter(r.get("bloom_level") for r in records)
     print(f"  Old distribution: {dict(sorted(old_dist.items()))}")
 
-    levels, confidences, votes = council.predict(queries, batch_size)
+    levels, confidences, votes, weights_used = council.predict(queries, batch_size)
 
     changed = 0
     for r, lvl, conf, vote in zip(records, levels, confidences, votes):
         if r.get("bloom_level") != lvl:
             changed += 1
         r["bloom_level"] = lvl
-        r["bloom_source"] = "council"
+        r["bloom_source"] = "council_v2"
         r["bloom_confidence"] = round(float(conf), 4)
         r["bloom_votes"] = vote
+        r["bloom_weights"] = [round(w, 4) for w in weights_used]
 
     new_dist = Counter(r["bloom_level"] for r in records)
     print(f"  New distribution: {dict(sorted(new_dist.items()))}")
     print(f"  Changed: {changed}/{len(records)} ({changed/len(records):.1%})")
-
-    avg_conf = float(np.mean(confidences))
-    print(f"  Avg council confidence: {avg_conf:.3f}")
+    print(f"  Avg confidence: {float(np.mean(confidences)):.3f}")
 
     with open(output_path, "w") as f:
         for r in records:
             f.write(json.dumps(r) + "\n")
 
-    # Update cache file if present (used by EducationalRetrievalDataset at train time)
+    # Update cache file used by EducationalRetrievalDataset at train time
     cache_path = input_path + ".bloom_cache.json"
     if os.path.exists(cache_path):
         cache = {r["query_id"]: r["bloom_level"]
@@ -277,17 +472,16 @@ def annotate_file(input_path: str, output_path: str, council: BloomCouncil,
 
 def collect_files(args) -> List[str]:
     paths = []
-    if args.input:
-        paths.append(args.input)
-        return paths
-    if args.data_dir:
+    if getattr(args, "input", None):
+        return [args.input]
+    if getattr(args, "data_dir", None):
         for split in args.splits:
             p = os.path.join(args.data_dir, f"{split}.jsonl")
             if os.path.exists(p):
                 paths.append(p)
             else:
                 print(f"  Skipping {split} — not found at {p}")
-    if args.beir_root and args.datasets:
+    if getattr(args, "beir_root", None) and getattr(args, "datasets", None):
         for ds in args.datasets:
             for split in args.splits:
                 p = os.path.join(args.beir_root, ds, f"{split}.jsonl")
@@ -298,88 +492,83 @@ def collect_files(args) -> List[str]:
     return paths
 
 
-# ──────────────────── Main ────────────────────
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Bloom annotation via council of models (SOTA ensemble)"
+        description="Bloom annotation — council of 5 with calibrated weights"
     )
-    parser.add_argument("--data_dir", default=None,
-                        help="Annotate train/val/test.jsonl under this directory")
+    parser.add_argument("--data_dir", default=None)
     parser.add_argument("--splits", nargs="+", default=["train", "val", "test"])
-    parser.add_argument("--beir_root", default=None,
-                        help="Root directory of BEIR datasets (e.g. /tmp/data/beir)")
-    parser.add_argument("--datasets", nargs="+", default=["scifact", "nfcorpus", "fiqa"],
-                        help="BEIR dataset names to annotate (used with --beir_root)")
+    parser.add_argument("--beir_root", default=None)
+    parser.add_argument("--datasets", nargs="+",
+                        default=["scifact", "nfcorpus", "fiqa"])
     parser.add_argument("--input", default=None,
                         help="Annotate a single JSONL file")
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--skip_classifier", action="store_true",
-                        help="Skip the fine-tuned BERT classifier (use 2 NLI models only)")
-    parser.add_argument("--skip_secondary_nli", action="store_true",
-                        help="Skip cross-encoder NLI (use DeBERTa-large + classifier only)")
-    parser.add_argument("--no_backup", action="store_true",
-                        help="Do not back up original annotations")
+    parser.add_argument("--recalibrate", action="store_true",
+                        help="Re-run weight calibration even if cache exists")
+    parser.add_argument("--calibrate_only", action="store_true",
+                        help="Only calibrate weights, skip annotation")
+    parser.add_argument("--weights_cache", default=WEIGHTS_CACHE,
+                        help=f"Path to weights JSON cache (default: {WEIGHTS_CACHE})")
+    parser.add_argument("--no_backup", action="store_true")
     args = parser.parse_args()
 
-    if not args.data_dir and not args.beir_root and not args.input:
-        parser.error("Provide --data_dir, --beir_root, or --input")
+    if not args.calibrate_only and not args.data_dir \
+            and not args.beir_root and not args.input:
+        parser.error("Provide --data_dir, --beir_root, --input, or --calibrate_only")
 
     import torch
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print("=" * 65)
-    print("Bloom Level Annotation — Council of Models")
-    print("=" * 65)
-    print(f"  Device: {device}")
 
-    # ── Assemble council ──
+    print("=" * 65)
+    print("Bloom Level Annotation — Council of 5 Models")
+    print("=" * 65)
+    print(f"  Device : {device}")
+    print(f"  Members: {len(COUNCIL_MEMBERS)}")
+
+    # ── Load all council members ──
     members = []
-
-    # Member 1: DeBERTa-v3-large NLI — SOTA zero-shot (weight 3)
-    try:
-        members.append(NLIMember(
-            "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
-            weight=3.0, device=device
-        ))
-    except Exception as e:
-        print(f"  WARNING: Could not load DeBERTa-v3-large NLI: {e}")
-        print("  Falling back to facebook/bart-large-mnli as primary NLI")
-        members.append(NLIMember("facebook/bart-large-mnli", weight=3.0, device=device))
-
-    # Member 2: cross-encoder/nli-deberta-v3-base — secondary NLI (weight 2)
-    if not args.skip_secondary_nli:
+    for spec in COUNCIL_MEMBERS:
         try:
-            members.append(NLIMember(
-                "cross-encoder/nli-deberta-v3-base",
-                weight=2.0, device=device
-            ))
+            if spec["type"] == "nli":
+                members.append(NLIMember(spec["name"], device))
+            else:
+                members.append(ClassifierMember(spec["name"], device))
         except Exception as e:
-            print(f"  WARNING: Could not load cross-encoder NLI: {e}")
-            print("  Skipping secondary NLI member.")
+            print(f"  WARNING: Could not load {spec['name']}: {e} — skipping")
 
-    # Member 3: fine-tuned BERT Bloom classifier (weight 1)
-    if not args.skip_classifier:
-        try:
-            members.append(ClassifierMember(
-                "cip29/bert-blooms-taxonomy-classifier",
-                weight=1.0, device=device
-            ))
-        except Exception as e:
-            print(f"  WARNING: Could not load BERT classifier: {e}")
-            print("  Skipping classifier member.")
+    if len(members) < 2:
+        raise RuntimeError(f"Only {len(members)} member(s) loaded — need at least 2.")
 
-    if not members:
-        raise RuntimeError("No council members could be loaded.")
+    # ── Calibrate weights ──
+    use_cache = os.path.exists(args.weights_cache) and not args.recalibrate
+    if use_cache:
+        with open(args.weights_cache) as f:
+            weights = json.load(f)
+        print(f"\n  Loaded cached weights from {args.weights_cache}")
+        print("  (Use --recalibrate to refresh)\n")
+        print("  Cached weights:")
+        for name, w in sorted(weights.items(), key=lambda x: -x[1]):
+            print(f"    {name.split('/')[-1]:<45s} {w:.4f}")
+    else:
+        weights = calibrate_weights(members, device,
+                                    n_per_dataset=200,
+                                    cache_path=args.weights_cache)
 
-    council = BloomCouncil(members)
+    if args.calibrate_only:
+        print("\n  --calibrate_only set. Done.")
+        return
 
-    # ── Collect files ──
+    # ── Build council and annotate ──
+    council = BloomCouncil(members, weights)
+
     files = collect_files(args)
     if not files:
         print("No files found to annotate.")
         return
 
-    # ── Annotate ──
     all_old: Counter = Counter()
     all_new: Counter = Counter()
 
@@ -388,11 +577,11 @@ def main():
             backup = path + ".pre_council_backup"
             if not os.path.exists(backup):
                 shutil.copy2(path, backup)
-                print(f"  Backed up original → {os.path.basename(backup)}")
+                print(f"  Backed up → {os.path.basename(backup)}")
 
-        old_dist, new_dist = annotate_file(path, path, council, args.batch_size)
-        all_old.update(old_dist)
-        all_new.update(new_dist)
+        old_d, new_d = annotate_file(path, path, council, args.batch_size)
+        all_old.update(old_d)
+        all_new.update(new_d)
 
     # ── Summary ──
     print(f"\n{'='*65}")
@@ -404,7 +593,7 @@ def main():
         name = BLOOM_NAMES[level]
         old = all_old.get(level, 0)
         new = all_new.get(level, 0)
-        print(f"  {name:<12s} {old:>8d} {new:>8d} {new-old:>+6d}")
+        print(f"  {name:<12s} {old:>8d} {new:>8d} {new - old:>+6d}")
 
     print(f"\n  NEXT STEPS:")
     print(f"    1. Re-mine curriculum negatives:")
