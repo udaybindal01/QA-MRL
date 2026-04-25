@@ -135,13 +135,29 @@ class NLIMember:
         )
         print(f"  [NLI] Ready: {model_name}")
 
+    def _to_cpu(self):
+        """Move pipeline to CPU (called when CUDA OOM occurs during inference)."""
+        import torch
+        torch.cuda.empty_cache()
+        self._pipe.model = self._pipe.model.to("cpu")
+        self._pipe.device = torch.device("cpu")
+        print(f"\n  [NLI] {self.name.split('/')[-1]} moved to CPU after inference OOM")
+
     def predict_proba(self, queries: List[str], batch_size: int = 32) -> np.ndarray:
         all_probs = []
         tag = self.name.split("/")[-1][:30]
         for i in tqdm(range(0, len(queries), batch_size),
                       desc=f"    [{tag}]", leave=False):
             batch = queries[i:i + batch_size]
-            results = self._pipe(batch, BLOOM_HYPOTHESES, multi_label=False)
+            for attempt in range(2):
+                try:
+                    results = self._pipe(batch, BLOOM_HYPOTHESES, multi_label=False)
+                    break
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower() and attempt == 0:
+                        self._to_cpu()
+                    else:
+                        raise
             if isinstance(results, dict):
                 results = [results]
             for r in results:
@@ -174,6 +190,14 @@ class ClassifierMember:
         self._idx_to_bloom = _build_classifier_idx_map(id2label)
         print(f"  [CLS] Ready: {model_name} | idx→bloom: {self._idx_to_bloom}")
 
+    def _to_cpu(self):
+        """Move model to CPU (called when CUDA OOM occurs during inference)."""
+        import torch
+        torch.cuda.empty_cache()
+        self._model = self._model.to("cpu")
+        self._device = "cpu"
+        print(f"\n  [CLS] {self.name.split('/')[-1]} moved to CPU after inference OOM")
+
     def predict_proba(self, queries: List[str], batch_size: int = 64) -> np.ndarray:
         import torch
         all_probs = []
@@ -181,12 +205,20 @@ class ClassifierMember:
         for i in tqdm(range(0, len(queries), batch_size),
                       desc=f"    [{tag}]", leave=False):
             batch = queries[i:i + batch_size]
-            enc = self._tok(batch, padding=True, truncation=True,
-                            max_length=128, return_tensors="pt")
-            enc = {k: v.to(self._device) for k, v in enc.items()}
-            with torch.no_grad():
-                logits = self._model(**enc).logits
-            probs_raw = torch.softmax(logits, dim=-1).cpu().numpy()
+            for attempt in range(2):
+                try:
+                    enc = self._tok(batch, padding=True, truncation=True,
+                                    max_length=128, return_tensors="pt")
+                    enc = {k: v.to(self._device) for k, v in enc.items()}
+                    with torch.no_grad():
+                        logits = self._model(**enc).logits
+                    probs_raw = torch.softmax(logits, dim=-1).cpu().numpy()
+                    break
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower() and attempt == 0:
+                        self._to_cpu()
+                    else:
+                        raise
             for row in probs_raw:
                 bloom_probs = np.zeros(6, dtype=np.float32)
                 for idx, p in enumerate(row):
@@ -266,9 +298,13 @@ def _load_kaggle_dataset(name: str, output_dir: str) -> Optional[Tuple[List[str]
         roman = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6}
         if n in roman:
             return roman[n]
-        # "l1" … "l6" or "level1" … "level6"
+        # "bt1"…"bt6" (vijaydevane dataset format)
         import re
-        m = re.match(r"l(?:evel)?[ _]?([1-6])", n)
+        m = re.match(r"bt[ _]?([1-6])$", n)
+        if m:
+            return int(m.group(1))
+        # "l1"…"l6" or "level1"…"level6"
+        m = re.match(r"l(?:evel)?[ _]?([1-6])$", n)
         if m:
             return int(m.group(1))
         try:
