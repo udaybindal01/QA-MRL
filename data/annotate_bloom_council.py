@@ -122,16 +122,20 @@ COUNCIL_MEMBERS = [
 class NLIMember:
     """Zero-shot NLI model. Returns (N, 6) probability matrix."""
 
-    def __init__(self, model_name: str, device):
+    def __init__(self, model_name: str, device, pipe_batch_size: int = 4):
         from transformers import pipeline
-        print(f"  [NLI] Loading {model_name} ...")
+        print(f"  [NLI] Loading {model_name} (pipe_batch={pipe_batch_size}) ...")
         self.name = model_name
         self.weight: float = 1.0          # set after calibration
+        # pipe_batch_size controls NLI pairs per forward pass.
+        # Each query expands to len(BLOOM_HYPOTHESES)=6 pairs, so actual
+        # GPU memory per step = pipe_batch_size * 6 * seq_len * hidden.
+        # Default 4 → 24 pairs/step, safe on near-full GPUs.
         self._pipe = pipeline(
             "zero-shot-classification",
             model=model_name,
             device=device,
-            batch_size=16,
+            batch_size=pipe_batch_size,
         )
         print(f"  [NLI] Ready: {model_name}")
 
@@ -143,7 +147,7 @@ class NLIMember:
         self._pipe.device = torch.device("cpu")
         print(f"\n  [NLI] {self.name.split('/')[-1]} moved to CPU after inference OOM")
 
-    def predict_proba(self, queries: List[str], batch_size: int = 32) -> np.ndarray:
+    def predict_proba(self, queries: List[str], batch_size: int = 8) -> np.ndarray:
         all_probs = []
         tag = self.name.split("/")[-1][:30]
         for i in tqdm(range(0, len(queries), batch_size),
@@ -198,7 +202,7 @@ class ClassifierMember:
         self._device = "cpu"
         print(f"\n  [CLS] {self.name.split('/')[-1]} moved to CPU after inference OOM")
 
-    def predict_proba(self, queries: List[str], batch_size: int = 64) -> np.ndarray:
+    def predict_proba(self, queries: List[str], batch_size: int = 16) -> np.ndarray:
         import torch
         all_probs = []
         tag = self.name.split("/")[-1][:30]
@@ -601,7 +605,11 @@ def main():
                         default=["scifact", "nfcorpus", "fiqa"])
     parser.add_argument("--input", default=None,
                         help="Annotate a single JSONL file")
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=8,
+                        help="Queries per outer predict loop iteration (default 8)")
+    parser.add_argument("--pipe_batch_size", type=int, default=4,
+                        help="NLI pairs per GPU forward pass — each query expands to "
+                             "6 pairs, so GPU load = pipe_batch_size*6 (default 4)")
     parser.add_argument("--recalibrate", action="store_true",
                         help="Re-run weight calibration even if cache exists")
     parser.add_argument("--calibrate_only", action="store_true",
@@ -635,7 +643,8 @@ def main():
             for try_device in ([device, "cpu"] if device != "cpu" else ["cpu"]):
                 try:
                     if spec["type"] == "nli":
-                        m = NLIMember(candidate, try_device)
+                        m = NLIMember(candidate, try_device,
+                                      pipe_batch_size=args.pipe_batch_size)
                     else:
                         m = ClassifierMember(candidate, try_device)
                     if candidate != spec["name"]:
