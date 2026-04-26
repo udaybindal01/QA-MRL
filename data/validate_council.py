@@ -75,23 +75,23 @@ def main():
 
         try:
             if mtype == "nli":
-                member = NLIMember(name, device=device, fallback=spec.get("fallback"))
+                member = NLIMember(name, device=device, pipe_batch_size=args.pipe_batch_size)
                 member.load()
                 probs = member.predict_proba(queries, batch_size=args.pipe_batch_size)
 
             elif mtype == "classifier":
-                member = ClassifierMember(name, device=device, fallback=spec.get("fallback"))
+                member = ClassifierMember(name, device=device)
                 member.load()
                 probs = member.predict_proba(queries, batch_size=args.pipe_batch_size)
 
             elif mtype == "knn":
-                member = KNNMember(name, device=device, fallback=spec.get("fallback"))
+                member = KNNMember(spec.get("encoder_name", name), device=device)
                 member.load()
                 member.fit(cal_texts, cal_labels)
                 probs = member.predict_proba(queries, batch_size=args.batch_size)
 
             elif mtype == "lexical":
-                member = LexicalMember(name, device=device)
+                member = LexicalMember()
                 member.fit(cal_texts, cal_labels)
                 probs = member.predict_proba(queries, batch_size=args.batch_size)
 
