@@ -457,6 +457,27 @@ def _load_kaggle_dataset(name: str) -> Optional[Tuple[List[str], List[int]]]:
 
 # ─── Calibration ──────────────────────────────────────────────────────────────
 
+def load_calibration_datasets(n: int = 0) -> Tuple[List[str], List[int]]:
+    """Load and merge all 3 Kaggle Bloom datasets. Returns (texts, labels)."""
+    import random
+    kaggle_datasets = [
+        "vijaydevane/blooms-taxonomy-dataset",
+        "abhaygotmare/blooms-taxonomy-questions-level",
+        "dineshsheelam/blooms-taxonomy-dataset",
+    ]
+    all_texts, all_labels = [], []
+    for ds_name in kaggle_datasets:
+        result = _load_kaggle_dataset(ds_name)
+        if result:
+            all_texts.extend(result[0])
+            all_labels.extend(result[1])
+    if n and n < len(all_texts):
+        idxs = random.sample(range(len(all_texts)), n)
+        all_texts = [all_texts[i] for i in idxs]
+        all_labels = [all_labels[i] for i in idxs]
+    return all_texts, all_labels
+
+
 def calibrate_weights(members: list, n_per_dataset: int = 0,
                       cache_path: str = WEIGHTS_CACHE,
                       batch_size: int = 8) -> Dict[str, float]:
