@@ -84,8 +84,6 @@ WEIGHTS_CACHE = "/tmp/bloom_council_weights.json"
 COUNCIL_SPECS = [
     {"name": "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
      "type": "nli",      "fallback": None},
-    {"name": "facebook/bart-large-mnli",
-     "type": "nli",      "fallback": None},
     {"name": "cip29/bert-blooms-taxonomy-classifier",
      "type": "classifier","fallback": None},
     {"name": "sentence-transformers/all-MiniLM-L6-v2",
@@ -508,7 +506,6 @@ def calibrate_weights(members: list, n_per_dataset: int = 0,
         print("  WARNING: No calibration data. Falling back to uniform weights.")
         return {m.name: 1.0 / len(members) for m in members}
 
-    ACC_CAP = 0.75
     weights: Dict[str, float] = {m.name: [] for m in members}  # accumulate per-ds
 
     for ds_idx, (ds_name, data) in enumerate(zip(kaggle_datasets, cal_data)):
@@ -566,10 +563,8 @@ def calibrate_weights(members: list, n_per_dataset: int = 0,
             print(f"    Evaluating: {member.name.split('/')[-1][:40]}")
             proba = member.predict_proba(test_t, batch_size=batch_size)
             preds = proba.argmax(axis=1) + 1
-            raw_acc = float(np.mean(preds == test_labels_arr))
-            acc = min(raw_acc, ACC_CAP)
-            note = f" (capped from {raw_acc:.3f})" if raw_acc > ACC_CAP else ""
-            print(f"      acc={acc:.3f}{note}")
+            acc = float(np.mean(preds == test_labels_arr))
+            print(f"      acc={acc:.3f}")
             weights[member.name].append(acc)
 
     # Average across datasets
