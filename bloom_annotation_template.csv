@@ -1,0 +1,151 @@
+id,source,question,bloom_label
+Q001,sciq,Which system in your body stores urine and is controlled by the nervous system?,1
+Q002,openbookqa,"A needle lined with magnets will pull north. If north is to the right and you want to go west, you'd walk",3
+Q003,arc_easy,At what temperature does pure water boil?,1
+Q004,sciq,What are all living things made of?,1
+Q005,qasc,Ice wedging is when freezing water expands and what?,1
+Q006,qasc,What does igneous intrusion create?,1
+Q007,arc_challenge,How many times does Earth rotate on its axis in one day?,1
+Q008,arc_challenge,Which of the following changes occurs as a solid is heated?,2
+Q009,qasc,What are in the animal kindgom?,1
+Q010,sciq,"Most autotrophs make their ""food"" through which process, using the energy of the sun?",1
+Q011,openbookqa,some level of crushing and pressure would be needed for sedimentary rock formation,2
+Q012,qasc,The habitat of spoonbills is an extremely important what?,1
+Q013,sciq,"What develop inside chambers called ovaries, which originate within flowers and mature into fruits?",1
+Q014,openbookqa,"Due to plates gliding over our planet's mantle, why is Vancouver likely to be destroyed?",4
+Q015,openbookqa,"Since June is cold and wet in Australia, it makes sense that at the same time",3
+Q016,qasc,Which tree's leaves change color in autumn,1
+Q017,openbookqa,Some prey animals may elude predators by,2
+Q018,sciq,"In physics, what is defined as the average kinetic energy of the particles of matter?",1
+Q019,sciq,Do motile cilia usually occur in small or large numbers on the cell surface?,1
+Q020,sciq,Chewing insects such as dragonflies and grasshoppers have how many sets of jaws?,1
+Q021,qasc,Organs of waste do what to the waste system?,1
+Q022,sciq,What is reduced and forms part of the gelatinous disks sandwiched between the vertebrae in humans?,1
+Q023,qasc,What is required for a light bulb to produce light?,1
+Q024,openbookqa,"If a river is flowing down the east side of a hill, then the hill",4
+Q025,arc_challenge,"A snack consists of peanuts, sunflower seeds, raisins, almonds, and chocolate pieces. Which statement describes why this is a mixture?",4
+Q026,openbookqa,"Salamanders may be unable to survive in a hot, dry location lacking food and water, but if it has food and water in an ideal location",3
+Q027,sciq,Trichomoniasis is cause by what type of pathogen?,1
+Q028,qasc,What had to bend to form the Himalayas?,1
+Q029,qasc,Where does sperm go after it leaves the male?,1
+Q030,sciq,An antigen is a molecule that reacts with some component of the what response?,1
+Q031,sciq,What does the large central vacuole do?,1
+Q032,sciq,Eukaryotic cells contain what type of structures that possess special functions?,1
+Q033,openbookqa,Absorbing sun rays,1
+Q034,openbookqa,Sediment is a result of the process of,1
+Q035,sciq,What increases the chances of someone inheriting a mitochondrial disease?,1
+Q036,arc_easy,Some materials are electrical conductors. Which material best conducts electricity?,1
+Q037,arc_easy,Green plants get the energy they need to make food from,1
+Q038,arc_easy,Beans and coal both have stored energy. Where did the energy come from that is stored in beans and coal?,4
+Q039,arc_easy,Which of these living things in a grassland ecosystem depend on the presence of a variety of bacteria and other microorganisms in the soil?,4
+Q040,sciq,A convergent plate boundary is created when two plates do what?,1
+Q041,arc_challenge,Michael has a pencil case made of pine wood. The surface of the pencil case scratches and dents easily. He wants to make a new pencil case that will not scratch or dent easily. Which of the following should Michael do to make a new pencil case that will not scratch or dent easily?,3
+Q042,openbookqa,if a habitat is destroyed then that habitat,3
+Q043,openbookqa,Magnification makes a small thing,1
+Q044,sciq,Electromagnetic radiation behaves like particles as well as what?,1
+Q045,qasc,if an animal sweats it can cause,2
+Q046,qasc,When do moose begin behavior intended to attract a mate?,1
+Q047,qasc,Animals rely on what for survival?,1
+Q048,sciq,The adrenal cortex directly influences the function of what organs through the production of the hormone aldosterone to stimulate sodium reabsorption?,1
+Q049,sciq,The first few species to colonize a disturbed area are called what?,1
+Q050,sciq,"The diapsids diverged into two groups, the archosauromorpha (“ancient lizard form”) and the lepidosauromorpha (“scaly lizard form”) during what time period?",1
+Q051,openbookqa,Humans are able to eat,1
+Q052,arc_challenge,All of these are examples of the ways Earth and the Moon interact except,4
+Q053,qasc,Damming a river can cause what in a depression?,2
+Q054,openbookqa,A person playing a song on a string instrument makes strings,2
+Q055,openbookqa,"2000 years ago, this method would likely have brought sand from the coast to the desert",2
+Q056,sciq,Energy cannot be created or destroyed - it can only change what?,1
+Q057,qasc,What requires electrical energy to function?,1
+Q058,openbookqa,What lives in their habitat?,1
+Q059,arc_challenge,Some power plants release heated water into rivers. This practice adds thermal energy to the river that most likely,3
+Q060,sciq,Mitosis and meiosis are both forms of division of the nucleus in these?,1
+Q061,sciq,Neutron stars are the corpses of left over what?,1
+Q062,arc_easy,Which event is most likely to increase the genetic variation in a population of organisms?,4
+Q063,qasc,Bacteria are?,1
+Q064,sciq,The addition of heat changes liquid water to what?,1
+Q065,arc_easy,What is a job of white blood cells?,1
+Q066,openbookqa,which of these can alter its appearance naturally to evade being captured?,1
+Q067,arc_easy,"When using more than the recommended amounts of pesticide on farmland, yards, and gardens, what is most likely to occur?",3
+Q068,openbookqa,Where would more water fall from the sky yearly?,3
+Q069,arc_challenge,The force of gravity on an object depends primarily on the object's,1
+Q070,qasc,How many appendages do insects have to detect sound?,1
+Q071,qasc,What protects internal organs?,1
+Q072,arc_easy,Carolina uses a microscope to view a soil sample taken from her backyard. Which part of the soil would she ONLY be able to see with a microscope?,3
+Q073,sciq,What do populations gain through births and immigration?,1
+Q074,arc_easy,What is the main source of energy for the water cycle?,1
+Q075,qasc,What have meristems for growth?,1
+Q076,sciq,"When land used for mining or other purposes is restored to its natural state, what do you call the process, which is often mandated by law?",1
+Q077,qasc,Petals attract animals such as bees to what part of a producer?,1
+Q078,arc_challenge,Which situation is an example of an inherited trait?,2
+Q079,sciq,What type of bonds do alkanes only contain?,1
+Q080,openbookqa,"A person needs to find a way to shore while on a raft. Another person tells the first person which direction to go in order to safely reach land, so the person directing is",2
+Q081,arc_easy,A star is a large astronomical body that,1
+Q082,arc_challenge,In which two parts of the water cycle does water absorb energy?,1
+Q083,sciq,Renal plasma flow equals the blood flow per minute times the what?,1
+Q084,sciq,The sites of protein synthesis are tiny structures called?,1
+Q085,openbookqa,What typically occurs between a sixth and a half of a minute?,3
+Q086,openbookqa,"If a deer eats a berry plant, the plant eats",3
+Q087,openbookqa,Deer are most likely to give a wide berth to a,3
+Q088,openbookqa,Which of the following is an example of ecological succession?,2
+Q089,qasc,Communities consist of populations of what?,1
+Q090,qasc,What causes rocks to weather?,1
+Q091,openbookqa,"The air was cold, so all night the sheep kept",3
+Q092,arc_easy,"When liquid water freezes, it forms ice. What is the physical state of an ice cube?",1
+Q093,qasc,What can have a negative impact on photosynthesis?,2
+Q094,sciq,The changing of a light ray’s direction (loosely called bending) when it passes through variations in matter is called this?,1
+Q095,qasc,mushrooms are nonphotosynthetic and cannot what?,1
+Q096,arc_easy,An important rule for students to know when heating a test tube is to,1
+Q097,qasc,What can ant bites do?,1
+Q098,openbookqa,Which of these lays eggs?,1
+Q099,arc_challenge,A geologist conducts an investigation to determine the absolute age of a fossil. She then repeats the procedure three times. Which best explains why she repeated the procedure several times?,5
+Q100,openbookqa,"A person is looking at an organism naked to the human eye. Desiring to observe it more clearly, a person engages the use of",3
+Q101,qasc,"how traits are passed down, or inherited, is found in information in an organism's what?",1
+Q102,arc_challenge,Cindy learned that trees release gases into to the air during photosynthesis. What gas does a tree release?,1
+Q103,sciq,What is captured by the sticky structure at the top of the style called the stigma?,1
+Q104,sciq,What is the term for when a species no longer exists?,1
+Q105,openbookqa,As the amount of water a plant receives increases what will usually happen with it?,3
+Q106,openbookqa,Roads need repaved in spring because,4
+Q107,qasc,What can chordates go through?,1
+Q108,qasc,What is used for cooking food by putting it over fire?,1
+Q109,sciq,How many orders can flying birds be divided into?,1
+Q110,qasc,where are genes carried?,1
+Q111,openbookqa,the winter solstice is on June 21st in the,1
+Q112,qasc,What occurs over geologic time above the level of the species.,1
+Q113,sciq,A fact or question is only considered science if it has what property?,1
+Q114,qasc,Something with what sticks to the fur of an animal and is transported?,1
+Q115,openbookqa,If blue whales have trouble finding any mates,3
+Q116,qasc,After a storm refraction of light occurs where the light is split into all different what,1
+Q117,arc_easy,The prairie grass ecosystem once had a deep layer of topsoil which was protected by the grasses that covered it. Removal of these grasses for farmland is causing the soil to be eroded mainly by,4
+Q118,sciq,What long molecules are composed of chains of units called monomers?,1
+Q119,openbookqa,A way to ingest more fiber for a bear is to,3
+Q120,arc_easy,Which relationship between Earth's outer core and inner core generates a large portion of Earth's magnetic field?,4
+Q121,arc_easy,Which geologic process is absent from the Gulf Coast states?,2
+Q122,sciq,What is the lowest level of organization that can perform all activities required for life?,1
+Q123,sciq,What is the part of the flower that produces pollen?,1
+Q124,arc_challenge,Read the description of the experiment below to answer the question. One hundred pea seeds were put in petri dishes and covered with wet paper towels. The petri dishes were then put inside black plastic bags. Half of them were placed in an incubator set to 10°C. The remaining half were placed in an incubator set to 30°C. This experiment was most likely designed to study the effect of which variable on the germination of pea seeds?,4
+Q125,qasc,What have special structures for penetrating a host?,1
+Q126,qasc,What requires water for survival?,1
+Q127,qasc,what pollinate plants?,1
+Q128,qasc,What do hurricanes do to the amount of water contained in bodies in water?,4
+Q129,arc_challenge,"Sheep Challenge Evolution A species of sheep lives on the Scottish island of Hirta. Hirta has plenty of grass for the sheep to eat, and no natural predators of the sheep live on the island. Some sheep have dark wool, and some have light wool. The sheep with dark wool tend to be much larger and stronger than the sheep with light wool. However, researchers have found that in the last 20 years, the sheep with light wool have increased in number. Usually, strength and size help animals survive and breed. A new sheep predator is introduced to the island. Which change to the sheep population will most likely occur first?",4
+Q130,sciq,"Upon reaching the postsynaptic membrane, what type of chemical messenger binds to and activates a specific receptor?",1
+Q131,arc_easy,Heat from deep in Earth's interior is transferred to its crust by which of the following?,1
+Q132,qasc,what does a flashlight require to produce light?,1
+Q133,arc_challenge,"Rhinoceroses and horses are related. They have very similar digestive systems and an odd number of toes on their feet. Horses have one toe, and rhinoceroses have three. These facts best support which claim?",5
+Q134,openbookqa,the sun makes rounds around this planet,1
+Q135,qasc,Viruses are not what,1
+Q136,sciq,Reducing the number of molecules in a rigid container causes what to decrease?,3
+Q137,openbookqa,With wind gusts and green skys you should pack,3
+Q138,arc_challenge,Which of the following questions is testable in a scientific investigation?,5
+Q139,qasc,What can be done to make hair dryers safer?,3
+Q140,sciq,What adjective describes the movements that propel the feces during elimination?,1
+Q141,arc_easy,Which tool would best help a person observe the parts of a plant cell?,3
+Q142,openbookqa,If an island is experiencing a hot summer it is because,4
+Q143,arc_easy,Which adaptation will warn predators not to eat an animal?,2
+Q144,openbookqa,"A storm is covering a town in sleet, which means that things",2
+Q145,sciq,A group of genetically identical individuals is called what?,1
+Q146,arc_easy,Why does the leaf of a plant look green?,2
+Q147,openbookqa,Arctic foxes are white in order to,2
+Q148,qasc,"When game animals move elsewhere, what else does?",4
+Q149,qasc,what between objects formed deep within the Earth causes them to smooth,1
+Q150,sciq,"What ear structure has three fluid filled ducts, including the organ of corti, where sound waves in air go to vibration?",1
