@@ -241,7 +241,14 @@ class KNNMember:
         self._index_labels: Optional[np.ndarray] = None
 
     def fit(self, texts: List[str], labels: List[int]):
-        from sentence_transformers import SentenceTransformer
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            raise ImportError(
+                "sentence-transformers not installed. Run:\n"
+                "  python -m pip install --no-cache-dir --no-deps sentence-transformers\n"
+                "  python -m pip install --no-cache-dir huggingface-hub Pillow scipy"
+            )
         print(f"  [KNN] Loading encoder {self.name} ...")
         self._encoder = SentenceTransformer(self.name, device=self._device)
         print(f"  [KNN] Encoding {len(texts)} reference examples ...")
@@ -704,8 +711,13 @@ def main():
     members = []
     for spec in COUNCIL_SPECS:
         if spec["type"] in ("knn", "lexical"):
-            # Data-driven: constructed directly (no load needed yet)
             if spec["type"] == "knn":
+                try:
+                    import sentence_transformers  # noqa: F401
+                except ImportError:
+                    print(f"  SKIPPING {spec['name']} — sentence-transformers not installed.")
+                    print("  Install with: python -m pip install --no-cache-dir --no-deps sentence-transformers")
+                    continue
                 members.append(KNNMember(spec["name"], device))
             else:
                 members.append(LexicalMember())
