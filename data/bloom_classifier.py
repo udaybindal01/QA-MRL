@@ -14,6 +14,7 @@ Public API (unchanged):
 import json
 import os
 import pickle
+from typing import List
 
 import numpy as np
 import torch
@@ -261,6 +262,3 @@ def classify_bloom_batch(queries: list, batch_size: int = 32) -> list:
 def classify_bloom(query: str) -> int:
     """Classify a single query. Returns Bloom level 1-6."""
     return classify_bloom_batch([query])[0]
-
-
-from typing import List
