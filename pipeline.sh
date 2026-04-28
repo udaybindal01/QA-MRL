@@ -139,17 +139,16 @@ run_train_classifier() {
 run_data() {
     log "STEP 1/11 — DATA PREPARATION"
 
+    # Downloads SciQ, OpenBookQA, QASC, ARC from HuggingFace automatically.
+    # Bloom annotation uses the trained council from /tmp/bloom-council/ if
+    # available (88% acc), otherwise falls back to cip29/bert (57% acc).
     python3 data/build_real_data.py \
+        --config     "$BAM_CONFIG" \
+        --output_dir "$DATA_DIR" \
         || die "build_real_data.py failed"
 
-    python3 data/annotate_bloom_pretrained.py \
-        --data_dir "$DATA_DIR" \
-        --method pretrained \
-        || die "annotate_bloom_pretrained.py failed"
-
-    # Bloom prediction caches (.bloom_cache.json) are generated automatically
-    # by EducationalRetrievalDataset on first training run — no extra step needed.
-
+    # Mine BM25 curriculum negatives (hard negatives mixed by stage parameter).
+    # Output: train_curriculum.jsonl — used by train_bam and train_v4.
     python3 data/curriculum_negatives.py \
         --pairs   "$DATA_DIR/train.jsonl" \
         --corpus  "$DATA_DIR/corpus.jsonl" \
@@ -159,10 +158,11 @@ run_data() {
         || die "curriculum_negatives.py failed"
 
     echo "Data ready at $DATA_DIR/"
-    echo "  train.jsonl  →  $(wc -l < "$DATA_DIR/train.jsonl") pairs"
-    echo "  val.jsonl    →  $(wc -l < "$DATA_DIR/val.jsonl") pairs"
-    echo "  test.jsonl   →  $(wc -l < "$DATA_DIR/test.jsonl") pairs"
-    echo "  corpus.jsonl →  $(wc -l < "$DATA_DIR/corpus.jsonl") passages"
+    echo "  train.jsonl            → $(wc -l < "$DATA_DIR/train.jsonl") pairs"
+    echo "  train_curriculum.jsonl → $(wc -l < "$DATA_DIR/train_curriculum.jsonl") pairs"
+    echo "  val.jsonl              → $(wc -l < "$DATA_DIR/val.jsonl") pairs"
+    echo "  test.jsonl             → $(wc -l < "$DATA_DIR/test.jsonl") pairs"
+    echo "  corpus.jsonl           → $(wc -l < "$DATA_DIR/corpus.jsonl") passages"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
