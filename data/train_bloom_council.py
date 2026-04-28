@@ -199,6 +199,12 @@ def train_transformer(spec: dict, train_data, val_data, test_data, output_dir: s
         return {"accuracy": float(np.mean(preds == labels))}
 
     if not os.path.exists(os.path.join(model_dir, "config.json")):
+        use_fp16 = spec.get("fp16", True) and torch.cuda.is_available()
+        # Force accelerate to respect our precision setting (overrides server config)
+        os.environ["ACCELERATE_MIXED_PRECISION"] = "fp16" if use_fp16 else "no"
+        if not use_fp16:
+            model = model.float()  # ensure fp32 weights
+
         training_args = TrainingArguments(
             output_dir=model_dir,
             num_train_epochs=spec["epochs"],
@@ -214,7 +220,8 @@ def train_transformer(spec: dict, train_data, val_data, test_data, output_dir: s
             metric_for_best_model="accuracy",
             greater_is_better=True,
             logging_steps=50,
-            fp16=spec.get("fp16", True) and torch.cuda.is_available(),
+            fp16=use_fp16,
+            bf16=False,
             report_to="none",
         )
         trainer = Trainer(
