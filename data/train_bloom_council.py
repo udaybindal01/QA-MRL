@@ -153,18 +153,31 @@ def train_svm(train_texts, train_labels, val_texts, val_labels,
 
 def train_transformer(spec: dict, train_data, val_data, test_data, output_dir: str):
     import torch
-    from transformers import (AutoTokenizer, AutoModelForSequenceClassification,
-                               TrainingArguments, Trainer, DataCollatorWithPadding,
-                               EarlyStoppingCallback)
-    from torch.utils.data import Dataset
+    from torch.utils.data import Dataset, DataLoader
+    from torch.optim import AdamW
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification, get_linear_schedule_with_warmup
 
     train_texts, train_labels = train_data
     val_texts,   val_labels   = val_data
     test_texts,  test_labels  = test_data
     hf_name   = spec["hf_name"]
     model_dir = os.path.join(output_dir, spec["name"])
+    device    = "cuda" if torch.cuda.is_available() else "cpu"
+    use_fp16  = spec.get("fp16", True) and torch.cuda.is_available()
 
-    # Skip if already trained
+    train_labels_0 = [l-1 for l in train_labels]
+    val_labels_0   = [l-1 for l in val_labels]
+    test_labels_0  = [l-1 for l in test_labels]
+
+    class BloomDataset(Dataset):
+        def __init__(self, texts, labels, tok):
+            self.enc = tok(texts, padding=True, truncation=True,
+                           max_length=128, return_tensors="pt")
+            self.labels = torch.tensor(labels, dtype=torch.long)
+        def __len__(self): return len(self.labels)
+        def __getitem__(self, i):
+            return {k: v[i] for k, v in self.enc.items()} | {"labels": self.labels[i]}
+
     if os.path.exists(os.path.join(model_dir, "config.json")):
         print(f"\n[{spec['name']}] Already trained — loading for eval.")
         tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -175,79 +188,78 @@ def train_transformer(spec: dict, train_data, val_data, test_data, output_dir: s
         model = AutoModelForSequenceClassification.from_pretrained(
             hf_name, num_labels=6, ignore_mismatched_sizes=True)
 
-    # Convert labels to 0-indexed
-    train_labels_0 = [l-1 for l in train_labels]
-    val_labels_0   = [l-1 for l in val_labels]
-    test_labels_0  = [l-1 for l in test_labels]
+        model = model.float().to(device)  # always fp32 to start; scaler handles fp16 if needed
+        train_ds = BloomDataset(train_texts, train_labels_0, tokenizer)
+        val_ds   = BloomDataset(val_texts,   val_labels_0,   tokenizer)
+        train_loader = DataLoader(train_ds, batch_size=spec["batch_size"], shuffle=True)
+        val_loader   = DataLoader(val_ds,   batch_size=64,                 shuffle=False)
 
-    class BloomDataset(Dataset):
-        def __init__(self, texts, labels, tokenizer):
-            self.enc = tokenizer(texts, padding=True, truncation=True,
-                                 max_length=128, return_tensors="pt")
-            self.labels = torch.tensor(labels, dtype=torch.long)
-        def __len__(self): return len(self.labels)
-        def __getitem__(self, i):
-            return {k: v[i] for k, v in self.enc.items()} | {"labels": self.labels[i]}
+        optimizer = AdamW(model.parameters(), lr=spec["lr"], weight_decay=0.01)
+        total_steps   = len(train_loader) * spec["epochs"] // spec["grad_accum"]
+        warmup_steps  = max(1, int(0.1 * total_steps))
+        scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
+        scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
 
-    train_ds = BloomDataset(train_texts, train_labels_0, tokenizer)
-    val_ds   = BloomDataset(val_texts,   val_labels_0,   tokenizer)
-    test_ds  = BloomDataset(test_texts,  test_labels_0,  tokenizer)
+        best_val_acc, best_epoch, patience_count = 0.0, 0, 0
+        print(f"  Training {spec['name']} ({device}, fp16={use_fp16}) for {spec['epochs']} epochs...")
 
-    def compute_metrics(eval_pred):
-        logits, labels = eval_pred
-        preds = np.argmax(logits, axis=-1)
-        return {"accuracy": float(np.mean(preds == labels))}
+        for epoch in range(1, spec["epochs"] + 1):
+            model.train()
+            total_loss, steps = 0.0, 0
+            optimizer.zero_grad()
+            for step, batch in enumerate(train_loader):
+                batch = {k: v.to(device) for k, v in batch.items()}
+                with torch.cuda.amp.autocast(enabled=use_fp16):
+                    out = model(**batch)
+                    loss = out.loss / spec["grad_accum"]
+                scaler.scale(loss).backward()
+                if (step + 1) % spec["grad_accum"] == 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    scheduler.step()
+                    optimizer.zero_grad()
+                total_loss += loss.item() * spec["grad_accum"]
+                steps += 1
 
-    if not os.path.exists(os.path.join(model_dir, "config.json")):
-        use_fp16 = spec.get("fp16", True) and torch.cuda.is_available()
-        # Force accelerate to respect our precision setting (overrides server config)
-        os.environ["ACCELERATE_MIXED_PRECISION"] = "fp16" if use_fp16 else "no"
-        if not use_fp16:
-            model = model.float()  # ensure fp32 weights
+            # Validation
+            model.eval()
+            val_preds, val_true = [], []
+            with torch.no_grad():
+                for batch in val_loader:
+                    batch = {k: v.to(device) for k, v in batch.items()}
+                    logits = model(**{k: v for k, v in batch.items() if k != "labels"}).logits
+                    val_preds.extend(logits.argmax(dim=-1).cpu().tolist())
+                    val_true.extend(batch["labels"].cpu().tolist())
+            val_acc = float(np.mean(np.array(val_preds) == np.array(val_true)))
+            print(f"  Epoch {epoch}/{spec['epochs']} — loss: {total_loss/steps:.4f}  val_acc: {val_acc:.4f}")
 
-        training_args = TrainingArguments(
-            output_dir=model_dir,
-            num_train_epochs=spec["epochs"],
-            per_device_train_batch_size=spec["batch_size"],
-            per_device_eval_batch_size=32,
-            gradient_accumulation_steps=spec["grad_accum"],
-            learning_rate=spec["lr"],
-            warmup_ratio=0.1,
-            weight_decay=0.01,
-            eval_strategy="epoch",
-            save_strategy="epoch",
-            load_best_model_at_end=True,
-            metric_for_best_model="accuracy",
-            greater_is_better=True,
-            logging_steps=50,
-            fp16=use_fp16,
-            bf16=False,
-            report_to="none",
-        )
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_ds,
-            eval_dataset=val_ds,
-            compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
-        )
-        print(f"  Training {spec['name']} for up to {spec['epochs']} epochs...")
-        trainer.train()
-        trainer.save_model(model_dir)
-        tokenizer.save_pretrained(model_dir)
-        print(f"  Saved to {model_dir}")
+            if val_acc > best_val_acc:
+                best_val_acc, best_epoch = val_acc, epoch
+                patience_count = 0
+                os.makedirs(model_dir, exist_ok=True)
+                model.save_pretrained(model_dir)
+                tokenizer.save_pretrained(model_dir)
+            else:
+                patience_count += 1
+                if patience_count >= 2:
+                    print(f"  Early stop at epoch {epoch} (best epoch {best_epoch}, val_acc {best_val_acc:.4f})")
+                    break
+
+        # Reload best checkpoint
+        model = AutoModelForSequenceClassification.from_pretrained(model_dir)
+        print(f"  Saved best model (epoch {best_epoch}, val_acc {best_val_acc:.4f}) to {model_dir}")
 
     # Evaluate on test set
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device).eval()
+    model = model.float().to(device).eval()
+    test_ds = BloomDataset(test_texts, test_labels_0, tokenizer)
+    loader  = DataLoader(test_ds, batch_size=64)
     all_preds = []
-    loader = torch.utils.data.DataLoader(test_ds, batch_size=32)
     with torch.no_grad():
         for batch in loader:
             batch = {k: v.to(device) for k, v in batch.items() if k != "labels"}
-            logits = model(**batch).logits
-            all_preds.extend(logits.argmax(dim=-1).cpu().tolist())
+            all_preds.extend(model(**batch).logits.argmax(dim=-1).cpu().tolist())
 
     test_acc = float(np.mean(np.array(all_preds) == np.array(test_labels_0)))
     print(f"  Test accuracy: {test_acc:.4f}")
