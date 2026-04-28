@@ -33,11 +33,11 @@ BLOOM_LABELS = {1: "Remember", 2: "Understand", 3: "Apply",
 
 TRANSFORMER_SPECS = [
     {"name": "deberta", "hf_name": "microsoft/deberta-v3-large",
-     "batch_size": 8,  "grad_accum": 4, "epochs": 5, "lr": 1e-5},
+     "batch_size": 8,  "grad_accum": 4, "epochs": 5, "lr": 1e-5,  "fp16": False},
     {"name": "roberta", "hf_name": "roberta-large",
-     "batch_size": 16, "grad_accum": 2, "epochs": 5, "lr": 2e-5},
+     "batch_size": 16, "grad_accum": 2, "epochs": 5, "lr": 2e-5,  "fp16": True},
     {"name": "bert",    "hf_name": "bert-base-uncased",
-     "batch_size": 32, "grad_accum": 1, "epochs": 5, "lr": 2e-5},
+     "batch_size": 32, "grad_accum": 1, "epochs": 5, "lr": 2e-5,  "fp16": True},
 ]
 
 BLOOM_VERBS = {
@@ -214,7 +214,7 @@ def train_transformer(spec: dict, train_data, val_data, test_data, output_dir: s
             metric_for_best_model="accuracy",
             greater_is_better=True,
             logging_steps=50,
-            fp16=torch.cuda.is_available(),
+            fp16=spec.get("fp16", True) and torch.cuda.is_available(),
             report_to="none",
         )
         trainer = Trainer(
