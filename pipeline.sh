@@ -10,18 +10,19 @@
 #   ./pipeline.sh --from <name>      # run from a step to the end
 #
 # Steps (always executed in this order):
-#   1.  data          build dataset + Bloom annotation + curriculum negatives
-#   2.  train_mrl     train MRL baseline (15 epochs)
-#   3.  find_mrl      find best MRL epoch (corpus-level recall@10)
-#   4.  train_bam     train BAM Option A (prefix routing, warm-starts from MRL)
-#   5.  train_v4      train BAM Option B (scattered mask, warm-starts from MRL)
-#   6.  find_best     find best epoch for BAM-A and BAM-B
-#   7.  eval          full evaluation table (BAM-A vs BAM-B vs MRL)
-#   8.  ablations     ablation study incl. fixed-budget routing baseline
-#   9.  analysis      routing ambiguity, failures, classifier robustness,
-#                     mask specialization, bloom dim allocation
-#   10. efficiency    sub-index latency benchmark
-#   11. beir          cross-domain evaluation (SciFact, NFCorpus, FiQA, ArguAna)
+#   0.  train_classifier  train 4-model Bloom council (DeBERTa+RoBERTa+BERT+SVM)
+#   1.  data              build dataset + Bloom annotation + curriculum negatives
+#   2.  train_mrl         train MRL baseline (15 epochs)
+#   3.  find_mrl          find best MRL epoch (corpus-level recall@10)
+#   4.  train_bam         train BAM-PQ / Option A (prefix routing, warm-starts from MRL)
+#   5.  train_v4          train BAM-B / Option B (scattered mask, warm-starts from MRL)
+#   6.  find_best         find best epoch for BAM-PQ and BAM-B
+#   7.  eval              full evaluation table (BAM-PQ vs BAM-B vs MRL)
+#   8.  ablations         ablation study incl. fixed-budget routing baseline
+#   9.  analysis          routing ambiguity, failures, classifier robustness,
+#                         mask specialization, bloom dim allocation
+#   10. efficiency        sub-index latency benchmark
+#   11. beir              cross-domain evaluation (SciFact, NFCorpus, FiQA, ArguAna)
 #
 # Prerequisites:
 #   pip install -r requirements.txt
@@ -61,7 +62,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-ALL_STEPS=(install data train_mrl find_mrl train_bam train_v4 find_best eval ablations analysis efficiency beir)
+ALL_STEPS=(train_classifier data train_mrl find_mrl train_bam train_v4 find_best eval ablations analysis efficiency beir)
 
 # Resolve --from: set STEP=all but skip earlier steps
 if [[ -n "$FROM_STEP" ]]; then
@@ -108,6 +109,29 @@ best_ckpt() {
 # STEP 0 — INSTALL DEPENDENCIES
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 0 — TRAIN BLOOM CLASSIFIER COUNCIL
+# ─────────────────────────────────────────────────────────────────────────────
+run_train_classifier() {
+    log "STEP 0 — TRAIN BLOOM COUNCIL (DeBERTa + RoBERTa + BERT + SVM)"
+
+    if [[ -f "/tmp/bloom-council/council_weights.json" ]]; then
+        echo "  Council already trained at /tmp/bloom-council/ — skipping."
+        echo "  Delete /tmp/bloom-council/ and rerun to retrain."
+        return 0
+    fi
+
+    python3 data/train_bloom_council.py \
+        --output_dir /tmp/bloom-council \
+        --n_train 800 --n_val 100 --n_test 100 \
+        || die "train_bloom_council.py failed"
+
+    echo "  Council weights → /tmp/bloom-council/council_weights.json"
+
+    python3 data/eval_bloom_council.py --gemini \
+        || echo "  WARNING: eval_bloom_council.py failed (non-fatal)"
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 1 — DATA
@@ -410,6 +434,7 @@ run_beir() {
 # MAIN DISPATCH
 # ─────────────────────────────────────────────────────────────────────────────
 if [[ "$STEP" == "all" ]]; then
+    should_run train_classifier && run_train_classifier
     should_run data       && run_data
     should_run train_mrl  && run_train_mrl
     should_run find_mrl   && run_find_mrl
@@ -433,6 +458,7 @@ if [[ "$STEP" == "all" ]]; then
     echo "    $RESULTS_DIR/beir/                          ← cross-domain"
 else
     case "$STEP" in
+        train_classifier) run_train_classifier ;;
         data)       run_data ;;
         train_mrl)  run_train_mrl ;;
         find_mrl)   run_find_mrl ;;
