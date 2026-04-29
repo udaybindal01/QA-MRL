@@ -188,7 +188,7 @@ for DS in $DATASETS; do
         TEST_PATH="$EDU_DATA_DIR/test.jsonl"
         CORPUS_PATH="$EDU_DATA_DIR/corpus.jsonl"
     elif [[ "$DS" == "msmarco" ]]; then
-        TRAIN_PATH="$MSMARCO_DATA_DIR/train.jsonl"
+        TRAIN_PATH="$MSMARCO_DATA_DIR/train_curriculum.jsonl"
         VAL_PATH="$MSMARCO_DATA_DIR/val.jsonl"
         TEST_PATH="$MSMARCO_DATA_DIR/test.jsonl"
         CORPUS_PATH="$MSMARCO_DATA_DIR/corpus.jsonl"
@@ -251,12 +251,23 @@ for DS in $DATASETS; do
                 echo "  Already built at $MSMARCO_DATA_DIR — skipping."
             else
                 mkdir -p "$MSMARCO_DATA_DIR"
+                # Step 1: download + build raw pairs (bloom_level=1 placeholder)
                 python3 data/build_msmarco_data.py \
                     --output_dir "$MSMARCO_DATA_DIR" \
                     --max_train  "$MSMARCO_MAX_TRAIN" \
                     --num_neg    7 \
                     --skip_bloom_annotation \
                     || die "[$DS] build_msmarco_data.py failed"
+
+                # Step 2: mine BM25 curriculum hard negatives (same as educational)
+                echo "  Mining BM25 curriculum hard negatives for MS MARCO train split..."
+                python3 data/curriculum_negatives.py \
+                    --pairs   "$MSMARCO_DATA_DIR/train.jsonl" \
+                    --corpus  "$CORPUS_PATH" \
+                    --output  "$MSMARCO_DATA_DIR/train_curriculum.jsonl" \
+                    --num_neg 7 \
+                    --stage   0.7 \
+                    || die "[$DS] curriculum_negatives.py failed"
             fi
         else
             log "[$DS] BUILD — downloading BEIR dataset"
@@ -292,17 +303,22 @@ for DS in $DATASETS; do
             # Resolve which directory holds the JSONL splits
             if [[ "$DS" == "msmarco" ]]; then
                 ANNOTATE_BASE="$MSMARCO_DATA_DIR"
+                # Annotate train_curriculum.jsonl (used for training) + val + test
+                ANNOTATE_JSONL=()
+                for split in train_curriculum val test; do
+                    p="$ANNOTATE_BASE/${split}.jsonl"
+                    [[ -f "$p" ]] && ANNOTATE_JSONL+=("$p")
+                done
             else
                 ANNOTATE_BASE="$BEIR_DATA_ROOT/$DS"
+                ANNOTATE_JSONL=()
+                for split in train val test; do
+                    p="$ANNOTATE_BASE/${split}.jsonl"
+                    [[ -f "$p" ]] && ANNOTATE_JSONL+=("$p")
+                done
             fi
-
-            ANNOTATE_JSONL=()
-            for split in train val test; do
-                p="$ANNOTATE_BASE/${split}.jsonl"
-                [[ -f "$p" ]] && ANNOTATE_JSONL+=("$p")
-            done
             [[ ${#ANNOTATE_JSONL[@]} -gt 0 ]] \
-                || die "[$DS] No train/val/test.jsonl under $ANNOTATE_BASE — run build first"
+                || die "[$DS] No splits found under $ANNOTATE_BASE — run build first"
 
             if [[ "$REUSE_BLOOM_CACHE" == "1" ]]; then
                 log "[$DS] ANNOTATE — REUSE_BLOOM_CACHE=1, skipping (${#ANNOTATE_JSONL[@]} splits)"
