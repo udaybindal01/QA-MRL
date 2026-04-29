@@ -188,7 +188,7 @@ for DS in $DATASETS; do
         TEST_PATH="$EDU_DATA_DIR/test.jsonl"
         CORPUS_PATH="$EDU_DATA_DIR/corpus.jsonl"
     elif [[ "$DS" == "msmarco" ]]; then
-        TRAIN_PATH="$MSMARCO_DATA_DIR/train_curriculum.jsonl"
+        TRAIN_PATH="$MSMARCO_DATA_DIR/train.jsonl"
         VAL_PATH="$MSMARCO_DATA_DIR/val.jsonl"
         TEST_PATH="$MSMARCO_DATA_DIR/test.jsonl"
         CORPUS_PATH="$MSMARCO_DATA_DIR/corpus.jsonl"
@@ -259,15 +259,9 @@ for DS in $DATASETS; do
                     --skip_bloom_annotation \
                     || die "[$DS] build_msmarco_data.py failed"
 
-                # Step 2: mine BM25 curriculum hard negatives (same as educational)
-                echo "  Mining BM25 curriculum hard negatives for MS MARCO train split..."
-                python3 data/curriculum_negatives.py \
-                    --pairs   "$MSMARCO_DATA_DIR/train.jsonl" \
-                    --corpus  "$CORPUS_PATH" \
-                    --output  "$MSMARCO_DATA_DIR/train_curriculum.jsonl" \
-                    --num_neg 7 \
-                    --stage   0.7 \
-                    || die "[$DS] curriculum_negatives.py failed"
+                # MS MARCO already contains BM25 hard negatives from the HF dataset
+                # (is_selected=0 passages come from BM25 retrieval results).
+                # curriculum_negatives.py would OOM on a 2.9M passage corpus.
             fi
         else
             log "[$DS] BUILD — downloading BEIR dataset"
@@ -303,9 +297,9 @@ for DS in $DATASETS; do
             # Resolve which directory holds the JSONL splits
             if [[ "$DS" == "msmarco" ]]; then
                 ANNOTATE_BASE="$MSMARCO_DATA_DIR"
-                # Annotate train_curriculum.jsonl (used for training) + val + test
+                # Annotate train.jsonl (already has BM25 negatives) + val + test
                 ANNOTATE_JSONL=()
-                for split in train_curriculum val test; do
+                for split in train val test; do
                     p="$ANNOTATE_BASE/${split}.jsonl"
                     [[ -f "$p" ]] && ANNOTATE_JSONL+=("$p")
                 done
