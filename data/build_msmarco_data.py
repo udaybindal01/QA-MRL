@@ -330,6 +330,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_beir", action="store_true",
                         help="Use BEIR loader (cleaner passage IDs, auto-downloads ~1GB)")
+    parser.add_argument("--skip_bloom_annotation", action="store_true",
+                        help="Skip Bloom annotation — use when the pipeline will annotate "
+                             "separately with the council (data/annotate_with_council.py). "
+                             "bloom_level=1 placeholder is written; overwritten at annotate step.")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -357,12 +361,16 @@ def main():
         for cid, p in corpus.items():
             f.write(json.dumps(p) + "\n")
 
-    # Annotate all splits with Bloom levels
-    import torch
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    for split_name in ["train", "val", "test"]:
-        if splits[split_name]:
-            splits[split_name] = annotate_bloom_levels(splits[split_name], device=device)
+    # Annotate all splits with Bloom levels (skip if pipeline will do it with council)
+    if args.skip_bloom_annotation:
+        print("\n  --skip_bloom_annotation: skipping Bloom annotation (bloom_level=1 placeholder).")
+        print("  Run data/annotate_with_council.py on the output files to set real labels.")
+    else:
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        for split_name in ["train", "val", "test"]:
+            if splits[split_name]:
+                splits[split_name] = annotate_bloom_levels(splits[split_name], device=device)
 
     # Save splits
     for split_name, pairs in splits.items():

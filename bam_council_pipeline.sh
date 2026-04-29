@@ -15,6 +15,17 @@
 #                  would waste time without changing labels.
 #   - BEIR datasets: uses data/annotate_with_council.py (council) instead of
 #                    annotate_bloom_local.py (NLI).
+#   - msmarco:       same council annotation on train/val/test splits.
+#
+# MS MARCO special handling:
+#   The standard BEIR evaluation trains on MS MARCO (~500k queries) and
+#   evaluates zero-shot on BEIR datasets. When msmarco is in DATASETS:
+#     - build:    downloads MS MARCO, mines BM25 hard negatives (default 100k
+#                 train queries; override with MSMARCO_MAX_TRAIN=200000)
+#     - annotate: council labels all splits
+#     - train:    MRL + BAM-B + BAM-PQ trained on MS MARCO
+#     - eval:     zero-shot evaluation on scifact/nfcorpus/fiqa via
+#                 eval_zero_shot.py (NOT in-domain MS MARCO eval)
 #
 # All other steps are identical to run_full_pipeline.sh.
 #
@@ -22,14 +33,17 @@
 #   chmod +x bam_council_pipeline.sh
 #   ./bam_council_pipeline.sh                               # all datasets, all steps
 #   ./bam_council_pipeline.sh --edu-only                    # educational corpus only
+#   ./bam_council_pipeline.sh --msmarco-only                # MS MARCO → BEIR zero-shot
 #   ./bam_council_pipeline.sh --from annotate               # skip build+classifier
 #   ./bam_council_pipeline.sh --from train_bam_b            # skip to BAM-B training
 #   ./bam_council_pipeline.sh --from train_classifier       # retrain council + rest
 #   ./bam_council_pipeline.sh --datasets "scifact fiqa"     # subset of datasets
+#   ./bam_council_pipeline.sh --datasets "msmarco scifact"  # msmarco + in-domain
 #   ./bam_council_pipeline.sh --force                       # wipe ckpts before train
 #   FORCE_CLASSIFIER=1 ./bam_council_pipeline.sh            # force retrain council
 #   REUSE_BLOOM_CACHE=1 ./bam_council_pipeline.sh           # skip --overwrite on annotate
 #   REUSE_TRAINED_MODELS=1 ./bam_council_pipeline.sh        # skip MRL/BAM training if ckpts exist
+#   MSMARCO_MAX_TRAIN=200000 ./bam_council_pipeline.sh      # larger MS MARCO train set
 #
 # Requirements:
 #   pip install transformers torch sentence-transformers faiss-gpu pyyaml scikit-learn
@@ -42,6 +56,9 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 DATASETS="${DATASETS:-educational scifact nfcorpus fiqa}"
 BEIR_DATA_ROOT="/tmp/data/beir"
+MSMARCO_DATA_DIR="/tmp/data/msmarco"
+MSMARCO_MAX_TRAIN="${MSMARCO_MAX_TRAIN:-100000}"
+ZERO_SHOT_DATASETS="${ZERO_SHOT_DATASETS:-scifact nfcorpus fiqa}"
 EDU_DATA_DIR="./data/real"
 CKPT_ROOT="/tmp/multi-domain"
 RESULTS_ROOT="./results/multi_domain"
@@ -69,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --datasets)       DATASETS="$2";            shift 2 ;;
         --dataset)        SINGLE_DATASET="$2";      shift 2 ;;
         --edu-only)       DATASETS="educational";   shift ;;
+        --msmarco-only)   DATASETS="msmarco";       shift ;;
         --force)          FORCE=1;                  shift ;;
         --force_classifier) FORCE_CLASSIFIER=1;     shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
@@ -169,6 +187,11 @@ for DS in $DATASETS; do
         VAL_PATH="$EDU_DATA_DIR/val.jsonl"
         TEST_PATH="$EDU_DATA_DIR/test.jsonl"
         CORPUS_PATH="$EDU_DATA_DIR/corpus.jsonl"
+    elif [[ "$DS" == "msmarco" ]]; then
+        TRAIN_PATH="$MSMARCO_DATA_DIR/train.jsonl"
+        VAL_PATH="$MSMARCO_DATA_DIR/val.jsonl"
+        TEST_PATH="$MSMARCO_DATA_DIR/test.jsonl"
+        CORPUS_PATH="$MSMARCO_DATA_DIR/corpus.jsonl"
     else
         DS_DIR="$BEIR_DATA_ROOT/$DS"
         TRAIN_PATH="$DS_DIR/train.jsonl"
@@ -222,6 +245,19 @@ for DS in $DATASETS; do
 
                 echo "  Educational data built at $EDU_DATA_DIR"
             fi
+        elif [[ "$DS" == "msmarco" ]]; then
+            log "[$DS] BUILD — MS MARCO (max_train=$MSMARCO_MAX_TRAIN, BM25 hard negatives)"
+            if [[ -f "$CORPUS_PATH" ]] && [[ -f "$TRAIN_PATH" ]]; then
+                echo "  Already built at $MSMARCO_DATA_DIR — skipping."
+            else
+                mkdir -p "$MSMARCO_DATA_DIR"
+                python3 data/build_msmarco_data.py \
+                    --output_dir "$MSMARCO_DATA_DIR" \
+                    --max_train  "$MSMARCO_MAX_TRAIN" \
+                    --num_neg    7 \
+                    --skip_bloom_annotation \
+                    || die "[$DS] build_msmarco_data.py failed"
+            fi
         else
             log "[$DS] BUILD — downloading BEIR dataset"
             if [[ -f "$CORPUS_PATH" ]] && [[ -f "$TRAIN_PATH" ]]; then
@@ -253,18 +289,25 @@ for DS in $DATASETS; do
             [[ -f "$COUNCIL_WEIGHTS" ]] \
                 || die "[$DS] Council not trained — run train_classifier step first (or: python3 data/train_bloom_council.py)"
 
+            # Resolve which directory holds the JSONL splits
+            if [[ "$DS" == "msmarco" ]]; then
+                ANNOTATE_BASE="$MSMARCO_DATA_DIR"
+            else
+                ANNOTATE_BASE="$BEIR_DATA_ROOT/$DS"
+            fi
+
             ANNOTATE_JSONL=()
             for split in train val test; do
-                p="$BEIR_DATA_ROOT/$DS/${split}.jsonl"
+                p="$ANNOTATE_BASE/${split}.jsonl"
                 [[ -f "$p" ]] && ANNOTATE_JSONL+=("$p")
             done
             [[ ${#ANNOTATE_JSONL[@]} -gt 0 ]] \
-                || die "[$DS] No train/val/test.jsonl under $BEIR_DATA_ROOT/$DS — run build first"
+                || die "[$DS] No train/val/test.jsonl under $ANNOTATE_BASE — run build first"
 
             if [[ "$REUSE_BLOOM_CACHE" == "1" ]]; then
                 log "[$DS] ANNOTATE — REUSE_BLOOM_CACHE=1, skipping (${#ANNOTATE_JSONL[@]} splits)"
             else
-                log "[$DS] ANNOTATE — trained council (${#ANNOTATE_JSONL[@]} splits)"
+                log "[$DS] ANNOTATE — trained council (${#ANNOTATE_JSONL[@]} splits, $MSMARCO_MAX_TRAIN train queries)"
                 OVERWRITE_FLAG="--overwrite"
                 python3 data/annotate_with_council.py \
                     --input "${ANNOTATE_JSONL[@]}" \
@@ -374,87 +417,127 @@ for DS in $DATASETS; do
             || die "[$DS] BSR selection (BAM-PQ) failed"
     fi
 
-    # ── STEP 9: eval ─────────────────────────────────────────────────────────
-    if should_run eval; then
-        log "[$DS] STANDARD EVALUATION — BAM-B vs MRL"
-        [[ -f "$MRL_BEST/checkpoint.pt" ]]   || die "[$DS] MRL best not found"
-        [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "[$DS] BAM-B best_bsr not found"
-        python3 scripts/eval_bam.py \
-            --config        "$BAM_B_CFG" \
-            --checkpoint    "$BAM_B_BEST" \
-            --baseline      "$MRL_BEST" \
-            --output_dir    "$DS_RESULTS/" \
-            || die "[$DS] eval_bam.py failed"
-        echo "  Results → $DS_RESULTS/results.json"
-    fi
+    # ── STEPS 9–13: eval  ────────────────────────────────────────────────────
+    # MS MARCO: trained on MS MARCO → evaluate zero-shot on BEIR datasets.
+    # All other datasets: standard in-domain eval.
+    if [[ "$DS" == "msmarco" ]]; then
 
-    # ── STEP 10: fair_cmp ────────────────────────────────────────────────────
-    if should_run fair_cmp; then
-        log "[$DS] FAIR COMPARISON — BAM-B vs MRL at same per-Bloom dim budget"
-        [[ -f "$MRL_BEST/checkpoint.pt" ]]   || die "[$DS] MRL best not found"
-        [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "[$DS] BAM-B best_bsr not found"
-        mkdir -p "$DS_RESULTS/fair_comparison"
-        python3 scripts/eval_fair_comparison.py \
-            --config         "$BAM_B_CFG" \
-            --bam_checkpoint "$BAM_B_BEST" \
-            --mrl_checkpoint "$MRL_BEST" \
-            --bam_results    "$DS_RESULTS/results.json" \
-            --output_dir     "$DS_RESULTS/fair_comparison/" \
-            || die "[$DS] eval_fair_comparison.py failed"
-        echo "  Results → $DS_RESULTS/fair_comparison/fair_comparison.json"
-    fi
+        if should_run eval || should_run eval_bam_pq; then
+            log "[$DS] ZERO-SHOT BEIR EVAL — MRL + BAM-B + BAM-PQ on $ZERO_SHOT_DATASETS"
+            [[ -f "$MRL_BEST/checkpoint.pt" ]]   || die "[$DS] MRL best not found"
+            [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "[$DS] BAM-B best_bsr not found"
 
-    # ── STEP 11: eff_curves ──────────────────────────────────────────────────
-    if should_run eff_curves; then
-        log "[$DS] EFFICIENCY CURVES — R@10 vs dims (paper Figure 2)"
-        [[ -f "$MRL_BEST/checkpoint.pt" ]]   || die "[$DS] MRL best not found"
-        [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "[$DS] BAM-B best_bsr not found"
-        mkdir -p "$DS_RESULTS/efficiency_curves"
-        python3 scripts/eval_efficiency_curves.py \
-            --config         "$BAM_B_CFG" \
-            --bam_checkpoint "$BAM_B_BEST" \
-            --mrl_checkpoint "$MRL_BEST" \
-            --output_dir     "$DS_RESULTS/efficiency_curves/" \
-            || die "[$DS] eval_efficiency_curves.py failed"
-        echo "  Curves → $DS_RESULTS/efficiency_curves/"
-    fi
+            ZERO_SHOT_OUT="$DS_RESULTS/zero_shot"
+            mkdir -p "$ZERO_SHOT_OUT"
 
-    # ── STEP 12: eval_bam_pq ─────────────────────────────────────────────────
-    if should_run eval_bam_pq; then
-        log "[$DS] STANDARD EVALUATION — BAM-PQ vs MRL"
-        if [[ ! -f "$BAM_PQ_BEST/checkpoint.pt" ]]; then
-            echo "  BAM-PQ best_bsr not found at $BAM_PQ_BEST — skipping eval_bam_pq."
-        else
-            [[ -f "$MRL_BEST/checkpoint.pt" ]] || die "[$DS] MRL best not found"
-            mkdir -p "$DS_RESULTS/bam_pq"
+            BAM_PQ_ARGS=""
+            if [[ -f "$BAM_PQ_BEST/checkpoint.pt" ]]; then
+                BAM_PQ_ARGS="--bam_pq_checkpoint $BAM_PQ_BEST --bam_pq_config $BAM_PQ_CFG"
+                echo "  BAM-PQ checkpoint found — including in zero-shot eval."
+            else
+                echo "  BAM-PQ best_bsr not found — evaluating MRL + BAM-B only."
+            fi
+
+            python3 scripts/eval_zero_shot.py \
+                --mrl_checkpoint   "$MRL_BEST"   \
+                --mrl_config       "$MRL_CFG"    \
+                --bam_b_checkpoint "$BAM_B_BEST" \
+                --bam_b_config     "$BAM_B_CFG"  \
+                $BAM_PQ_ARGS                     \
+                --datasets         $ZERO_SHOT_DATASETS \
+                --output_dir       "$ZERO_SHOT_OUT" \
+                || die "[$DS] eval_zero_shot.py failed"
+            echo "  Zero-shot results → $ZERO_SHOT_OUT/zero_shot_results.json"
+        fi
+
+        # skip fair_cmp / eff_curves / fair_cmp_pq for msmarco
+        # (they compare at same dim budget — only meaningful in-domain)
+
+    else
+
+        # ── STEP 9: eval ─────────────────────────────────────────────────────
+        if should_run eval; then
+            log "[$DS] STANDARD EVALUATION — BAM-B vs MRL"
+            [[ -f "$MRL_BEST/checkpoint.pt" ]]   || die "[$DS] MRL best not found"
+            [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "[$DS] BAM-B best_bsr not found"
             python3 scripts/eval_bam.py \
-                --config        "$BAM_PQ_CFG" \
-                --checkpoint    "$BAM_PQ_BEST" \
+                --config        "$BAM_B_CFG" \
+                --checkpoint    "$BAM_B_BEST" \
                 --baseline      "$MRL_BEST" \
-                --output_dir    "$DS_RESULTS/bam_pq/" \
-                || die "[$DS] eval_bam.py (BAM-PQ) failed"
-            echo "  Results → $DS_RESULTS/bam_pq/results.json"
+                --output_dir    "$DS_RESULTS/" \
+                || die "[$DS] eval_bam.py failed"
+            echo "  Results → $DS_RESULTS/results.json"
         fi
-    fi
 
-    # ── STEP 13: fair_cmp_pq ─────────────────────────────────────────────────
-    if should_run fair_cmp_pq; then
-        log "[$DS] FAIR COMPARISON — BAM-PQ vs MRL at same per-Bloom dim budget"
-        if [[ ! -f "$BAM_PQ_BEST/checkpoint.pt" ]]; then
-            echo "  BAM-PQ best_bsr not found at $BAM_PQ_BEST — skipping fair_cmp_pq."
-        else
-            [[ -f "$MRL_BEST/checkpoint.pt" ]] || die "[$DS] MRL best not found"
-            mkdir -p "$DS_RESULTS/bam_pq/fair_comparison"
+        # ── STEP 10: fair_cmp ────────────────────────────────────────────────
+        if should_run fair_cmp; then
+            log "[$DS] FAIR COMPARISON — BAM-B vs MRL at same per-Bloom dim budget"
+            [[ -f "$MRL_BEST/checkpoint.pt" ]]   || die "[$DS] MRL best not found"
+            [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "[$DS] BAM-B best_bsr not found"
+            mkdir -p "$DS_RESULTS/fair_comparison"
             python3 scripts/eval_fair_comparison.py \
-                --config         "$BAM_PQ_CFG" \
-                --bam_checkpoint "$BAM_PQ_BEST" \
+                --config         "$BAM_B_CFG" \
+                --bam_checkpoint "$BAM_B_BEST" \
                 --mrl_checkpoint "$MRL_BEST" \
-                --bam_results    "$DS_RESULTS/bam_pq/results.json" \
-                --output_dir     "$DS_RESULTS/bam_pq/fair_comparison/" \
-                || die "[$DS] eval_fair_comparison.py (BAM-PQ) failed"
-            echo "  Results → $DS_RESULTS/bam_pq/fair_comparison/fair_comparison.json"
+                --bam_results    "$DS_RESULTS/results.json" \
+                --output_dir     "$DS_RESULTS/fair_comparison/" \
+                || die "[$DS] eval_fair_comparison.py failed"
+            echo "  Results → $DS_RESULTS/fair_comparison/fair_comparison.json"
         fi
-    fi
+
+        # ── STEP 11: eff_curves ──────────────────────────────────────────────
+        if should_run eff_curves; then
+            log "[$DS] EFFICIENCY CURVES — R@10 vs dims (paper Figure 2)"
+            [[ -f "$MRL_BEST/checkpoint.pt" ]]   || die "[$DS] MRL best not found"
+            [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "[$DS] BAM-B best_bsr not found"
+            mkdir -p "$DS_RESULTS/efficiency_curves"
+            python3 scripts/eval_efficiency_curves.py \
+                --config         "$BAM_B_CFG" \
+                --bam_checkpoint "$BAM_B_BEST" \
+                --mrl_checkpoint "$MRL_BEST" \
+                --output_dir     "$DS_RESULTS/efficiency_curves/" \
+                || die "[$DS] eval_efficiency_curves.py failed"
+            echo "  Curves → $DS_RESULTS/efficiency_curves/"
+        fi
+
+        # ── STEP 12: eval_bam_pq ─────────────────────────────────────────────
+        if should_run eval_bam_pq; then
+            log "[$DS] STANDARD EVALUATION — BAM-PQ vs MRL"
+            if [[ ! -f "$BAM_PQ_BEST/checkpoint.pt" ]]; then
+                echo "  BAM-PQ best_bsr not found at $BAM_PQ_BEST — skipping eval_bam_pq."
+            else
+                [[ -f "$MRL_BEST/checkpoint.pt" ]] || die "[$DS] MRL best not found"
+                mkdir -p "$DS_RESULTS/bam_pq"
+                python3 scripts/eval_bam.py \
+                    --config        "$BAM_PQ_CFG" \
+                    --checkpoint    "$BAM_PQ_BEST" \
+                    --baseline      "$MRL_BEST" \
+                    --output_dir    "$DS_RESULTS/bam_pq/" \
+                    || die "[$DS] eval_bam.py (BAM-PQ) failed"
+                echo "  Results → $DS_RESULTS/bam_pq/results.json"
+            fi
+        fi
+
+        # ── STEP 13: fair_cmp_pq ─────────────────────────────────────────────
+        if should_run fair_cmp_pq; then
+            log "[$DS] FAIR COMPARISON — BAM-PQ vs MRL at same per-Bloom dim budget"
+            if [[ ! -f "$BAM_PQ_BEST/checkpoint.pt" ]]; then
+                echo "  BAM-PQ best_bsr not found at $BAM_PQ_BEST — skipping fair_cmp_pq."
+            else
+                [[ -f "$MRL_BEST/checkpoint.pt" ]] || die "[$DS] MRL best not found"
+                mkdir -p "$DS_RESULTS/bam_pq/fair_comparison"
+                python3 scripts/eval_fair_comparison.py \
+                    --config         "$BAM_PQ_CFG" \
+                    --bam_checkpoint "$BAM_PQ_BEST" \
+                    --mrl_checkpoint "$MRL_BEST" \
+                    --bam_results    "$DS_RESULTS/bam_pq/results.json" \
+                    --output_dir     "$DS_RESULTS/bam_pq/fair_comparison/" \
+                    || die "[$DS] eval_fair_comparison.py (BAM-PQ) failed"
+                echo "  Results → $DS_RESULTS/bam_pq/fair_comparison/fair_comparison.json"
+            fi
+        fi
+
+    fi  # end msmarco vs other datasets
 
 done  # end per-dataset loop
 
@@ -468,6 +551,35 @@ import json, os, math
 
 datasets = "$DATASETS".split()
 results_root = "$RESULTS_ROOT"
+zero_shot_datasets = "$ZERO_SHOT_DATASETS".split()
+
+# ── MS MARCO zero-shot summary ────────────────────────────────────────────────
+if "msmarco" in datasets:
+    zs_path = os.path.join(results_root, "msmarco", "zero_shot", "zero_shot_results.json")
+    if os.path.exists(zs_path):
+        with open(zs_path) as f:
+            zs = json.load(f)
+        print()
+        print("  MS MARCO → BEIR Zero-Shot Transfer (NDCG@10 / R@10)")
+        models_seen = []
+        for ds_res in zs.values():
+            for k in ds_res:
+                if not k.startswith("_") and k not in models_seen:
+                    models_seen.append(k)
+        header = f"  {'Model':<16}" + "".join(f"  {ds[:12]:>14}" for ds in zero_shot_datasets)
+        print(header)
+        print("  " + "─" * len(header))
+        for model_name in models_seen:
+            row = f"  {model_name:<16}"
+            for ds in zero_shot_datasets:
+                m = zs.get(ds, {}).get(model_name, {})
+                n10 = m.get("ndcg@10", float("nan"))
+                r10 = m.get("recall@10", float("nan"))
+                row += f"  {n10:.4f}/{r10:.4f}  "
+            print(row)
+    else:
+        print()
+        print("  MS MARCO zero-shot results not found (run eval step).")
 
 print()
 print("  Standard: BAM-B vs MRL at full dims")
@@ -545,10 +657,11 @@ PYEOF
 
 log "PIPELINE COMPLETE"
 echo ""
-echo "  Council     : $COUNCIL_WEIGHTS"
-echo "  Checkpoints : $CKPT_ROOT/{dataset}/{mrl,bam_b,bam_pq}/"
-echo "  Results     : $RESULTS_ROOT/{dataset}/results.json           (BAM-B)"
-echo "  Results PQ  : $RESULTS_ROOT/{dataset}/bam_pq/results.json   (BAM-PQ)"
-echo "  Fair cmp    : $RESULTS_ROOT/{dataset}/fair_comparison/"
-echo "  Fair cmp PQ : $RESULTS_ROOT/{dataset}/bam_pq/fair_comparison/"
-echo "  Eff curves  : $RESULTS_ROOT/{dataset}/efficiency_curves/"
+echo "  Council         : $COUNCIL_WEIGHTS"
+echo "  Checkpoints     : $CKPT_ROOT/{dataset}/{mrl,bam_b,bam_pq}/"
+echo "  Results         : $RESULTS_ROOT/{dataset}/results.json            (BAM-B, in-domain)"
+echo "  Results PQ      : $RESULTS_ROOT/{dataset}/bam_pq/results.json    (BAM-PQ, in-domain)"
+echo "  Fair cmp        : $RESULTS_ROOT/{dataset}/fair_comparison/"
+echo "  Fair cmp PQ     : $RESULTS_ROOT/{dataset}/bam_pq/fair_comparison/"
+echo "  Eff curves      : $RESULTS_ROOT/{dataset}/efficiency_curves/"
+echo "  MS MARCO→BEIR   : $RESULTS_ROOT/msmarco/zero_shot/zero_shot_results.json"
