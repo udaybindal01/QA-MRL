@@ -350,15 +350,30 @@ for DS in $DATASETS; do
 
     # ── STEP 4: find_mrl ─────────────────────────────────────────────────────
     if should_run find_mrl; then
-        log "[$DS] SELECT BEST MRL EPOCH (corpus-level, not in-batch)"
-        if [[ "$FORCE" != "1" ]] && [[ "$BLOOM_COUNCIL_REFRESHED" != "1" ]] && [[ -f "$MRL_BEST/checkpoint.pt" ]]; then
-            echo "  MRL best already selected."
+        if [[ "$DS" == "msmarco" ]]; then
+            # MS MARCO corpus (2.9M passages) OOMs find_best_epoch.py.
+            # In-batch val converges cleanly (NDCG@10 ~0.99 by epoch 14).
+            # Use final checkpoint as best.
+            log "[$DS] SELECT BEST MRL EPOCH — using final checkpoint (corpus too large for sweep)"
+            if [[ -f "$MRL_BEST/checkpoint.pt" ]]; then
+                echo "  MRL best already linked."
+            elif [[ -f "$MRL_CKPT/final/checkpoint.pt" ]]; then
+                ln -sfn "$MRL_CKPT/final" "$MRL_BEST"
+                echo "  Linked $MRL_BEST → final"
+            else
+                die "[$DS] MRL final checkpoint not found at $MRL_CKPT/final"
+            fi
         else
-            python3 scripts/find_best_epoch.py \
-                --config "$MRL_CFG" \
-                --checkpoint_dir "$MRL_CKPT" \
-                --model_type mrl \
-                || die "[$DS] find_best_epoch (MRL) failed"
+            log "[$DS] SELECT BEST MRL EPOCH (corpus-level, not in-batch)"
+            if [[ "$FORCE" != "1" ]] && [[ "$BLOOM_COUNCIL_REFRESHED" != "1" ]] && [[ -f "$MRL_BEST/checkpoint.pt" ]]; then
+                echo "  MRL best already selected."
+            else
+                python3 scripts/find_best_epoch.py \
+                    --config "$MRL_CFG" \
+                    --checkpoint_dir "$MRL_CKPT" \
+                    --model_type mrl \
+                    || die "[$DS] find_best_epoch (MRL) failed"
+            fi
         fi
     fi
 
@@ -385,14 +400,26 @@ for DS in $DATASETS; do
 
     # ── STEP 6: find_bam_b ───────────────────────────────────────────────────
     if should_run find_bam_b; then
-        log "[$DS] BSR EPOCH SELECTION — BAM-B"
-        mkdir -p "$DS_RESULTS/bam_b_bsr"
-        python3 scripts/find_best_epoch_bsr.py \
-            --config         "$BAM_B_CFG" \
-            --checkpoint_dir "$BAM_B_CKPT" \
-            --output_dir     "$DS_RESULTS/bam_b_bsr/" \
-            --alpha          "$BSR_ALPHA" \
-            || die "[$DS] BSR selection (BAM-B) failed"
+        if [[ "$DS" == "msmarco" ]]; then
+            log "[$DS] BSR EPOCH SELECTION BAM-B — using final checkpoint (corpus too large)"
+            if [[ -f "$BAM_B_BEST/checkpoint.pt" ]]; then
+                echo "  BAM-B best already linked."
+            elif [[ -f "$BAM_B_CKPT/final/checkpoint.pt" ]]; then
+                ln -sfn "$BAM_B_CKPT/final" "$BAM_B_BEST"
+                echo "  Linked $BAM_B_BEST → final"
+            else
+                die "[$DS] BAM-B final checkpoint not found at $BAM_B_CKPT/final"
+            fi
+        else
+            log "[$DS] BSR EPOCH SELECTION — BAM-B"
+            mkdir -p "$DS_RESULTS/bam_b_bsr"
+            python3 scripts/find_best_epoch_bsr.py \
+                --config         "$BAM_B_CFG" \
+                --checkpoint_dir "$BAM_B_CKPT" \
+                --output_dir     "$DS_RESULTS/bam_b_bsr/" \
+                --alpha          "$BSR_ALPHA" \
+                || die "[$DS] BSR selection (BAM-B) failed"
+        fi
     fi
 
     # ── STEP 7: train_bam_pq ─────────────────────────────────────────────────
@@ -417,14 +444,26 @@ for DS in $DATASETS; do
 
     # ── STEP 8: find_bam_pq ──────────────────────────────────────────────────
     if should_run find_bam_pq; then
-        log "[$DS] BSR EPOCH SELECTION — BAM-PQ"
-        mkdir -p "$DS_RESULTS/bam_pq_bsr"
-        python3 scripts/find_best_epoch_bsr.py \
-            --config         "$BAM_PQ_CFG" \
-            --checkpoint_dir "$BAM_PQ_CKPT" \
-            --output_dir     "$DS_RESULTS/bam_pq_bsr/" \
-            --alpha          "$BSR_ALPHA" \
-            || die "[$DS] BSR selection (BAM-PQ) failed"
+        if [[ "$DS" == "msmarco" ]]; then
+            log "[$DS] BSR EPOCH SELECTION BAM-PQ — using final checkpoint (corpus too large)"
+            if [[ -f "$BAM_PQ_BEST/checkpoint.pt" ]]; then
+                echo "  BAM-PQ best already linked."
+            elif [[ -f "$BAM_PQ_CKPT/final/checkpoint.pt" ]]; then
+                ln -sfn "$BAM_PQ_CKPT/final" "$BAM_PQ_BEST"
+                echo "  Linked $BAM_PQ_BEST → final"
+            else
+                echo "  BAM-PQ final not found — skipping (train_bam_pq may not have run yet)."
+            fi
+        else
+            log "[$DS] BSR EPOCH SELECTION — BAM-PQ"
+            mkdir -p "$DS_RESULTS/bam_pq_bsr"
+            python3 scripts/find_best_epoch_bsr.py \
+                --config         "$BAM_PQ_CFG" \
+                --checkpoint_dir "$BAM_PQ_CKPT" \
+                --output_dir     "$DS_RESULTS/bam_pq_bsr/" \
+                --alpha          "$BSR_ALPHA" \
+                || die "[$DS] BSR selection (BAM-PQ) failed"
+        fi
     fi
 
     # ── STEPS 9–13: eval  ────────────────────────────────────────────────────
