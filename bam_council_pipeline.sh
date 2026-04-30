@@ -43,7 +43,7 @@
 #   FORCE_CLASSIFIER=1 ./bam_council_pipeline.sh            # force retrain council
 #   REUSE_BLOOM_CACHE=1 ./bam_council_pipeline.sh           # skip --overwrite on annotate
 #   REUSE_TRAINED_MODELS=1 ./bam_council_pipeline.sh        # skip MRL/BAM training if ckpts exist
-#   MSMARCO_MAX_TRAIN=200000 ./bam_council_pipeline.sh      # larger MS MARCO train set
+#   MSMARCO_MAX_TRAIN=100000 ./bam_council_pipeline.sh      # larger MS MARCO train set (default 50k = Wu et al.)
 #
 # Requirements:
 #   pip install transformers torch sentence-transformers faiss-gpu pyyaml scikit-learn
@@ -57,7 +57,8 @@ set -euo pipefail
 DATASETS="${DATASETS:-educational scifact nfcorpus fiqa}"
 BEIR_DATA_ROOT="/tmp/data/beir"
 MSMARCO_DATA_DIR="/tmp/data/msmarco"
-MSMARCO_MAX_TRAIN="${MSMARCO_MAX_TRAIN:-100000}"
+MSMARCO_MAX_TRAIN="${MSMARCO_MAX_TRAIN:-50000}"   # match Wu et al. (2025) 50k subsample
+MSMARCO_EVAL_CORPUS_SIZE="${MSMARCO_EVAL_CORPUS_SIZE:-500000}"  # cap corpus for in-domain eval (8.8M OOMs)
 ZERO_SHOT_DATASETS="${ZERO_SHOT_DATASETS:-scifact nfcorpus fiqa}"
 EDU_DATA_DIR="./data/real"
 CKPT_ROOT="/tmp/multi-domain"
@@ -472,21 +473,36 @@ for DS in $DATASETS; do
     if [[ "$DS" == "msmarco" ]]; then
 
         if should_run eval || should_run eval_bam_pq; then
-            log "[$DS] ZERO-SHOT BEIR EVAL — MRL + BAM-B + BAM-PQ on $ZERO_SHOT_DATASETS"
             [[ -f "$MRL_BEST/checkpoint.pt" ]]   || die "[$DS] MRL best not found"
             [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "[$DS] BAM-B best_bsr not found"
-
-            ZERO_SHOT_OUT="$DS_RESULTS/zero_shot"
-            mkdir -p "$ZERO_SHOT_OUT"
 
             BAM_PQ_ARGS=""
             if [[ -f "$BAM_PQ_BEST/checkpoint.pt" ]]; then
                 BAM_PQ_ARGS="--bam_pq_checkpoint $BAM_PQ_BEST --bam_pq_config $BAM_PQ_CFG"
-                echo "  BAM-PQ checkpoint found — including in zero-shot eval."
-            else
-                echo "  BAM-PQ best_bsr not found — evaluating MRL + BAM-B only."
             fi
 
+            # ── In-domain MS MARCO eval (Wu et al. protocol) ─────────────────
+            # Corpus is 8.8M passages — cap at MSMARCO_EVAL_CORPUS_SIZE to avoid OOM.
+            # All relevant docs are always kept (eval_zero_shot.py guarantees this).
+            log "[$DS] IN-DOMAIN EVAL — MS MARCO dev (corpus capped at $MSMARCO_EVAL_CORPUS_SIZE)"
+            INDOMAIN_OUT="$DS_RESULTS/indomain"
+            mkdir -p "$INDOMAIN_OUT"
+            python3 scripts/eval_zero_shot.py \
+                --mrl_checkpoint   "$MRL_BEST"   \
+                --mrl_config       "$MRL_CFG"    \
+                --bam_b_checkpoint "$BAM_B_BEST" \
+                --bam_b_config     "$BAM_B_CFG"  \
+                $BAM_PQ_ARGS                     \
+                --datasets         msmarco        \
+                --output_dir       "$INDOMAIN_OUT" \
+                --max_corpus_size  "$MSMARCO_EVAL_CORPUS_SIZE" \
+                || die "[$DS] in-domain eval failed"
+            echo "  In-domain results → $INDOMAIN_OUT/zero_shot_results.json"
+
+            # ── Zero-shot BEIR eval (cross-domain transfer) ───────────────────
+            log "[$DS] ZERO-SHOT BEIR EVAL — MRL + BAM-B + BAM-PQ on $ZERO_SHOT_DATASETS"
+            ZERO_SHOT_OUT="$DS_RESULTS/zero_shot"
+            mkdir -p "$ZERO_SHOT_OUT"
             python3 scripts/eval_zero_shot.py \
                 --mrl_checkpoint   "$MRL_BEST"   \
                 --mrl_config       "$MRL_CFG"    \
@@ -495,7 +511,7 @@ for DS in $DATASETS; do
                 $BAM_PQ_ARGS                     \
                 --datasets         $ZERO_SHOT_DATASETS \
                 --output_dir       "$ZERO_SHOT_OUT" \
-                || die "[$DS] eval_zero_shot.py failed"
+                || die "[$DS] zero-shot BEIR eval failed"
             echo "  Zero-shot results → $ZERO_SHOT_OUT/zero_shot_results.json"
         fi
 
@@ -604,31 +620,40 @@ zero_shot_datasets = "$ZERO_SHOT_DATASETS".split()
 
 # ── MS MARCO zero-shot summary ────────────────────────────────────────────────
 if "msmarco" in datasets:
-    zs_path = os.path.join(results_root, "msmarco", "zero_shot", "zero_shot_results.json")
-    if os.path.exists(zs_path):
-        with open(zs_path) as f:
+    def _print_zero_shot_table(title, path, col_datasets):
+        if not os.path.exists(path):
+            print(f"\n  {title} — not found ({path})")
+            return
+        with open(path) as f:
             zs = json.load(f)
-        print()
-        print("  MS MARCO → BEIR Zero-Shot Transfer (NDCG@10 / R@10)")
         models_seen = []
         for ds_res in zs.values():
             for k in ds_res:
                 if not k.startswith("_") and k not in models_seen:
                     models_seen.append(k)
-        header = f"  {'Model':<16}" + "".join(f"  {ds[:12]:>14}" for ds in zero_shot_datasets)
+        print(f"\n  {title} (NDCG@10 / R@10)")
+        header = f"  {'Model':<16}" + "".join(f"  {d[:12]:>14}" for d in col_datasets)
         print(header)
         print("  " + "─" * len(header))
         for model_name in models_seen:
             row = f"  {model_name:<16}"
-            for ds in zero_shot_datasets:
-                m = zs.get(ds, {}).get(model_name, {})
+            for d in col_datasets:
+                m = zs.get(d, {}).get(model_name, {})
                 n10 = m.get("ndcg@10", float("nan"))
                 r10 = m.get("recall@10", float("nan"))
                 row += f"  {n10:.4f}/{r10:.4f}  "
             print(row)
-    else:
-        print()
-        print("  MS MARCO zero-shot results not found (run eval step).")
+
+    _print_zero_shot_table(
+        "MS MARCO In-Domain Eval (Wu et al. protocol)",
+        os.path.join(results_root, "msmarco", "indomain", "zero_shot_results.json"),
+        ["msmarco"],
+    )
+    _print_zero_shot_table(
+        "MS MARCO → BEIR Zero-Shot Transfer",
+        os.path.join(results_root, "msmarco", "zero_shot", "zero_shot_results.json"),
+        zero_shot_datasets,
+    )
 
 print()
 print("  Standard: BAM-B vs MRL at full dims")
