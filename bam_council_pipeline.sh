@@ -145,6 +145,7 @@ ALL_STEPS=(
     annotate
     train_mrl find_mrl
     train_bam_b find_bam_b
+    eval_pretrained
     train_mrl_bk find_mrl_bk
     train_bam_pq find_bam_pq
     eval fair_cmp eff_curves
@@ -558,26 +559,49 @@ for DS in $DATASETS; do
         BK_MRL_CFG="$CFG_DIR/mrl_${BK}.yaml"
         mkdir -p "$BK_MRL_CKPT"
 
-        # Resolve base MRL config for this backbone + dataset
+        # Resolve base MRL config for this backbone + dataset and generate it
+        # early — needed by eval_pretrained (no training) and train_mrl_bk.
         if [[ "$IS_MSMARCO" == "1" ]]; then
             BASE_BK_MRL_CFG="${BACKBONE_MRL_MSMARCO_CFG[$BK]}"
         else
             BASE_BK_MRL_CFG="${BACKBONE_MRL_EDU_CFG[$BK]}"
         fi
-
-        # ── STEP 7: train_mrl_bk ─────────────────────────────────────────────
-        # e5large MRL was already trained in the shared step (train_mrl).
-        # For e5large, just reuse $MRL_BEST as BK_MRL_BEST.
         if [[ "$BK" == "e5large" ]]; then
-            BK_MRL_BEST="$MRL_BEST"
             BK_MRL_CFG="$MRL_CFG"
+            BK_MRL_BEST="$MRL_BEST"
         else
-            # Generate backbone-specific MRL config if needed
             if [[ ! -f "$BK_MRL_CFG" ]]; then
                 make_config "$BASE_BK_MRL_CFG" "$BK_MRL_CFG" \
                     "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BK_MRL_CKPT/"
             fi
+        fi
 
+        # ── STEP 7: eval_pretrained ──────────────────────────────────────────
+        # Zero-shot truncation baseline — no training, just eval pretrained
+        # weights at each MRL dim. Uses the MRL config for model architecture only.
+        if should_run eval_pretrained; then
+            log "[$DS][$BK] EVAL PRETRAINED TRUNCATION BASELINE"
+            PRETRAINED_OUT="$BK_RESULTS/pretrained_truncation"
+            mkdir -p "$PRETRAINED_OUT"
+            if [[ -f "$PRETRAINED_OUT/pretrained_truncation.json" ]] && [[ "$FORCE" != "1" ]]; then
+                echo "  Pretrained baseline already evaluated — skipping."
+            else
+                python3 scripts/eval_pretrained_truncation.py \
+                    --config      "$BK_MRL_CFG" \
+                    --test_path   "$TEST_PATH" \
+                    --corpus_path "$CORPUS_PATH" \
+                    --output_dir  "$PRETRAINED_OUT" \
+                    || echo "  WARNING: pretrained truncation eval failed for $BK (non-fatal)"
+                echo "  Results → $PRETRAINED_OUT/pretrained_truncation.json"
+            fi
+        fi
+
+        # ── STEP 8: train_mrl_bk ─────────────────────────────────────────────
+        # e5large MRL was already trained in the shared step (train_mrl).
+        # For e5large, just reuse $MRL_BEST as BK_MRL_BEST.
+        if [[ "$BK" == "e5large" ]]; then
+            : # BK_MRL_BEST and BK_MRL_CFG already set above
+        else
             if should_run train_mrl_bk; then
                 log "[$DS][$BK] TRAIN MRL BASELINE"
                 if [[ "$FORCE" == "1" ]] || [[ "$BLOOM_COUNCIL_REFRESHED" == "1" ]]; then

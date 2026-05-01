@@ -27,5 +27,5 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BACKBONES_TO_RUN="e5large bge" \
 exec bash "$SCRIPT_DIR/bam_council_pipeline.sh" \
-    --from train_mrl_bk \
+    --from eval_pretrained \
     "$@"
