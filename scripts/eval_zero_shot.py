@@ -225,10 +225,19 @@ def encode_texts_to_array(model, texts: List[str], tokenizer, device,
                            bloom_labels: Optional[List[int]] = None,
                            batch_size: int = 128) -> np.ndarray:
     """Encode texts → float16 numpy array. Keeps full embedding dim."""
+    _query_instr = None
+    if is_query:
+        if hasattr(model, "encoder"):
+            _query_instr = getattr(model.encoder, "query_instruction", None)
+        elif hasattr(model, "query_instruction"):
+            _query_instr = model.query_instruction
+
     all_embs = []
     for i in tqdm(range(0, len(texts), batch_size),
                   desc="  queries" if is_query else "  corpus", leave=False):
         batch = texts[i: i + batch_size]
+        if _query_instr:
+            batch = [_query_instr + t for t in batch]
         enc = tokenizer(batch, padding=True, truncation=True,
                         max_length=128 if is_query else 256,
                         return_tensors="pt")
@@ -421,11 +430,19 @@ def encode_bam_pq_queries(model, query_texts: List[str], bloom_labels: List[int]
     BAM-PQ masks differ per query (bloom anchor + query residual), so we capture
     masked_embedding directly rather than applying level masks post-hoc.
     """
+    _query_instr = None
+    if hasattr(model, "encoder"):
+        _query_instr = getattr(model.encoder, "query_instruction", None)
+    elif hasattr(model, "query_instruction"):
+        _query_instr = model.query_instruction
+
     all_embs: List[np.ndarray] = []
     all_dims: List[int] = []
     for i in tqdm(range(0, len(query_texts), batch_size),
                   desc="  BAM-PQ queries", leave=False):
         batch_texts = query_texts[i: i + batch_size]
+        if _query_instr:
+            batch_texts = [_query_instr + t for t in batch_texts]
         batch_bloom = bloom_labels[i: i + batch_size]
         enc = tokenizer(batch_texts, padding=True, truncation=True,
                         max_length=128, return_tensors="pt")

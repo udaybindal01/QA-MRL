@@ -1,7 +1,15 @@
-# BAM Option B — intfloat/e5-large-v2 backbone, MRL warm-start — MS MARCO data
+# BAM-PQ — intfloat/e5-large-v2 backbone — MS MARCO in-domain training
 #
-# Same as bam_optionb_e5large.yaml but trained on MS MARCO passages.
-# Routing: Embedding(6, 1024) → Gumbel-Sigmoid + STE → scattered binary mask per Bloom level
+# Wu et al. comparison protocol: train on 50k MS MARCO queries, eval in-domain
+# (corpus capped at 500k) and zero-shot on BEIR (trec-covid, scidocs, climate-fever).
+#
+# Data: HF is_selected=0 negatives used directly (no curriculum_negatives.py —
+#       OOM on 2.9M corpus). Hard negatives already embedded in train.jsonl.
+#
+# find_best_epoch: SKIP epoch sweep (OOM on 2.9M corpus).
+#                 Use final checkpoint as best: ln -sfn final best_bsr
+#
+# Stage training: reverse two-stage (frozen mask → encoder fine-tune), same as edu.
 
 model:
   backbone: "intfloat/e5-large-v2"
@@ -9,7 +17,9 @@ model:
   pooling: "cls"
   normalize_embeddings: true
   mrl_dims: [64, 128, 256, 512, 768, 1024]
-  use_mask_routing: true             # Option B: BloomMaskHead scattered mask
+  use_mask_routing: true
+  use_query_delta: true
+  query_delta_hidden: 256
   mask_sparsity_target: null
   use_soft_bloom_routing: false
 
@@ -26,53 +36,55 @@ data:
 
 training:
   seed: 42
-  num_epochs: 25
+  num_epochs: 20
   batch_size: 16
-  gradient_accumulation_steps: 8   # effective batch = 128
+  gradient_accumulation_steps: 8
   fp16: true
   max_grad_norm: 1.0
   optimizer:
     type: "adamw"
-    lr: 2.0e-5
+    lr: 2.0e-4
     weight_decay: 0.01
     encoder_lr: 2.0e-5
-    router_lr: 2.0e-4              # BloomMaskHead — 10x encoder LR
+    router_lr: 2.0e-4
+    encoder_finetune_lr: 1.0e-6
   scheduler:
     type: "cosine"
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.3
+    efficiency_weight: 0.0
     efficiency_uniform_weights: true
-    mrl_anchor_weight: 0.0         # No prefix reinforcement for scattered mask
-    diversity_weight: 0.0          # Option A only
-    mask_sparsity_weight: 1.0
-    mask_level_targets:
-      0: 0.30                      # Remember: ~307 dims
-      1: 0.56                      # Understand: ~573 dims
-      2: 0.27                      # Apply: ~276 dims
-      3: 0.28                      # Analyze: ~287 dims
-      4: 0.56                      # Evaluate: ~573 dims
-      5: 0.27                      # Create: ~276 dims
+    mrl_anchor_weight: 0.0
+    diversity_weight: 0.0
+    use_topk_sparsity: true
+    topk_threshold_weight: 0.5
+    mask_sparsity_weight: 1.5
+    mask_level_targets: null
     mask_diversity_weight: 0.5
     mask_diversity_margin: 0.0
     mask_variance_weight: 0.3
-    mask_distill_weight: 0.3
-    dropmask_rate: 0.1
-    dim_redist_weight: 0.05
-    encoder_warmup_epochs: 5
-    mask_differentiation_epochs: 5
+    mask_distill_weight: 0.5
+    query_routing_div_weight: 0.3
+    query_routing_div_margin_neg: 0.5
+    query_routing_div_attraction: 0.0
+    dropmask_rate: 0.0
+    dim_redist_weight: 0.0
+    encoder_warmup_epochs: 0
+    mask_differentiation_epochs: 0
     temperature_schedule:
       start: 0.1
       end: 0.02
     gumbel_temperature_schedule:
       start: 1.0
       end: 0.1
+  balanced_bloom_sampling: true
   use_pcgrad: false
   encoder_freeze_after_epochs: null
+  encoder_unfreeze_after_epochs: 8
   bloom_noise_rate: 0.0
   hard_neg_refresh_epochs: null
-  checkpoint_dir: "/tmp/bam-b-e5large-msmarco-ckpts/"
+  checkpoint_dir: "/tmp/bam-pq-e5large-msmarco-ckpts/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
 

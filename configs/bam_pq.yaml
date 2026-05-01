@@ -43,7 +43,7 @@ data:
   subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
   max_query_length: 128
   max_passage_length: 256
-  num_hard_negatives: 7
+  num_hard_negatives: 15
 
 training:
   seed: 42
@@ -68,8 +68,10 @@ training:
     efficiency_uniform_weights: true
     mrl_anchor_weight: 0.0
     diversity_weight: 0.0
-    mask_sparsity_weight: 1.5      # Same as BAM-B — cognitive defaults enforced
-    mask_level_targets: null       # Use BloomMaskSparsityLoss._COGNITIVE_DEFAULTS
+    use_topk_sparsity: true         # Per-query top-k count loss (Wu et al. style)
+    topk_threshold_weight: 0.5     # Threshold hinge weight relative to count loss
+    mask_sparsity_weight: 1.5      # Weight applied to whichever sparsity loss is active
+    mask_level_targets: null       # Use cognitive defaults (0.35–0.72)
     mask_diversity_weight: 0.5     # Push per-level masks apart
     mask_diversity_margin: 0.0
     mask_variance_weight: 0.3

@@ -1,5 +1,11 @@
 """
-BAM Training Losses v10.
+BAM Training Losses v11.
+
+New in v10:
+  SoftTopKSparsityLoss — per-query differentiable top-k count + threshold loss (Wu et al. style).
+    Use with use_topk_sparsity: true in config. Replaces BloomMaskSparsityLoss.
+    Gives B gradient signals per batch instead of 6, and pushes each query independently
+    toward its Bloom-level budget rather than enforcing only the per-level average.
 
 New in v10:
   DimVarianceRedistributionLoss — penalizes encoder for concentrating variance in prefix dims.
@@ -387,6 +393,101 @@ class BloomMaskVarianceLoss(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Soft top-k sparsity loss (v11) — Wu et al. style per-query count enforcement
+# ---------------------------------------------------------------------------
+
+class SoftTopKSparsityLoss(nn.Module):
+    """
+    Per-query differentiable top-k sparsity loss (Wu et al. "Learning to Select" style).
+
+    Two components applied per-query (not averaged over the batch first):
+
+    1. Count loss: L2 penalty on (sum(sigmoid(logits)) - k_target)² per query.
+       BloomMaskSparsityLoss averages sigmoid values over all queries of a level,
+       giving only 6 gradient signals per batch. This gives B signals and enforces
+       the budget on every individual query.
+
+    2. Threshold loss: finds the k-th score (per query) as a decision boundary,
+       then pushes selected dims (score > threshold) toward 1 and excluded dims
+       toward 0. This sharpens the binary decision for each dim independently.
+
+    Use with `use_topk_sparsity: true` in config loss section.
+    threshold_weight: relative weight of threshold loss vs count loss (default 0.5).
+    """
+
+    _COGNITIVE_DEFAULTS = {0: 0.35, 1: 0.50, 2: 0.60, 3: 0.65, 4: 0.72, 5: 0.55}
+
+    def __init__(
+        self,
+        level_targets: Optional[dict] = None,
+        global_target: Optional[float] = None,
+        embedding_dim: int = 768,
+        threshold_weight: float = 0.5,
+    ):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.threshold_weight = threshold_weight
+
+        self.targets: dict = {}
+        for b in range(6):
+            if level_targets and b in level_targets:
+                self.targets[b] = level_targets[b]
+            elif global_target is not None:
+                self.targets[b] = global_target
+            else:
+                self.targets[b] = self._COGNITIVE_DEFAULTS[b]
+
+    def forward(
+        self,
+        clean_sigmoid: torch.Tensor,  # [B, D] — sigmoid(logits), no Gumbel/temperature
+        bloom_labels: torch.Tensor,   # [B] int 0-indexed
+    ):
+        B, D = clean_sigmoid.shape
+
+        # Per-query target k (float for gradient arithmetic, round for threshold index)
+        target_fracs = clean_sigmoid.new_tensor(
+            [self.targets.get(int(b.item()), 0.5) for b in bloom_labels]
+        )  # [B]
+        target_k = target_fracs * D  # [B] float — used in count loss
+
+        # ── 1. Per-query L2 count loss ────────────────────────────────────────
+        # Normalize by D² so scale is embedding-dim independent
+        soft_counts = clean_sigmoid.sum(dim=-1)  # [B]
+        count_loss = ((soft_counts - target_k).pow(2) / (D * D)).mean()
+
+        # ── 2. Soft threshold loss ────────────────────────────────────────────
+        # Find the k-th score per query → per-query decision boundary
+        sorted_scores = clean_sigmoid.sort(dim=-1, descending=True).values  # [B, D]
+        k_idx = (target_k.long() - 1).clamp(0, D - 1)                      # [B]
+        batch_idx = torch.arange(B, device=clean_sigmoid.device)
+        threshold = sorted_scores[batch_idx, k_idx].detach().unsqueeze(-1)  # [B, 1]
+
+        # is_selected: dims above the threshold (should end up = 1)
+        is_selected = (clean_sigmoid > threshold).float()  # [B, D], no gradient
+
+        # Push selected dims toward 1, excluded dims toward 0
+        push_to_one  = (1.0 - clean_sigmoid) * is_selected           # [B, D]
+        push_to_zero = clean_sigmoid          * (1.0 - is_selected)  # [B, D]
+        threshold_loss = (push_to_one + push_to_zero).mean()
+
+        loss = count_loss + self.threshold_weight * threshold_loss
+
+        stats = {
+            "topk_sparsity": loss.item(),
+            "topk_count_loss": count_loss.item(),
+            "topk_threshold_loss": threshold_loss.item(),
+            "topk_counts_mean": soft_counts.mean().item(),
+            "topk_counts_std": soft_counts.std().item() if B > 1 else 0.0,
+        }
+        for b in range(6):
+            idx = bloom_labels == b
+            if idx.sum() > 0:
+                stats[f"topk_b{b}"] = soft_counts[idx].mean().item()
+
+        return loss, stats
+
+
+# ---------------------------------------------------------------------------
 # PCGrad optimizer wrapper (optional, Challenge 1 fix)
 # ---------------------------------------------------------------------------
 
@@ -732,10 +833,22 @@ class BAMCombinedLoss(nn.Module):
             level_targets = {int(k): float(v) for k, v in level_targets_cfg.items()}
         else:
             level_targets = None
-        self.mask_sparsity = BloomMaskSparsityLoss(
-            global_target=global_sparsity,
-            level_targets=level_targets,
-        )
+
+        # use_topk_sparsity: replace batch-averaged sparsity with per-query top-k enforcement.
+        # Gives B gradient signals instead of 6; each query independently hits its budget.
+        use_topk = lc.get("use_topk_sparsity", False)
+        if use_topk:
+            self.mask_sparsity = SoftTopKSparsityLoss(
+                level_targets=level_targets,
+                global_target=global_sparsity,
+                embedding_dim=emb_dim,
+                threshold_weight=lc.get("topk_threshold_weight", 0.5),
+            )
+        else:
+            self.mask_sparsity = BloomMaskSparsityLoss(
+                global_target=global_sparsity,
+                level_targets=level_targets,
+            )
         diversity_margin = lc.get("mask_diversity_margin", 0.3)
         self.mask_diversity    = BloomMaskDiversityLoss(margin=diversity_margin)
         self.mask_variance     = BloomMaskVarianceLoss()

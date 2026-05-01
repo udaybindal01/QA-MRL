@@ -1,17 +1,23 @@
-# BAM Option B — intfloat/e5-large-v2 backbone, MRL warm-start — MS MARCO data
+# BAM-PQ — LLM2Vec-Mistral-7B backbone — MS MARCO in-domain training
 #
-# Same as bam_optionb_e5large.yaml but trained on MS MARCO passages.
-# Routing: Embedding(6, 1024) → Gumbel-Sigmoid + STE → scattered binary mask per Bloom level
+# Wu et al. protocol: train on 50k MS MARCO, eval in-domain + zero-shot BEIR.
+# Encoder: FROZEN throughout (7B; only router trains).
+# Memory: ~14 GB bfloat16 frozen. Requires: pip install llm2vec
 
 model:
-  backbone: "intfloat/e5-large-v2"
-  embedding_dim: 1024
-  pooling: "cls"
+  backbone: "McGill-NLP/LLM2Vec-Mistral-7B-Instruct-v2-mntp"
+  backbone_type: "llm2vec"
+  peft_model_name: "McGill-NLP/LLM2Vec-Mistral-7B-Instruct-v2-mntp-supervised"
+  embedding_dim: 4096
+  pooling: "mean"
   normalize_embeddings: true
-  mrl_dims: [64, 128, 256, 512, 768, 1024]
-  use_mask_routing: true             # Option B: BloomMaskHead scattered mask
+  mrl_dims: [256, 512, 1024, 2048, 3072, 4096]
+  use_mask_routing: true
+  use_query_delta: true
+  query_delta_hidden: 512
   mask_sparsity_target: null
   use_soft_bloom_routing: false
+  torch_dtype: "bfloat16"
 
 data:
   train_path: "/tmp/data/msmarco/train.jsonl"
@@ -26,53 +32,56 @@ data:
 
 training:
   seed: 42
-  num_epochs: 25
-  batch_size: 16
-  gradient_accumulation_steps: 8   # effective batch = 128
-  fp16: true
+  num_epochs: 20
+  batch_size: 4
+  gradient_accumulation_steps: 32
+  fp16: false
+  bf16: true
   max_grad_norm: 1.0
   optimizer:
     type: "adamw"
-    lr: 2.0e-5
+    lr: 2.0e-4
     weight_decay: 0.01
-    encoder_lr: 2.0e-5
-    router_lr: 2.0e-4              # BloomMaskHead — 10x encoder LR
+    encoder_lr: 0.0
+    router_lr: 2.0e-4
+    encoder_finetune_lr: 0.0
   scheduler:
     type: "cosine"
     warmup_ratio: 0.1
   loss:
     contrastive_weight: 1.0
-    efficiency_weight: 0.3
+    efficiency_weight: 0.0
     efficiency_uniform_weights: true
-    mrl_anchor_weight: 0.0         # No prefix reinforcement for scattered mask
-    diversity_weight: 0.0          # Option A only
-    mask_sparsity_weight: 1.0
-    mask_level_targets:
-      0: 0.30                      # Remember: ~307 dims
-      1: 0.56                      # Understand: ~573 dims
-      2: 0.27                      # Apply: ~276 dims
-      3: 0.28                      # Analyze: ~287 dims
-      4: 0.56                      # Evaluate: ~573 dims
-      5: 0.27                      # Create: ~276 dims
+    mrl_anchor_weight: 0.0
+    diversity_weight: 0.0
+    use_topk_sparsity: true
+    topk_threshold_weight: 0.5
+    mask_sparsity_weight: 1.5
+    mask_level_targets: null
     mask_diversity_weight: 0.5
     mask_diversity_margin: 0.0
     mask_variance_weight: 0.3
-    mask_distill_weight: 0.3
-    dropmask_rate: 0.1
-    dim_redist_weight: 0.05
-    encoder_warmup_epochs: 5
-    mask_differentiation_epochs: 5
+    mask_distill_weight: 0.5
+    query_routing_div_weight: 0.3
+    query_routing_div_margin_neg: 0.5
+    query_routing_div_attraction: 0.0
+    dropmask_rate: 0.0
+    dim_redist_weight: 0.0
+    encoder_warmup_epochs: 0
+    mask_differentiation_epochs: 0
     temperature_schedule:
       start: 0.1
       end: 0.02
     gumbel_temperature_schedule:
       start: 1.0
       end: 0.1
+  balanced_bloom_sampling: true
   use_pcgrad: false
   encoder_freeze_after_epochs: null
+  encoder_unfreeze_after_epochs: null   # frozen — 7B model
   bloom_noise_rate: 0.0
   hard_neg_refresh_epochs: null
-  checkpoint_dir: "/tmp/bam-b-e5large-msmarco-ckpts/"
+  checkpoint_dir: "/tmp/bam-pq-llm2vec-msmarco-ckpts/"
   save_every_n_steps: 1000
   eval_every_n_steps: 500
 
@@ -83,7 +92,7 @@ evaluation:
   measure_latency: true
 
 diagnostics:
-  gradient_attribution: true
+  gradient_attribution: false
   num_diagnostic_queries: 1000
   probing:
     probe_type: "linear"

@@ -67,6 +67,7 @@ class BAMTrainer:
         self.grad_accum = tc["gradient_accumulation_steps"]
         self.max_grad_norm = tc["max_grad_norm"]
         self.use_fp16 = tc["fp16"]
+        self.use_bf16 = tc.get("bf16", False) and not self.use_fp16
         self.eval_every = tc["eval_every_n_steps"]
         self.save_every = tc["save_every_n_steps"]
         self.checkpoint_dir = tc["checkpoint_dir"]
@@ -103,6 +104,7 @@ class BAMTrainer:
             LinearLR(self.optimizer, start_factor=0.1, total_iters=warmup_steps),
             CosineAnnealingLR(self.optimizer, T_max=max(total_steps - warmup_steps, 1)),
         ], milestones=[warmup_steps])
+        # GradScaler only needed for fp16 (bf16 doesn't overflow)
         self.scaler = GradScaler(enabled=self.use_fp16)
 
         self.state = TrainingState()
@@ -271,7 +273,8 @@ class BAMTrainer:
             return self._train_step_standard(batch, bloom_label)
 
     def _train_step_standard(self, batch, bloom_label):
-        with autocast(enabled=self.use_fp16):
+        amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
+        with autocast(enabled=self.use_fp16 or self.use_bf16, dtype=amp_dtype):
             outputs = self.model(
                 query_input_ids=batch["query_input_ids"],
                 query_attention_mask=batch["query_attention_mask"],

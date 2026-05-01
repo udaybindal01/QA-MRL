@@ -403,8 +403,17 @@ class FullEvaluator:
                       is_query=False, batch_size=128) -> torch.Tensor:
         """Encode a list of texts."""
         all_embs = []
+        # Resolve query instruction once for the whole call
+        _query_instr = None
+        if is_query:
+            if hasattr(model, "encoder"):
+                _query_instr = getattr(model.encoder, "query_instruction", None)
+            elif hasattr(model, "query_instruction"):
+                _query_instr = model.query_instruction
         for i in tqdm(range(0, len(texts), batch_size), desc="    encoding", leave=False):
             batch_texts = texts[i:i + batch_size]
+            if _query_instr:
+                batch_texts = [_query_instr + t for t in batch_texts]
             enc = tokenizer(batch_texts, padding=True, truncation=True,
                             max_length=256, return_tensors="pt")
             enc = {k: v.to(device) for k, v in enc.items()}
@@ -446,6 +455,14 @@ class FullEvaluator:
 
         for i in range(0, len(query_texts), batch_size):
             batch = query_texts[i:i + batch_size]
+            # Prepend query instruction for instruction-tuned encoders (Qwen-Embedding, etc.)
+            query_instr = None
+            if hasattr(model, "encoder"):
+                query_instr = getattr(model.encoder, "query_instruction", None)
+            elif hasattr(model, "query_instruction"):
+                query_instr = model.query_instruction
+            if query_instr:
+                batch = [query_instr + t for t in batch]
             enc = tokenizer(batch, padding=True, truncation=True,
                             max_length=128, return_tensors="pt")
             enc = {k: v.to(device) for k, v in enc.items()}

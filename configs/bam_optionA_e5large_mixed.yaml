@@ -36,7 +36,7 @@ data:
   subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
   max_query_length: 128
   max_passage_length: 256
-  num_hard_negatives: 7
+  num_hard_negatives: 15
 
 training:
   seed: 42

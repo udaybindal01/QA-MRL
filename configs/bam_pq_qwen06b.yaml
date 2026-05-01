@@ -1,0 +1,117 @@
+# BAM-PQ — Qwen3-Embedding-0.6B backbone
+#
+# Wu et al. baseline backbone: Qwen-Embedding-0.6B
+# HuggingFace: Qwen/Qwen3-Embedding-0.6B  (1024-dim, last-token EOS pooling)
+#
+# Qwen-Embedding is itself MRL-trained (Matryoshka loss), so the MRL anchor
+# dimensions align naturally with our training objective.
+#
+# Pooling: last_token (EOS) — inferred automatically from backbone_type=qwen
+# Instruction: prepended to queries at encode time, NOT to documents.
+#
+# Usage:
+#   python scripts/train_bam.py --config configs/bam_pq_qwen06b.yaml
+#
+# Compare Wu et al. "Learning to Select" Table 2 (Qwen-Embed-0.6B column)
+# using their published MRR/NDCG scores as the MRL baseline.
+
+model:
+  backbone: "Qwen/Qwen3-Embedding-0.6B"
+  backbone_type: "qwen"               # last-token (EOS) pooling, instruction prefix support
+  query_instruction: "Instruct: Retrieve relevant educational passages for the query\nQuery: "
+  embedding_dim: 1024
+  pooling: "last_token"               # set explicitly; also inferred from backbone_type=qwen
+  normalize_embeddings: true
+  mrl_dims: [64, 128, 256, 512, 768, 1024]
+  use_mask_routing: true
+  use_query_delta: true               # BAM-PQ: Bloom anchor + per-query MLP residual
+  query_delta_hidden: 256
+  mask_sparsity_target: null
+  use_soft_bloom_routing: false
+  torch_dtype: "bfloat16"            # Qwen uses bfloat16
+
+data:
+  train_path: "./data/real/train_curriculum.jsonl"
+  val_path: "./data/real/val.jsonl"
+  test_path: "./data/real/test.jsonl"
+  corpus_path: "./data/real/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
+  max_query_length: 128
+  max_passage_length: 256
+  num_hard_negatives: 15
+
+training:
+  seed: 42
+  num_epochs: 20
+  batch_size: 16
+  gradient_accumulation_steps: 8
+  fp16: false
+  bf16: true
+  max_grad_norm: 1.0
+  optimizer:
+    type: "adamw"
+    lr: 2.0e-4
+    weight_decay: 0.01
+    encoder_lr: 2.0e-5
+    router_lr: 2.0e-4
+    encoder_finetune_lr: 1.0e-6
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.1
+  loss:
+    contrastive_weight: 1.0
+    efficiency_weight: 0.0
+    efficiency_uniform_weights: true
+    mrl_anchor_weight: 0.0
+    diversity_weight: 0.0
+    use_topk_sparsity: true
+    topk_threshold_weight: 0.5
+    mask_sparsity_weight: 1.5
+    mask_level_targets: null
+    mask_diversity_weight: 0.5
+    mask_diversity_margin: 0.0
+    mask_variance_weight: 0.3
+    mask_distill_weight: 0.5
+    query_routing_div_weight: 0.3
+    query_routing_div_margin_neg: 0.5
+    query_routing_div_attraction: 0.0
+    dropmask_rate: 0.0
+    dim_redist_weight: 0.0
+    encoder_warmup_epochs: 0
+    mask_differentiation_epochs: 0
+    temperature_schedule:
+      start: 0.1
+      end: 0.02
+    gumbel_temperature_schedule:
+      start: 1.0
+      end: 0.1
+  balanced_bloom_sampling: true
+  use_pcgrad: false
+  encoder_freeze_after_epochs: null
+  encoder_unfreeze_after_epochs: 8
+  bloom_noise_rate: 0.0
+  hard_neg_refresh_epochs: null
+  checkpoint_dir: "/tmp/bam-pq-qwen06b-ckpts/"
+  save_every_n_steps: 1000
+  eval_every_n_steps: 500
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50, 100]
+  bloom_stratified: true
+  tail_topic_threshold: 20
+  measure_latency: true
+
+diagnostics:
+  gradient_attribution: true
+  num_diagnostic_queries: 1000
+  probing:
+    probe_type: "linear"
+    probe_tasks: ["bloom_level", "subject_area"]
+    num_dimension_groups: 8
+
+logging:
+  use_wandb: true
+  wandb_project: "bam-emnlp"
+  wandb_entity: null
+  log_every_n_steps: 10

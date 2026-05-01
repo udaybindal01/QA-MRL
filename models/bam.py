@@ -458,6 +458,9 @@ class BloomAlignedMRL(nn.Module):
             normalize=mc["normalize_embeddings"],
             torch_dtype=mc.get("torch_dtype", None),
             gradient_checkpointing=config.get("training", {}).get("gradient_checkpointing", False),
+            backbone_type=mc.get("backbone_type", "standard"),
+            query_instruction=mc.get("query_instruction", None),
+            peft_model_name=mc.get("peft_model_name", None),
         )
 
         self.use_mask_routing = mc.get("use_mask_routing", False)
@@ -521,11 +524,12 @@ class BloomAlignedMRL(nn.Module):
                 )
 
         enc = self.encoder(input_ids, attention_mask, token_type_ids)
-        full_emb = enc["full"]  # [B, 768] normalized
+        full_emb = enc["full"]  # [B, D] normalized
 
         if self.use_mask_routing:
             # Option B / BAM-PQ: scattered mask from BloomMaskHead or BloomQueryMaskHead
-            cls_token = enc["hidden_states"][:, 0, :]  # [B, D] unnormalized CLS
+            # routing_hidden: CLS for BERT-style, last-token for Qwen, mean for LLM2Vec/GritLM
+            cls_token = enc["routing_hidden"]  # [B, D] unnormalized
             head_out = self.bloom_mask_head(cls_token, bloom_labels)
             mask = head_out["mask"]
             masked_emb = F.normalize(full_emb * mask, p=2, dim=-1)

@@ -11,7 +11,7 @@ model:
   mrl_dims: [64, 128, 256, 512, 768, 1024]
 
 data:
-  train_path: "/tmp/data/msmarco/train_curriculum.jsonl"
+  train_path: "/tmp/data/msmarco/train.jsonl"
   val_path: "/tmp/data/msmarco/val.jsonl"
   test_path: "/tmp/data/msmarco/test.jsonl"
   corpus_path: "/tmp/data/msmarco/corpus.jsonl"
@@ -19,7 +19,7 @@ data:
   subjects: ["general"]
   max_query_length: 128
   max_passage_length: 256
-  num_hard_negatives: 7
+  num_hard_negatives: 15
 
 training:
   seed: 42

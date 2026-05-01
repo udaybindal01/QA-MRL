@@ -143,10 +143,19 @@ def encode_texts(model, texts: List[str], tokenizer, device,
                       Only used when is_query=True and model has encode_queries.
     """
     model.eval()
+    _query_instr = None
+    if is_query:
+        if hasattr(model, "encoder"):
+            _query_instr = getattr(model.encoder, "query_instruction", None)
+        elif hasattr(model, "query_instruction"):
+            _query_instr = model.query_instruction
+
     all_embs = []
 
     for i in tqdm(range(0, len(texts), batch_size), desc="  encoding", leave=False):
         batch = texts[i:i+batch_size]
+        if _query_instr:
+            batch = [_query_instr + t for t in batch]
         enc = tokenizer(batch, padding=True, truncation=True,
                        max_length=256 if not is_query else 128,
                        return_tensors="pt")
