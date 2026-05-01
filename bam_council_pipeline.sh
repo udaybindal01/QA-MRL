@@ -266,11 +266,19 @@ for DS in $DATASETS; do
                     || die "[$DS] build_real_data.py failed"
             fi
 
-            # Curriculum negatives: BM25 hard negative mining
-            # Re-run if train_curriculum.jsonl is missing or num_neg changed
-            if [[ -f "$TRAIN_PATH" ]]; then
-                echo "  train_curriculum.jsonl exists — skipping curriculum_negatives."
+            # Curriculum negatives: BM25 hard negative mining.
+            # Regenerate if missing OR if NUM_NEG changed since last run
+            # (tracked in .curriculum_num_neg marker file).
+            CURR_NEG_MARKER="$EDU_DATA_DIR/.curriculum_num_neg"
+            LAST_NUM_NEG="$(cat "$CURR_NEG_MARKER" 2>/dev/null || echo 0)"
+            if [[ -f "$TRAIN_PATH" ]] && [[ "$LAST_NUM_NEG" == "$NUM_NEG" ]]; then
+                echo "  train_curriculum.jsonl exists with num_neg=$NUM_NEG — skipping."
             else
+                if [[ -f "$TRAIN_PATH" ]] && [[ "$LAST_NUM_NEG" != "$NUM_NEG" ]]; then
+                    echo "  num_neg changed ($LAST_NUM_NEG → $NUM_NEG) — rebuilding curriculum negatives."
+                else
+                    echo "  train_curriculum.jsonl missing — building curriculum negatives."
+                fi
                 echo "  Mining BM25 curriculum hard negatives (num_neg=$NUM_NEG)..."
                 python3 data/curriculum_negatives.py \
                     --pairs  "$EDU_DATA_DIR/train.jsonl" \
@@ -278,6 +286,7 @@ for DS in $DATASETS; do
                     --output "$TRAIN_PATH" \
                     --num_neg "$NUM_NEG" \
                     || die "[$DS] curriculum_negatives.py failed"
+                echo "$NUM_NEG" > "$CURR_NEG_MARKER"
                 echo "  Curriculum negatives written → $TRAIN_PATH"
             fi
 
