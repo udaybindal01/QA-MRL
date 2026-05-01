@@ -58,11 +58,11 @@ class MRLEncoder(nn.Module):
             self._load_gritlm(model_name, dtype)
         else:
             # standard or qwen — both load via AutoModel
-            self.transformer = AutoModel.from_pretrained(model_name, torch_dtype=dtype)
+            self.transformer = self._load_automodel(model_name, dtype)
             if gradient_checkpointing:
                 self.transformer.gradient_checkpointing_enable()
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.tokenizer = self._load_tokenizer(model_name)
 
         # Qwen tokenizer needs a pad token (it uses EOS by default, fine for inference)
         if backbone_type == "qwen" and self.tokenizer.pad_token is None:
@@ -83,6 +83,31 @@ class MRLEncoder(nn.Module):
             assert d <= embedding_dim, f"MRL dim {d} > embedding dim {embedding_dim}"
 
     # ── Private loaders ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _load_automodel(model_name: str, dtype):
+        """AutoModel.from_pretrained with automatic offline fallback."""
+        try:
+            return AutoModel.from_pretrained(model_name, torch_dtype=dtype)
+        except Exception as e:
+            if "connect" in str(e).lower() or "network" in str(e).lower() \
+                    or "name or service" in str(e).lower() or "closed" in str(e).lower():
+                print(f"  Network unavailable — loading {model_name} from cache (local_files_only).")
+                return AutoModel.from_pretrained(
+                    model_name, torch_dtype=dtype, local_files_only=True)
+            raise
+
+    @staticmethod
+    def _load_tokenizer(model_name: str):
+        """AutoTokenizer.from_pretrained with automatic offline fallback."""
+        try:
+            return AutoTokenizer.from_pretrained(model_name)
+        except Exception as e:
+            if "connect" in str(e).lower() or "network" in str(e).lower() \
+                    or "name or service" in str(e).lower() or "closed" in str(e).lower():
+                print(f"  Network unavailable — loading tokenizer from cache (local_files_only).")
+                return AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+            raise
 
     def _load_llm2vec(self, base_model_name: str, peft_model_name: Optional[str], dtype):
         """Load LLM2Vec via llm2vec library (handles bidirectional attention patches + PEFT)."""
