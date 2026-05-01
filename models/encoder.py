@@ -20,6 +20,14 @@ from typing import Dict, List, Optional, Tuple
 from .pooling import Pooler
 
 
+def _is_network_or_disk_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(k in msg for k in (
+        "connect", "network", "name or service", "closed",
+        "not enough free disk", "disk space", "errno",
+    ))
+
+
 class MRLEncoder(nn.Module):
     """
     Matryoshka Representation Learning encoder.
@@ -86,69 +94,110 @@ class MRLEncoder(nn.Module):
 
     @staticmethod
     def _load_automodel(model_name: str, dtype):
-        """AutoModel.from_pretrained with automatic offline fallback."""
+        """AutoModel.from_pretrained with automatic offline/disk-error fallback."""
         try:
             return AutoModel.from_pretrained(model_name, torch_dtype=dtype)
         except Exception as e:
-            if "connect" in str(e).lower() or "network" in str(e).lower() \
-                    or "name or service" in str(e).lower() or "closed" in str(e).lower():
-                print(f"  Network unavailable — loading {model_name} from cache (local_files_only).")
+            if _is_network_or_disk_error(e):
+                print(f"  Network/disk error — loading {model_name} from cache.")
                 return AutoModel.from_pretrained(
                     model_name, torch_dtype=dtype, local_files_only=True)
             raise
 
     @staticmethod
     def _load_tokenizer(model_name: str):
-        """AutoTokenizer.from_pretrained with automatic offline fallback."""
+        """AutoTokenizer.from_pretrained with automatic offline/disk-error fallback."""
         try:
             return AutoTokenizer.from_pretrained(model_name)
         except Exception as e:
-            if "connect" in str(e).lower() or "network" in str(e).lower() \
-                    or "name or service" in str(e).lower() or "closed" in str(e).lower():
-                print(f"  Network unavailable — loading tokenizer from cache (local_files_only).")
+            if _is_network_or_disk_error(e):
+                print(f"  Network/disk error — loading tokenizer from cache.")
                 return AutoTokenizer.from_pretrained(model_name, local_files_only=True)
             raise
 
+    @staticmethod
+    def _hf_kwargs() -> dict:
+        """Return local_files_only=True when the node has no internet / HF offline mode set."""
+        import os as _os
+        offline = _os.environ.get("HF_HUB_OFFLINE", "0") == "1" \
+                  or _os.environ.get("TRANSFORMERS_OFFLINE", "0") == "1"
+        return {"local_files_only": True} if offline else {}
+
     def _load_llm2vec(self, base_model_name: str, peft_model_name: Optional[str], dtype):
-        """Load LLM2Vec via llm2vec library (handles bidirectional attention patches + PEFT)."""
-        try:
-            from llm2vec import LLM2Vec
-            effective_peft = peft_model_name or base_model_name
-            llm2vec_obj = LLM2Vec.from_pretrained(
-                base_model_name,
-                peft_model_name_or_path=effective_peft,
-                torch_dtype=dtype or torch.bfloat16,
-                enable_bidirectional=True,
-            )
-            self.transformer = llm2vec_obj.model
-        except ImportError:
-            print(
-                "WARNING: llm2vec not installed — falling back to AutoModel (no "
-                "bidirectional attention patches; representation quality will be lower).\n"
-                "Install: pip install llm2vec"
-            )
-            self.transformer = AutoModel.from_pretrained(
-                base_model_name, torch_dtype=dtype or torch.bfloat16
-            )
+        """Load LLM2Vec; retries with local_files_only on network / disk-space errors."""
+        def _try_load(local_only: bool):
+            kw = {"local_files_only": True} if local_only else {}
+            try:
+                from llm2vec import LLM2Vec
+                effective_peft = peft_model_name or base_model_name
+                obj = LLM2Vec.from_pretrained(
+                    base_model_name,
+                    peft_model_name_or_path=effective_peft,
+                    torch_dtype=dtype or torch.bfloat16,
+                    enable_bidirectional=True,
+                    **kw,
+                )
+                self.transformer = obj.model
+                return True
+            except ImportError:
+                print(
+                    "WARNING: llm2vec not installed — falling back to AutoModel.\n"
+                    "Install: pip install llm2vec"
+                )
+                self.transformer = self._load_automodel(
+                    base_model_name, dtype or torch.bfloat16)
+                return True
+            except Exception as e:
+                return e
+
+        result = _try_load(local_only=False)
+        if result is True:
+            return
+        err = result
+        if _is_network_or_disk_error(err):
+            print(f"  Network/disk error — retrying {base_model_name} with local_files_only.")
+            result2 = _try_load(local_only=True)
+            if result2 is True:
+                return
+            err = result2
+        raise err
 
     def _load_gritlm(self, model_name: str, dtype):
-        """Load GritLM via gritlm library (unified encoder-decoder in embedding mode)."""
-        try:
-            from gritlm import GritLM as _GritLM
-            gritlm_obj = _GritLM(
-                model_name,
-                torch_dtype=dtype or torch.bfloat16,
-                mode="embedding",
-            )
-            self.transformer = gritlm_obj.model
-        except ImportError:
-            print(
-                "WARNING: gritlm not installed — falling back to AutoModel.\n"
-                "Install: pip install gritlm"
-            )
-            self.transformer = AutoModel.from_pretrained(
-                model_name, torch_dtype=dtype or torch.bfloat16
-            )
+        """Load GritLM; retries with local_files_only on network / disk-space errors."""
+        def _try_load(local_only: bool):
+            kw = {"local_files_only": True} if local_only else {}
+            try:
+                from gritlm import GritLM as _GritLM
+                obj = _GritLM(
+                    model_name,
+                    torch_dtype=dtype or torch.bfloat16,
+                    mode="embedding",
+                    **kw,
+                )
+                self.transformer = obj.model
+                return True
+            except ImportError:
+                print(
+                    "WARNING: gritlm not installed — falling back to AutoModel.\n"
+                    "Install: pip install gritlm"
+                )
+                self.transformer = self._load_automodel(
+                    model_name, dtype or torch.bfloat16)
+                return True
+            except Exception as e:
+                return e
+
+        result = _try_load(local_only=False)
+        if result is True:
+            return
+        err = result
+        if _is_network_or_disk_error(err):
+            print(f"  Network/disk error — retrying {model_name} with local_files_only.")
+            result2 = _try_load(local_only=True)
+            if result2 is True:
+                return
+            err = result2
+        raise err
 
     # ── Forward ───────────────────────────────────────────────────────────────
 

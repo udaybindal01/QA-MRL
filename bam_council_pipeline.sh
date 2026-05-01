@@ -199,6 +199,28 @@ should_run() {
     return 0
 }
 
+# Minimum free disk space (MB) required to load 7B models from HF cache
+LARGE_MODEL_MIN_FREE_MB=5000
+HF_CACHE_DIR="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
+
+# Returns 0 if backbone can be loaded (cached or enough disk), 1 to skip.
+check_backbone_loadable() {
+    local bk="$1"
+    if [[ "$bk" != "llm2vec" && "$bk" != "gritlm" ]]; then
+        return 0   # small models: always fine
+    fi
+    local free_mb
+    free_mb=$(df -m "$HF_CACHE_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [[ -z "$free_mb" ]]; then return 0; fi   # can't check — try anyway
+    if [[ "$free_mb" -lt "$LARGE_MODEL_MIN_FREE_MB" ]]; then
+        echo "  SKIP [$bk]: only ${free_mb} MB free in $HF_CACHE_DIR"
+        echo "    Need ≥ ${LARGE_MODEL_MIN_FREE_MB} MB to load 7B model weights."
+        echo "    Fix: export HF_HOME=/path/with/more/space  then re-run."
+        return 1
+    fi
+    return 0
+}
+
 log() {
     echo ""
     echo "══════════════════════════════════════════════════════"
@@ -565,6 +587,9 @@ for DS in $DATASETS; do
     # e5large MRL is already done in the shared steps — skip train_mrl_bk for it.
     # ─────────────────────────────────────────────────────────────────────────
     for BK in $BACKBONES_TO_RUN; do
+        # Skip 7B models when there isn't enough disk space in the HF cache dir
+        check_backbone_loadable "$BK" || continue
+
         BK_CKPT="$CKPT_ROOT/$DS/bam_pq_$BK"
         BK_CFG="$CFG_DIR/bam_pq_${BK}.yaml"
         BK_BEST="$BK_CKPT/best_bsr"
