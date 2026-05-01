@@ -20,6 +20,7 @@
 #   ./bam_council_pipeline.sh --msmarco-only                  # MS MARCO → BEIR zero-shot
 #   ./bam_council_pipeline.sh --from train_mrl                # skip build+annotate
 #   ./bam_council_pipeline.sh --from train_bam_pq             # skip to BAM-PQ
+#   ./bam_council_pipeline.sh --until find_bam_b              # stop after BAM-B (shared steps only)
 #   ./bam_council_pipeline.sh --datasets "scifact fiqa"       # subset of datasets
 #   ./bam_council_pipeline.sh --backbone "e5large qwen06b"    # subset of BAM-PQ backbones
 #   ./bam_council_pipeline.sh --force                         # wipe checkpoints and retrain
@@ -100,10 +101,12 @@ BACKBONES_TO_RUN="${BACKBONES_TO_RUN:-e5large bge qwen06b qwen4b llm2vec gritlm}
 # ARGUMENT PARSING
 # ─────────────────────────────────────────────────────────────────────────────
 FROM_STEP=""
+UNTIL_STEP=""
 SINGLE_DATASET=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --from)           FROM_STEP="$2";                   shift 2 ;;
+        --until)          UNTIL_STEP="$2";                  shift 2 ;;
         --datasets)       DATASETS="$2";                    shift 2 ;;
         --dataset)        SINGLE_DATASET="$2";              shift 2 ;;
         --backbone)       BACKBONES_TO_RUN="$2";            shift 2 ;;
@@ -129,13 +132,31 @@ ALL_STEPS=(
 
 should_run() {
     local step="$1"
-    [[ -z "$FROM_STEP" ]] && return 0
-    local found=0
-    for s in "${ALL_STEPS[@]}"; do
-        [[ "$s" == "$FROM_STEP" ]] && found=1
-        [[ $found -eq 1 && "$s" == "$step" ]] && return 0
-    done
-    return 1
+    # --from: skip steps before FROM_STEP
+    if [[ -n "$FROM_STEP" ]]; then
+        local found=0
+        for s in "${ALL_STEPS[@]}"; do
+            [[ "$s" == "$FROM_STEP" ]] && found=1
+            [[ $found -eq 1 && "$s" == "$step" ]] && { break; } || true
+        done
+        [[ $found -eq 0 ]] && return 1
+        # check step is at or after FROM_STEP
+        local after=0
+        for s in "${ALL_STEPS[@]}"; do
+            [[ "$s" == "$FROM_STEP" ]] && after=1
+            [[ $after -eq 1 && "$s" == "$step" ]] && break
+            [[ $after -eq 0 && "$s" == "$step" ]] && return 1
+        done
+    fi
+    # --until: skip steps after UNTIL_STEP
+    if [[ -n "$UNTIL_STEP" ]]; then
+        local past=0
+        for s in "${ALL_STEPS[@]}"; do
+            [[ $past -eq 1 && "$s" == "$step" ]] && return 1
+            [[ "$s" == "$UNTIL_STEP" ]] && past=1
+        done
+    fi
+    return 0
 }
 
 log() {
