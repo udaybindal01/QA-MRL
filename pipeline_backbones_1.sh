@@ -6,8 +6,9 @@
 # across all 5 datasets (educational, msmarco, scifact, nfcorpus, fiqa).
 #
 # MRL warm-start:
-#   e5large — YES  (same arch as MRL baseline; loads --init_encoder)
-#   bge     — NO   (different pretrained weights; starts from HuggingFace)
+#   e5large — reuses shared MRL checkpoint from pipeline_shared.sh
+#   bge     — trains its own bge MRL baseline first, then warm-starts BAM-PQ from it
+# Both MRL checkpoints also serve as the evaluation baselines (BAM-PQ vs MRL).
 #
 # Run AFTER pipeline_shared.sh completes:
 #   ./pipeline_backbones_1.sh &

@@ -809,22 +809,31 @@ for DS in $DATASETS; do
         fi
 
         # STEPS 12–13: BAM-PQ eval per backbone
+        # Each backbone is evaluated against its own backbone-matched MRL baseline.
         for BK in $BACKBONES_TO_RUN; do
             BK_BEST="$CKPT_ROOT/$DS/bam_pq_$BK/best_bsr"
             BK_CFG_F="$CFG_DIR/bam_pq_${BK}.yaml"
             BK_RESULTS="$DS_RESULTS/bam_pq_$BK"
             mkdir -p "$BK_RESULTS"
 
+            # Resolve this backbone's MRL baseline (e5large reuses shared MRL_BEST)
+            if [[ "$BK" == "e5large" ]]; then
+                BK_MRL_BASELINE="$MRL_BEST"
+            else
+                BK_MRL_BASELINE="$CKPT_ROOT/$DS/mrl_$BK/best"
+            fi
+
             if should_run eval_bam_pq; then
-                log "[$DS][$BK] EVAL — BAM-PQ vs MRL"
+                log "[$DS][$BK] EVAL — BAM-PQ vs MRL ($BK baseline)"
                 if [[ ! -f "$BK_BEST/checkpoint.pt" ]]; then
                     echo "  [$BK] best_bsr not found — skipping eval."
                 else
-                    [[ -f "$MRL_BEST/checkpoint.pt" ]] || die "[$DS] MRL best not found"
+                    [[ -f "$BK_MRL_BASELINE/checkpoint.pt" ]] \
+                        || die "[$DS][$BK] MRL baseline not found at $BK_MRL_BASELINE"
                     python3 scripts/eval_bam.py \
                         --config     "$BK_CFG_F" \
                         --checkpoint "$BK_BEST" \
-                        --baseline   "$MRL_BEST" \
+                        --baseline   "$BK_MRL_BASELINE" \
                         --output_dir "$BK_RESULTS/" \
                         || die "[$DS][$BK] eval_bam.py (BAM-PQ) failed"
                     echo "  Results → $BK_RESULTS/results.json"
@@ -832,16 +841,17 @@ for DS in $DATASETS; do
             fi
 
             if should_run fair_cmp_pq; then
-                log "[$DS][$BK] FAIR COMPARISON — BAM-PQ vs MRL at same per-Bloom budget"
+                log "[$DS][$BK] FAIR COMPARISON — BAM-PQ vs MRL ($BK) at same per-Bloom budget"
                 if [[ ! -f "$BK_BEST/checkpoint.pt" ]]; then
                     echo "  [$BK] best_bsr not found — skipping fair comparison."
                 else
-                    [[ -f "$MRL_BEST/checkpoint.pt" ]] || die "[$DS] MRL best not found"
+                    [[ -f "$BK_MRL_BASELINE/checkpoint.pt" ]] \
+                        || die "[$DS][$BK] MRL baseline not found at $BK_MRL_BASELINE"
                     mkdir -p "$BK_RESULTS/fair_comparison"
                     python3 scripts/eval_fair_comparison.py \
                         --config         "$BK_CFG_F" \
                         --bam_checkpoint "$BK_BEST" \
-                        --mrl_checkpoint "$MRL_BEST" \
+                        --mrl_checkpoint "$BK_MRL_BASELINE" \
                         --bam_results    "$BK_RESULTS/results.json" \
                         --output_dir     "$BK_RESULTS/fair_comparison/" \
                         || die "[$DS][$BK] eval_fair_comparison.py (BAM-PQ) failed"
