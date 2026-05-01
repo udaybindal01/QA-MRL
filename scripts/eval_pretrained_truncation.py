@@ -107,6 +107,9 @@ def main():
                         help="Override corpus path from config")
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--checkpoint", default=None,
+                        help="Optional checkpoint dir (standard FT or MRL). "
+                             "If omitted, evaluates raw pretrained weights.")
     parser.add_argument("--ks", nargs="+", type=int, default=[1, 5, 10, 20, 50, 100])
     args = parser.parse_args()
 
@@ -120,11 +123,12 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ── Load pretrained model (no checkpoint) ────────────────────────────────
     backbone = mc["backbone"]
     is_mrl_native = backbone in MRL_NATIVE_BACKBONES
+    mode = "standard_ft" if args.checkpoint else "pretrained"
     print(f"Model   : {backbone}")
-    print(f"MRL-native (pretrained): {is_mrl_native}")
+    print(f"Mode    : {mode}")
+    print(f"MRL-native (pretrained by authors): {is_mrl_native}")
     print(f"Dims    : {mc['mrl_dims']}")
     print(f"Device  : {device}")
 
@@ -140,6 +144,16 @@ def main():
         query_instruction=mc.get("query_instruction", None),
         peft_model_name=mc.get("peft_model_name", None),
     ).to(device)
+    # ── Load fine-tuned checkpoint if provided ────────────────────────────────
+    if args.checkpoint:
+        ckpt_file = os.path.join(args.checkpoint, "checkpoint.pt")
+        if os.path.exists(ckpt_file):
+            ckpt = torch.load(ckpt_file, map_location="cpu")
+            model.load_state_dict(ckpt["model_state_dict"], strict=False)
+            print(f"  Loaded checkpoint: {ckpt_file}")
+        else:
+            print(f"  WARNING: checkpoint not found at {ckpt_file}, using pretrained weights")
+
     model.eval()
     tokenizer = model.get_tokenizer()
 
@@ -183,7 +197,6 @@ def main():
         print(f"  {d:>6}  {m.get('recall@10', 0):>8.4f}  {m.get('ndcg@10', 0):>10.4f}")
 
     # ── Bloom-stratified at full dim ──────────────────────────────────────────
-    full_d = mc["mrl_dims"][-1]
     q_full = F.normalize(query_embs, p=2, dim=-1)
     c_full = F.normalize(corpus_embs, p=2, dim=-1)
 

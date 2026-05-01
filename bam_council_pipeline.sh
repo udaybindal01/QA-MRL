@@ -94,6 +94,23 @@ declare -A BACKBONE_MRL_MSMARCO_CFG=(
     [gritlm]="configs/mrl_gritlm7b_msmarco.yaml"
 )
 
+declare -A BACKBONE_STANDARD_FT_EDU_CFG=(
+    [e5large]="configs/standard_ft_e5large.yaml"
+    [bge]="configs/standard_ft_bge.yaml"
+    [qwen06b]="configs/standard_ft_qwen06b.yaml"
+    [qwen4b]="configs/standard_ft_qwen4b.yaml"
+    [llm2vec]="configs/standard_ft_llm2vec.yaml"
+    [gritlm]="configs/standard_ft_gritlm.yaml"
+)
+declare -A BACKBONE_STANDARD_FT_MSMARCO_CFG=(
+    [e5large]="configs/standard_ft_e5large_msmarco.yaml"
+    [bge]="configs/standard_ft_bge_msmarco.yaml"
+    [qwen06b]="configs/standard_ft_qwen06b_msmarco.yaml"
+    [qwen4b]="configs/standard_ft_qwen4b_msmarco.yaml"
+    [llm2vec]="configs/standard_ft_llm2vec_msmarco.yaml"
+    [gritlm]="configs/standard_ft_gritlm_msmarco.yaml"
+)
+
 declare -A BACKBONE_EDU_CFG=(
     [e5large]="configs/bam_pq.yaml"
     [bge]="configs/bam_pq_bge_large.yaml"
@@ -146,6 +163,7 @@ ALL_STEPS=(
     train_mrl find_mrl
     train_bam_b find_bam_b
     eval_pretrained
+    train_standard_ft find_standard_ft eval_standard_ft
     train_mrl_bk find_mrl_bk
     train_bam_pq find_bam_pq
     eval fair_cmp eff_curves
@@ -593,6 +611,86 @@ for DS in $DATASETS; do
                     --output_dir  "$PRETRAINED_OUT" \
                     || echo "  WARNING: pretrained truncation eval failed for $BK (non-fatal)"
                 echo "  Results → $PRETRAINED_OUT/pretrained_truncation.json"
+            fi
+        fi
+
+        # ── STEPS 7b–7d: train/find/eval standard FT ────────────────────────
+        # Standard FT baseline: train with mrl_dims=[full_dim] only.
+        # Single-dim MRL loss = standard contrastive InfoNCE, no Matryoshka.
+        # Isolates whether the multi-resolution structure (MRL) adds value.
+        BK_SFT_CKPT="$CKPT_ROOT/$DS/standard_ft_$BK"
+        BK_SFT_CFG="$CFG_DIR/standard_ft_${BK}.yaml"
+        BK_SFT_BEST="$BK_SFT_CKPT/best"
+        mkdir -p "$BK_SFT_CKPT"
+
+        if [[ "$IS_MSMARCO" == "1" ]]; then
+            BASE_BK_SFT_CFG="${BACKBONE_STANDARD_FT_MSMARCO_CFG[$BK]}"
+        else
+            BASE_BK_SFT_CFG="${BACKBONE_STANDARD_FT_EDU_CFG[$BK]}"
+        fi
+        if [[ ! -f "$BK_SFT_CFG" ]]; then
+            make_config "$BASE_BK_SFT_CFG" "$BK_SFT_CFG" \
+                "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BK_SFT_CKPT/"
+        fi
+
+        if should_run train_standard_ft; then
+            log "[$DS][$BK] TRAIN STANDARD FT BASELINE (contrastive only, no Matryoshka)"
+            if [[ "$FORCE" == "1" ]] || [[ "$BLOOM_COUNCIL_REFRESHED" == "1" ]]; then
+                rm -rf "$BK_SFT_CKPT"/epoch_* "$BK_SFT_CKPT"/best "$BK_SFT_CKPT"/final 2>/dev/null || true
+            fi
+            if [[ "$REUSE_TRAINED_MODELS" == "1" ]] && [[ "$FORCE" != "1" ]] \
+                && { [[ -f "$BK_SFT_BEST/checkpoint.pt" ]] || ls "$BK_SFT_CKPT"/epoch_* &>/dev/null 2>&1; }; then
+                echo "  Standard FT ($BK) checkpoint exists — skipping."
+            else
+                python3 scripts/train_baseline_mrl.py \
+                    --config         "$BK_SFT_CFG" \
+                    --checkpoint_dir "$BK_SFT_CKPT" \
+                    || die "[$DS][$BK] Standard FT training failed"
+            fi
+        fi
+
+        if should_run find_standard_ft; then
+            if [[ "$IS_MSMARCO" == "1" ]]; then
+                log "[$DS][$BK] SELECT BEST STANDARD FT — using final checkpoint"
+                if [[ -f "$BK_SFT_BEST/checkpoint.pt" ]]; then
+                    echo "  Standard FT ($BK) best already linked."
+                elif [[ -f "$BK_SFT_CKPT/final/checkpoint.pt" ]]; then
+                    ln -sfn "$BK_SFT_CKPT/final" "$BK_SFT_BEST"
+                    echo "  Linked $BK_SFT_BEST → final"
+                else
+                    die "[$DS][$BK] Standard FT final checkpoint not found"
+                fi
+            else
+                log "[$DS][$BK] SELECT BEST STANDARD FT EPOCH"
+                if [[ "$FORCE" != "1" ]] && [[ -f "$BK_SFT_BEST/checkpoint.pt" ]]; then
+                    echo "  Standard FT ($BK) best already selected."
+                else
+                    python3 scripts/find_best_epoch.py \
+                        --config         "$BK_SFT_CFG" \
+                        --checkpoint_dir "$BK_SFT_CKPT" \
+                        --model_type     mrl \
+                        || die "[$DS][$BK] find_best_epoch (standard FT) failed"
+                fi
+            fi
+        fi
+
+        if should_run eval_standard_ft; then
+            log "[$DS][$BK] EVAL STANDARD FT BASELINE"
+            SFT_OUT="$BK_RESULTS/standard_ft"
+            mkdir -p "$SFT_OUT"
+            if [[ -f "$SFT_OUT/pretrained_truncation.json" ]] && [[ "$FORCE" != "1" ]]; then
+                echo "  Standard FT baseline already evaluated — skipping."
+            elif [[ ! -f "$BK_SFT_BEST/checkpoint.pt" ]]; then
+                echo "  Standard FT ($BK) checkpoint not found — skipping eval."
+            else
+                python3 scripts/eval_pretrained_truncation.py \
+                    --config      "$BK_SFT_CFG" \
+                    --test_path   "$TEST_PATH" \
+                    --corpus_path "$CORPUS_PATH" \
+                    --checkpoint  "$BK_SFT_BEST" \
+                    --output_dir  "$SFT_OUT" \
+                    || echo "  WARNING: standard FT eval failed for $BK (non-fatal)"
+                echo "  Results → $SFT_OUT/pretrained_truncation.json"
             fi
         fi
 
