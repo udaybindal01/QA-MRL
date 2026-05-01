@@ -5,7 +5,7 @@
 # Models trained per dataset:
 #   MRL baseline    — intfloat/e5-large-v2
 #   BAM-B           — intfloat/e5-large-v2
-#   BAM-PQ ×5       — e5-large | Qwen-0.6B | Qwen-4B | LLM2Vec-7B | GritLM-7B
+#   BAM-PQ ×6       — e5-large | BGE-large | Qwen-0.6B | Qwen-4B | LLM2Vec-7B | GritLM-7B
 #
 # Datasets:
 #   educational     — SciQ / ARC / OpenBookQA / QASC  (small, curriculum negatives)
@@ -43,7 +43,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
-DATASETS="${DATASETS:-educational scifact nfcorpus fiqa}"
+DATASETS="${DATASETS:-educational msmarco scifact nfcorpus fiqa}"
 BEIR_DATA_ROOT="/tmp/data/beir"
 MSMARCO_DATA_DIR="/tmp/data/msmarco"
 MSMARCO_MAX_TRAIN="${MSMARCO_MAX_TRAIN:-50000}"
@@ -75,6 +75,7 @@ BASE_BAM_B_CONFIG="configs/bam_optionb_e5large.yaml"
 
 declare -A BACKBONE_EDU_CFG=(
     [e5large]="configs/bam_pq.yaml"
+    [bge]="configs/bam_pq_bge_large.yaml"
     [qwen06b]="configs/bam_pq_qwen06b.yaml"
     [qwen4b]="configs/bam_pq_qwen4b.yaml"
     [llm2vec]="configs/bam_pq_llm2vec_mistral7b.yaml"
@@ -82,6 +83,7 @@ declare -A BACKBONE_EDU_CFG=(
 )
 declare -A BACKBONE_MSMARCO_CFG=(
     [e5large]="configs/bam_pq_msmarco.yaml"
+    [bge]="configs/bam_pq_bge_large_msmarco.yaml"
     [qwen06b]="configs/bam_pq_qwen06b_msmarco.yaml"
     [qwen4b]="configs/bam_pq_qwen4b_msmarco.yaml"
     [llm2vec]="configs/bam_pq_llm2vec_mistral7b_msmarco.yaml"
@@ -92,7 +94,7 @@ declare -A BACKBONE_MSMARCO_CFG=(
 BACKBONE_USE_MRL_INIT="e5large"
 
 # Which backbones to run for BAM-PQ (override with --backbone or BACKBONES_TO_RUN)
-BACKBONES_TO_RUN="${BACKBONES_TO_RUN:-e5large qwen06b qwen4b llm2vec gritlm}"
+BACKBONES_TO_RUN="${BACKBONES_TO_RUN:-e5large bge qwen06b qwen4b llm2vec gritlm}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ARGUMENT PARSING
