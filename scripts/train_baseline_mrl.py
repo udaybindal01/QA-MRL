@@ -43,6 +43,9 @@ def main():
         normalize=mc["normalize_embeddings"],
         torch_dtype=mc.get("torch_dtype", None),
         gradient_checkpointing=tc.get("gradient_checkpointing", False),
+        backbone_type=mc.get("backbone_type", "standard"),
+        query_instruction=mc.get("query_instruction", None),
+        peft_model_name=mc.get("peft_model_name", None),
     )
 
     if args.resume:
