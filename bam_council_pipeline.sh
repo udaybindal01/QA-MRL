@@ -224,27 +224,36 @@ check_backbone_loadable() {
     if [[ "$bk" != "llm2vec" && "$bk" != "llama8b" && "$bk" != "gritlm" && "$bk" != "qwen8b" ]]; then
         return 0   # small models: always fine
     fi
-    # Check required library is installed for LLM2Vec-based models
-    # Use the same Python interpreter that runs the pipeline scripts
-    PYEXEC="${PYTHON_EXEC:-$(which python3)}"
+    # Resolve Python: prefer PYTHON_EXEC env var, then active venv, then PATH.
+    # This avoids false negatives when the user's venv is active but PYTHON_EXEC isn't exported.
+    local pyexec
+    if [[ -n "${PYTHON_EXEC:-}" ]]; then
+        pyexec="$PYTHON_EXEC"
+    elif [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python3" ]]; then
+        pyexec="$VIRTUAL_ENV/bin/python3"
+    else
+        pyexec="$(which python3 2>/dev/null || echo python3)"
+    fi
     if [[ "$bk" == "llm2vec" || "$bk" == "llama8b" ]]; then
-        "$PYEXEC" -c "import llm2vec" 2>/dev/null || {
-            echo "  SKIP [$bk]: llm2vec library not installed."
+        "$pyexec" -c "import llm2vec" 2>/dev/null || {
+            echo "  SKIP [$bk]: llm2vec library not installed in $pyexec."
             echo "    Training requires proper LoRA loading. Run: pip install llm2vec"
+            echo "    Or set: export PYTHON_EXEC=/path/to/venv/bin/python3"
             return 1
         }
     elif [[ "$bk" == "gritlm" ]]; then
-        "$PYEXEC" -c "import gritlm" 2>/dev/null || {
-            echo "  SKIP [$bk]: gritlm library not installed."
+        "$pyexec" -c "import gritlm" 2>/dev/null || {
+            echo "  SKIP [$bk]: gritlm library not installed in $pyexec."
             echo "    Training requires proper model loading. Run: pip install gritlm"
+            echo "    Or set: export PYTHON_EXEC=/path/to/venv/bin/python3"
             return 1
         }
     fi
-    # Check disk space
+    # Check disk space — use df with 1K blocks (POSIX-portable) then convert
     local free_mb
-    free_mb=$(df -m "$HF_CACHE_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+    free_mb=$(df -k "$HF_CACHE_DIR" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1024}')
     if [[ -z "$free_mb" ]]; then return 0; fi
-    if [[ "$free_mb" -lt "$LARGE_MODEL_MIN_FREE_MB" ]]; then
+    if (( free_mb < LARGE_MODEL_MIN_FREE_MB )); then
         echo "  SKIP [$bk]: only ${free_mb} MB free in $HF_CACHE_DIR"
         echo "    Need ≥ ${LARGE_MODEL_MIN_FREE_MB} MB to load 7B model weights."
         echo "    Fix: export HF_HOME=/path/with/more/space  then re-run."
@@ -296,6 +305,16 @@ echo "  Force             : $FORCE"
 # Validate backbone registry
 for BK in $BACKBONES_TO_RUN; do
     [[ -n "${BACKBONE_EDU_CFG[$BK]+x}" ]] || die "Unknown backbone: $BK"
+done
+
+# Warn when BEIR datasets are requested but BEIR_DATA_ROOT looks empty
+for DS in $DATASETS; do
+    case "$DS" in educational|msmarco) continue ;; esac
+    if [[ ! -f "$BEIR_DATA_ROOT/$DS/corpus.jsonl" ]]; then
+        echo "WARNING: BEIR corpus not found at $BEIR_DATA_ROOT/$DS/corpus.jsonl"
+        echo "  If your BEIR data is elsewhere, set: export BEIR_DATA_ROOT=/path/to/beir"
+        echo "  Otherwise the build step will download it."
+    fi
 done
 
 # ─────────────────────────────────────────────────────────────────────────────
