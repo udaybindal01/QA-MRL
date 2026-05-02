@@ -162,8 +162,26 @@ class MRLEncoder(nn.Module):
             err = result2
         raise err
 
+    @staticmethod
+    def _patch_mistral_config_rope_theta():
+        """Compatibility shim: add rope_theta to MistralConfig for transformers < 4.35."""
+        try:
+            from transformers import MistralConfig
+            if not hasattr(MistralConfig, 'rope_theta'):
+                _orig_init = MistralConfig.__init__
+                def _patched(self, *args, rope_theta=10000.0, **kwargs):
+                    _orig_init(self, *args, **kwargs)
+                    if not hasattr(self, 'rope_theta'):
+                        self.rope_theta = rope_theta
+                MistralConfig.__init__ = _patched
+                print("  Applied MistralConfig.rope_theta shim (transformers < 4.35 compat).")
+        except Exception:
+            pass
+
     def _load_gritlm(self, model_name: str, dtype):
         """Load GritLM; retries with local_files_only on network / disk-space errors."""
+        self._patch_mistral_config_rope_theta()
+
         def _try_load(local_only: bool):
             kw = {"local_files_only": True} if local_only else {}
             try:

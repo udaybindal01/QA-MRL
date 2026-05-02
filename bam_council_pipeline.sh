@@ -225,14 +225,16 @@ check_backbone_loadable() {
         return 0   # small models: always fine
     fi
     # Check required library is installed for LLM2Vec-based models
+    # Use the same Python interpreter that runs the pipeline scripts
+    PYEXEC="${PYTHON_EXEC:-$(which python3)}"
     if [[ "$bk" == "llm2vec" || "$bk" == "llama8b" ]]; then
-        python3 -c "import llm2vec" 2>/dev/null || {
+        "$PYEXEC" -c "import llm2vec" 2>/dev/null || {
             echo "  SKIP [$bk]: llm2vec library not installed."
             echo "    Training requires proper LoRA loading. Run: pip install llm2vec"
             return 1
         }
     elif [[ "$bk" == "gritlm" ]]; then
-        python3 -c "import gritlm" 2>/dev/null || {
+        "$PYEXEC" -c "import gritlm" 2>/dev/null || {
             echo "  SKIP [$bk]: gritlm library not installed."
             echo "    Training requires proper model loading. Run: pip install gritlm"
             return 1
