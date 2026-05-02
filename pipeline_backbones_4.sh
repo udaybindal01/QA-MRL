@@ -37,7 +37,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-BACKBONES_TO_RUN="qwen8b llama8b llama1b llama3b" \
+BACKBONES_TO_RUN="llama1b llama3b" \
 exec bash "$SCRIPT_DIR/bam_council_pipeline.sh" \
     --from eval_pretrained \
     "$@"
