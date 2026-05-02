@@ -841,8 +841,9 @@ for DS in $DATASETS; do
     if [[ "$IS_MSMARCO" == "1" ]]; then
 
         if should_run eval || should_run eval_bam_pq; then
-            [[ -f "$MRL_BEST/checkpoint.pt" ]]   || die "[$DS] MRL best not found"
-            [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "[$DS] BAM-B best not found"
+            if [[ ! -f "$MRL_BEST/checkpoint.pt" ]] || [[ ! -f "$BAM_B_BEST/checkpoint.pt" ]]; then
+                echo "  SKIP [$DS] eval: shared checkpoints not found — run pipeline_shared.sh first."
+            else
 
             # Build --bam_pq_checkpoint / --bam_pq_config args for eval_zero_shot.py
             # Use e5large BAM-PQ as the "primary" PQ model for the combined script;
@@ -925,6 +926,7 @@ for DS in $DATASETS; do
                     || echo "  WARNING: zero-shot eval failed for backbone $BK"
                 echo "  Zero-shot [$BK] → $ZERO_SHOT_BK/zero_shot_results.json"
             done
+            fi  # end shared-checkpoint guard
         fi
 
     else  # ── Non-MS MARCO datasets ──────────────────────────────────────────
@@ -932,8 +934,11 @@ for DS in $DATASETS; do
         # STEP 9: eval BAM-B
         if should_run eval; then
             log "[$DS] EVAL — BAM-B vs MRL"
-            [[ -f "$MRL_BEST/checkpoint.pt" ]]   || die "[$DS] MRL best not found"
-            [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "[$DS] BAM-B best not found"
+            if [[ ! -f "$MRL_BEST/checkpoint.pt" ]]; then
+                echo "  SKIP: MRL best not found at $MRL_BEST — run pipeline_shared.sh first."
+            elif [[ ! -f "$BAM_B_BEST/checkpoint.pt" ]]; then
+                echo "  SKIP: BAM-B best not found at $BAM_B_BEST — run pipeline_shared.sh first."
+            else
             python3 scripts/eval_bam.py \
                 --config     "$BAM_B_CFG" \
                 --checkpoint "$BAM_B_BEST" \
@@ -941,13 +946,15 @@ for DS in $DATASETS; do
                 --output_dir "$DS_RESULTS/" \
                 || die "[$DS] eval_bam.py (BAM-B) failed"
             echo "  Results → $DS_RESULTS/results.json"
+            fi
         fi
 
         # STEP 10: fair comparison BAM-B
         if should_run fair_cmp; then
             log "[$DS] FAIR COMPARISON — BAM-B vs MRL at same per-Bloom budget"
-            [[ -f "$MRL_BEST/checkpoint.pt" ]]   || die "[$DS] MRL best not found"
-            [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || die "[$DS] BAM-B best not found"
+            if [[ ! -f "$MRL_BEST/checkpoint.pt" ]] || [[ ! -f "$BAM_B_BEST/checkpoint.pt" ]]; then
+                echo "  SKIP: shared checkpoints not found — run pipeline_shared.sh first."
+            else
             mkdir -p "$DS_RESULTS/fair_comparison"
             python3 scripts/eval_fair_comparison.py \
                 --config         "$BAM_B_CFG" \
@@ -956,6 +963,7 @@ for DS in $DATASETS; do
                 --bam_results    "$DS_RESULTS/results.json" \
                 --output_dir     "$DS_RESULTS/fair_comparison/" \
                 || die "[$DS] eval_fair_comparison.py (BAM-B) failed"
+            fi
         fi
 
         # STEP 11: efficiency curves
