@@ -31,7 +31,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-BACKBONES_TO_RUN="gritlm" \
+BACKBONES_TO_RUN="llm2vec gritlm arctic roberta phi3mini" \
 REUSE_TRAINED_MODELS=1 \
 exec bash "$SCRIPT_DIR/bam_council_pipeline.sh" \
     --from train_mrl_bk \
