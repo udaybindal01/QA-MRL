@@ -45,16 +45,16 @@ set -euo pipefail
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 DATASETS="${DATASETS:-educational msmarco scifact nfcorpus fiqa}"
-BEIR_DATA_ROOT="/tmp/data/beir"
-MSMARCO_DATA_DIR="/tmp/data/msmarco"
+BEIR_DATA_ROOT="${BEIR_DATA_ROOT:-/tmp/data/beir}"
+MSMARCO_DATA_DIR="${MSMARCO_DATA_DIR:-/tmp/data/msmarco}"
 MSMARCO_MAX_TRAIN="${MSMARCO_MAX_TRAIN:-50000}"
 MSMARCO_EVAL_CORPUS_SIZE="${MSMARCO_EVAL_CORPUS_SIZE:-500000}"
 ZERO_SHOT_DATASETS="${ZERO_SHOT_DATASETS:-scifact nfcorpus fiqa}"
-EDU_DATA_DIR="./data/real"
-CKPT_ROOT="/tmp/multi-domain"
-RESULTS_ROOT="./results/multi_domain"
+EDU_DATA_DIR="${EDU_DATA_DIR:-./data/real}"
+CKPT_ROOT="${CKPT_ROOT:-/tmp/multi-domain}"
+RESULTS_ROOT="${RESULTS_ROOT:-./results/multi_domain}"
 BSR_ALPHA="0.5"
-COUNCIL_DIR="/tmp/bloom-council"
+COUNCIL_DIR="${COUNCIL_DIR:-/tmp/bloom-council}"
 COUNCIL_WEIGHTS="$COUNCIL_DIR/council_weights.json"
 ANNOTATE_BATCH_SIZE="64"
 NUM_NEG=15          # hard negatives per query (was 7; 15 matches modern IR practice)
