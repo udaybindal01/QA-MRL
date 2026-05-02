@@ -477,21 +477,19 @@ for DS in $DATASETS; do
         done
     fi
 
-    # Ensure configs exist even if build was skipped via --from
-    [[ -f "$MRL_CFG" ]] || make_config "$BASE_MRL_CONFIG"   "$MRL_CFG"   "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$MRL_CKPT/"
-    [[ -f "$BAM_B_CFG" ]] || make_config "$BASE_BAM_B_CONFIG" "$BAM_B_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BAM_B_CKPT/"
+    # Always regenerate configs — ensures changes to base configs propagate
+    make_config "$BASE_MRL_CONFIG"   "$MRL_CFG"   "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$MRL_CKPT/"
+    make_config "$BASE_BAM_B_CONFIG" "$BAM_B_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BAM_B_CKPT/"
     for BK in $BACKBONES_TO_RUN; do
         BK_CFG="$CFG_DIR/bam_pq_${BK}.yaml"
-        if [[ ! -f "$BK_CFG" ]]; then
-            BK_CKPT="$CKPT_ROOT/$DS/bam_pq_$BK"
-            mkdir -p "$BK_CKPT"
-            if [[ "$IS_MSMARCO" == "1" ]]; then
-                BASE_BK_CFG="${BACKBONE_MSMARCO_CFG[$BK]}"
-            else
-                BASE_BK_CFG="${BACKBONE_EDU_CFG[$BK]}"
-            fi
-            make_config "$BASE_BK_CFG" "$BK_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BK_CKPT/"
+        BK_CKPT="$CKPT_ROOT/$DS/bam_pq_$BK"
+        mkdir -p "$BK_CKPT"
+        if [[ "$IS_MSMARCO" == "1" ]]; then
+            BASE_BK_CFG="${BACKBONE_MSMARCO_CFG[$BK]}"
+        else
+            BASE_BK_CFG="${BACKBONE_EDU_CFG[$BK]}"
         fi
+        make_config "$BASE_BK_CFG" "$BK_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BK_CKPT/"
     done
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -664,10 +662,8 @@ for DS in $DATASETS; do
             BK_MRL_CFG="$MRL_CFG"
             BK_MRL_BEST="$MRL_BEST"
         else
-            if [[ ! -f "$BK_MRL_CFG" ]]; then
-                make_config "$BASE_BK_MRL_CFG" "$BK_MRL_CFG" \
-                    "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BK_MRL_CKPT/"
-            fi
+            make_config "$BASE_BK_MRL_CFG" "$BK_MRL_CFG" \
+                "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BK_MRL_CKPT/"
         fi
 
         # ── STEP 7: eval_pretrained ──────────────────────────────────────────
@@ -704,10 +700,8 @@ for DS in $DATASETS; do
         else
             BASE_BK_SFT_CFG="${BACKBONE_STANDARD_FT_EDU_CFG[$BK]}"
         fi
-        if [[ ! -f "$BK_SFT_CFG" ]]; then
-            make_config "$BASE_BK_SFT_CFG" "$BK_SFT_CFG" \
-                "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BK_SFT_CKPT/"
-        fi
+        make_config "$BASE_BK_SFT_CFG" "$BK_SFT_CFG" \
+            "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BK_SFT_CKPT/"
 
         if should_run train_standard_ft; then
             log "[$DS][$BK] TRAIN STANDARD FT BASELINE (contrastive only, no Matryoshka)"
