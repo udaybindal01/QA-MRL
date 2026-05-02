@@ -720,7 +720,7 @@ for DS in $DATASETS; do
         fi
 
         if should_run find_standard_ft; then
-            if [[ "$IS_MSMARCO" == "1" ]]; then
+            if [[ "$IS_MSMARCO" == "1" || "$BK" == "qwen8b" || "$BK" == "llama8b" || "$BK" == "qwen4b" ]]; then
                 log "[$DS][$BK] SELECT BEST STANDARD FT — using final checkpoint"
                 if [[ -f "$BK_SFT_BEST/checkpoint.pt" ]]; then
                     echo "  Standard FT ($BK) best already linked."
@@ -788,7 +788,7 @@ for DS in $DATASETS; do
 
             # ── STEP 8: find_mrl_bk ──────────────────────────────────────────
             if should_run find_mrl_bk; then
-                if [[ "$IS_MSMARCO" == "1" ]]; then
+                if [[ "$IS_MSMARCO" == "1" || "$BK" == "qwen8b" || "$BK" == "llama8b" || "$BK" == "qwen4b" ]]; then
                     log "[$DS][$BK] SELECT BEST MRL — using final checkpoint"
                     if [[ -f "$BK_MRL_BEST/checkpoint.pt" ]]; then
                         echo "  MRL ($BK) best already linked."
@@ -840,7 +840,7 @@ for DS in $DATASETS; do
 
         # ── STEP 8: find_bam_pq ──────────────────────────────────────────────
         if should_run find_bam_pq; then
-            if [[ "$IS_MSMARCO" == "1" ]]; then
+            if [[ "$IS_MSMARCO" == "1" || "$BK" == "qwen8b" || "$BK" == "llama8b" || "$BK" == "qwen4b" ]]; then
                 log "[$DS][$BK] BSR SELECTION BAM-PQ — using final checkpoint"
                 if [[ -f "$BK_BEST/checkpoint.pt" ]]; then
                     echo "  BAM-PQ ($BK) best already linked."
