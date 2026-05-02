@@ -5,6 +5,15 @@ import torch
 import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+
+from tqdm import tqdm
+
+from models.encoder import MRLEncoder
+from models.losses import MRLContrastiveLoss, InfoNCELoss
+from utils.misc import AverageMeter, move_to_device, set_seed, count_parameters
+from utils.logging_utils import setup_logger, WandbLogger
+
 
 def _make_optimizer(params, lr, weight_decay, use_8bit=False):
     """AdamW8bit (bitsandbytes) if requested and available, else standard AdamW.
@@ -18,14 +27,54 @@ def _make_optimizer(params, lr, weight_decay, use_8bit=False):
             print("WARNING: bitsandbytes not installed — falling back to standard AdamW. "
                   "Install with: pip install bitsandbytes")
     return AdamW(params, lr=lr, weight_decay=weight_decay)
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from typing import Dict
-from tqdm import tqdm
 
-from models.encoder import MRLEncoder
-from models.losses import MRLContrastiveLoss, InfoNCELoss
-from utils.misc import AverageMeter, move_to_device, set_seed, count_parameters
-from utils.logging_utils import setup_logger, WandbLogger
+
+def _freeze_except_last_n_layers(model: MRLEncoder, n: int) -> int:
+    """Freeze all transformer layer blocks except the last n.
+
+    Works for both BERT-style (.encoder.layer[i]) and LLaMA-style (.model.layers[i]).
+    Returns the number of trainable parameters after freezing.
+    """
+    transformer = model.transformer
+
+    # Collect all numbered transformer blocks
+    # Try LLaMA/Qwen style first, then BERT style
+    layers = None
+    for attr_path in ("model.layers", "encoder.layer", "layers"):
+        obj = transformer
+        for part in attr_path.split("."):
+            obj = getattr(obj, part, None)
+            if obj is None:
+                break
+        if obj is not None and hasattr(obj, "__len__"):
+            layers = obj
+            break
+
+    if layers is None:
+        print(f"WARNING: could not locate transformer blocks — skipping layer freeze.")
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    num_layers = len(layers)
+    freeze_up_to = num_layers - n
+    print(f"  Freezing layers 0–{freeze_up_to - 1}, keeping layers {freeze_up_to}–{num_layers - 1} trainable.")
+
+    # Freeze embeddings
+    for sub in ("embeddings", "embed_tokens", "wte", "wpe"):
+        emb = getattr(transformer, sub, None)
+        if emb is not None:
+            for p in emb.parameters():
+                p.requires_grad = False
+
+    # Freeze transformer blocks
+    for i, layer in enumerate(layers):
+        requires_grad = i >= freeze_up_to
+        for p in layer.parameters():
+            p.requires_grad = requires_grad
+
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    print(f"  Trainable: {trainable:,} / {total:,} params ({100 * trainable / total:.1f}%)")
+    return trainable
 
 
 class MRLBaselineTrainer:
@@ -50,9 +99,15 @@ class MRLBaselineTrainer:
         self.mrl_loss = MRLContrastiveLoss(mrl_dims=config["model"]["mrl_dims"]).to(self.device)
         self.full_loss = InfoNCELoss().to(self.device)
 
+        # Optional layer freezing — reduces trainable params / optimizer-state memory for 8B models
+        freeze_n = tc.get("freeze_except_last_n_layers", None)
+        if freeze_n is not None:
+            _freeze_except_last_n_layers(model, int(freeze_n))
+
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
         use_8bit = tc.get("optim_8bit", False)
         self.optimizer = _make_optimizer(
-            model.parameters(),
+            trainable_params,
             lr=tc["optimizer"]["lr"],
             weight_decay=tc["optimizer"]["weight_decay"],
             use_8bit=use_8bit,

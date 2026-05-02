@@ -31,6 +31,7 @@ training:
   gradient_checkpointing: true
   max_grad_norm: 1.0
   optim_8bit: true
+  freeze_except_last_n_layers: 4
   optimizer:
     type: "adamw"
     lr: 2.0e-5
