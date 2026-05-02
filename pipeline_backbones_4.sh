@@ -39,5 +39,5 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BACKBONES_TO_RUN="llama1b llama3b" \
 exec bash "$SCRIPT_DIR/bam_council_pipeline.sh" \
-    --from eval_pretrained \
+    --from train_mrl_bk \
     "$@"
