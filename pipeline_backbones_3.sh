@@ -33,5 +33,5 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BACKBONES_TO_RUN="llm2vec gritlm" \
 exec bash "$SCRIPT_DIR/bam_council_pipeline.sh" \
-    --from eval_pretrained \
+    --from train_classifier \
     "$@"
