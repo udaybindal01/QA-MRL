@@ -209,9 +209,24 @@ check_backbone_loadable() {
     if [[ "$bk" != "llm2vec" && "$bk" != "gritlm" ]]; then
         return 0   # small models: always fine
     fi
+    # Check required library is installed — without it we can't train 7B models
+    if [[ "$bk" == "llm2vec" ]]; then
+        python3 -c "import llm2vec" 2>/dev/null || {
+            echo "  SKIP [$bk]: llm2vec library not installed."
+            echo "    Training requires proper LoRA loading. Run: pip install llm2vec"
+            return 1
+        }
+    elif [[ "$bk" == "gritlm" ]]; then
+        python3 -c "import gritlm" 2>/dev/null || {
+            echo "  SKIP [$bk]: gritlm library not installed."
+            echo "    Training requires proper model loading. Run: pip install gritlm"
+            return 1
+        }
+    fi
+    # Check disk space
     local free_mb
     free_mb=$(df -m "$HF_CACHE_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
-    if [[ -z "$free_mb" ]]; then return 0; fi   # can't check — try anyway
+    if [[ -z "$free_mb" ]]; then return 0; fi
     if [[ "$free_mb" -lt "$LARGE_MODEL_MIN_FREE_MB" ]]; then
         echo "  SKIP [$bk]: only ${free_mb} MB free in $HF_CACHE_DIR"
         echo "    Need ≥ ${LARGE_MODEL_MIN_FREE_MB} MB to load 7B model weights."

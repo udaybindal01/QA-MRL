@@ -57,6 +57,18 @@ def main():
         else:
             print(f"WARNING: checkpoint not found at {ckpt_path}, starting from scratch")
 
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    if trainable == 0:
+        backbone = mc["backbone"]
+        backbone_type = mc.get("backbone_type", "standard")
+        raise RuntimeError(
+            f"Model has 0 trainable parameters ({backbone}, type={backbone_type}).\n"
+            f"For llm2vec/gritlm this usually means the required library is not installed\n"
+            f"and the AutoModel fallback loaded a frozen PEFT checkpoint.\n"
+            f"Fix: pip install llm2vec   (for LLM2Vec)\n"
+            f"     pip install gritlm    (for GritLM)"
+        )
+
     loaders = build_dataloaders(config, model.get_tokenizer())
 
     trainer = MRLBaselineTrainer(config, model, loaders.get("train"), loaders.get("val"))
