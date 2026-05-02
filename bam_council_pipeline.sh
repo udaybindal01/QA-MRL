@@ -813,8 +813,13 @@ for DS in $DATASETS; do
             fi
         fi  # end non-e5large MRL
 
-        # All backbones warm-start BAM-PQ from their own backbone-matched MRL
-        INIT_ENCODER_ARG="--init_encoder $BK_MRL_BEST"
+        # e5large BAM-PQ warms from BAM-B (encoder already mask-adapted, bloom_logit pre-trained).
+        # Other backbones have no BAM-B — warm from their own backbone-matched MRL.
+        if [[ "$BK" == "e5large" ]] && [[ -f "$BAM_B_BEST/checkpoint.pt" ]]; then
+            INIT_ENCODER_ARG="--init_encoder $BAM_B_BEST"
+        else
+            INIT_ENCODER_ARG="--init_encoder $BK_MRL_BEST"
+        fi
 
         # ── STEP 9: train_bam_pq ─────────────────────────────────────────────
         if should_run train_bam_pq; then
