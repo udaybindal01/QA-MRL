@@ -30,6 +30,7 @@ training:
   bf16: true
   gradient_checkpointing: true
   max_grad_norm: 1.0
+  optim_8bit: true           # 8-bit Adam: cuts optimizer states 30 GB → 7.5 GB (fits A40)
   optimizer:
     type: "adamw"
     lr: 2.0e-5

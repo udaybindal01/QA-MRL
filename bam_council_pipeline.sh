@@ -41,6 +41,9 @@
 
 set -euo pipefail
 
+# Reduce CUDA memory fragmentation (helps large models on 40/48 GB GPUs)
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
