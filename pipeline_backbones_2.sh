@@ -30,6 +30,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BACKBONES_TO_RUN="qwen06b qwen4b" \
+REUSE_TRAINED_MODELS=1 \
 exec bash "$SCRIPT_DIR/bam_council_pipeline.sh" \
     --from train_classifier \
     "$@"
