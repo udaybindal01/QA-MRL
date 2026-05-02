@@ -439,7 +439,7 @@ class BAMTrainer:
             all_q.append(out["query_masked"].cpu())
             all_p.append(out["positive_embedding"].cpu())
 
-        q, p = torch.cat(all_q), torch.cat(all_p)
+        q, p = torch.cat(all_q).float(), torch.cat(all_p).float()
         sim = torch.mm(q, p.t())
         n = sim.size(0)
 
