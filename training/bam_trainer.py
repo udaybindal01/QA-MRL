@@ -177,6 +177,15 @@ class BAMTrainer:
             )
             self.model.unfreeze_encoder()
 
+            # Enable gradient checkpointing to avoid OOM from storing all encoder activations
+            # during backward pass (frozen stage had no encoder grads; now we need them).
+            try:
+                self.model.encoder.transformer.gradient_checkpointing_enable()
+                self.logger.info("Gradient checkpointing enabled for encoder fine-tuning.")
+            except AttributeError:
+                pass
+            torch.cuda.empty_cache()
+
             # Rebuild optimizer with encoder params at low LR + routing params at router_lr
             oc = self.config["training"]["optimizer"]
             fast_lr = oc.get("router_lr", oc["encoder_lr"] * 10)
