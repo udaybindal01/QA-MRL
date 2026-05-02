@@ -235,17 +235,17 @@ check_backbone_loadable() {
         pyexec="$(which python3 2>/dev/null || echo python3)"
     fi
     if [[ "$bk" == "llm2vec" || "$bk" == "llama8b" ]]; then
-        "$pyexec" -c "import llm2vec" 2>/dev/null || {
-            echo "  SKIP [$bk]: llm2vec library not installed in $pyexec."
-            echo "    Training requires proper LoRA loading. Run: pip install llm2vec"
-            echo "    Or set: export PYTHON_EXEC=/path/to/venv/bin/python3"
+        import_err=$("$pyexec" -c "import llm2vec" 2>&1) || {
+            echo "  SKIP [$bk]: llm2vec import failed in $pyexec."
+            echo "    Error: $import_err"
+            echo "    Run: pip install llm2vec peft accelerate"
             return 1
         }
     elif [[ "$bk" == "gritlm" ]]; then
-        "$pyexec" -c "import gritlm" 2>/dev/null || {
-            echo "  SKIP [$bk]: gritlm library not installed in $pyexec."
-            echo "    Training requires proper model loading. Run: pip install gritlm"
-            echo "    Or set: export PYTHON_EXEC=/path/to/venv/bin/python3"
+        import_err=$("$pyexec" -c "import gritlm" 2>&1) || {
+            echo "  SKIP [$bk]: gritlm import failed in $pyexec."
+            echo "    Error: $import_err"
+            echo "    Run: pip install gritlm"
             return 1
         }
     fi
