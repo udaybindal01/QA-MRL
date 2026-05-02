@@ -24,13 +24,13 @@ data:
   subjects: ["general"]
   max_query_length: 64
   max_passage_length: 128
-  num_hard_negatives: 7
+  num_hard_negatives: 3
 
 training:
   seed: 42
   num_epochs: 20
-  batch_size: 2
-  gradient_accumulation_steps: 64
+  batch_size: 1
+  gradient_accumulation_steps: 128
   fp16: false
   bf16: true
   max_grad_norm: 1.0
