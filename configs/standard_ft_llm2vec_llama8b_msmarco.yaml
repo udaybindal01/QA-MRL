@@ -17,8 +17,8 @@ data:
   corpus_path: "/tmp/data/msmarco/corpus.jsonl"
   bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
   subjects: ["general"]
-  max_query_length: 128
-  max_passage_length: 256
+  max_query_length: 64
+  max_passage_length: 128
   num_hard_negatives: 15
 
 training:
