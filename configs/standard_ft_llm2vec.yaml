@@ -1,0 +1,68 @@
+# Standard Fine-tuning Baseline — McGill-NLP/LLM2Vec-Mistral-7B-Instruct-v2-mntp — educational
+# mrl_dims: [4096] only → standard contrastive loss, no Matryoshka.
+# Isolates: does MRL structure add value over plain domain fine-tuning?
+
+data:
+  bloom_levels:
+    1: Remember
+    2: Understand
+    3: Apply
+    4: Analyze
+    5: Evaluate
+    6: Create
+  corpus_path: ./data/real/corpus.jsonl
+  max_passage_length: 256
+  max_query_length: 128
+  num_hard_negatives: 15
+  subjects:
+  - biology
+  - chemistry
+  - physics
+  - earth_science
+  - general_science
+  test_path: ./data/real/test.jsonl
+  train_path: ./data/real/train_curriculum.jsonl
+  val_path: ./data/real/val.jsonl
+evaluation:
+  bloom_stratified: true
+  retrieval_ks:
+  - 1
+  - 5
+  - 10
+  - 20
+  - 50
+  - 100
+logging:
+  log_every_n_steps: 10
+  use_wandb: true
+  wandb_entity: null
+  wandb_project: bam-emnlp
+model:
+  backbone: McGill-NLP/LLM2Vec-Mistral-7B-Instruct-v2-mntp
+  backbone_type: llm2vec
+  embedding_dim: 4096
+  mrl_dims:
+  - 4096
+  normalize_embeddings: true
+  peft_model_name: McGill-NLP/LLM2Vec-Mistral-7B-Instruct-v2-mntp-supervised
+  pooling: mean
+  torch_dtype: bfloat16
+training:
+  batch_size: 4
+  bf16: true
+  checkpoint_dir: /tmp/standard-ft-llm2vec-ckpts/
+  encoder_freeze_after_epochs: 0
+  eval_every_n_steps: 500
+  fp16: false
+  gradient_accumulation_steps: 32
+  max_grad_norm: 1.0
+  num_epochs: 15
+  optimizer:
+    lr: 2.0e-05
+    type: adamw
+    weight_decay: 0.01
+  save_every_n_steps: 1000
+  scheduler:
+    type: cosine
+    warmup_ratio: 0.1
+  seed: 42
