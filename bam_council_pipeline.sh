@@ -82,7 +82,9 @@ declare -A BACKBONE_MRL_EDU_CFG=(
     [bge]="configs/mrl_bge_large.yaml"
     [qwen06b]="configs/mrl_qwen06b.yaml"
     [qwen4b]="configs/mrl_qwen4b.yaml"
+    [qwen8b]="configs/mrl_qwen8b.yaml"
     [llm2vec]="configs/mrl_llm2vec_mistral7b.yaml"
+    [llama8b]="configs/mrl_llm2vec_llama8b.yaml"
     [gritlm]="configs/mrl_gritlm7b.yaml"
 )
 declare -A BACKBONE_MRL_MSMARCO_CFG=(
@@ -90,7 +92,9 @@ declare -A BACKBONE_MRL_MSMARCO_CFG=(
     [bge]="configs/mrl_bge_large_msmarco.yaml"
     [qwen06b]="configs/mrl_qwen06b_msmarco.yaml"
     [qwen4b]="configs/mrl_qwen4b_msmarco.yaml"
+    [qwen8b]="configs/mrl_qwen8b_msmarco.yaml"
     [llm2vec]="configs/mrl_llm2vec_mistral7b_msmarco.yaml"
+    [llama8b]="configs/mrl_llm2vec_llama8b_msmarco.yaml"
     [gritlm]="configs/mrl_gritlm7b_msmarco.yaml"
 )
 
@@ -99,7 +103,9 @@ declare -A BACKBONE_STANDARD_FT_EDU_CFG=(
     [bge]="configs/standard_ft_bge.yaml"
     [qwen06b]="configs/standard_ft_qwen06b.yaml"
     [qwen4b]="configs/standard_ft_qwen4b.yaml"
+    [qwen8b]="configs/standard_ft_qwen8b.yaml"
     [llm2vec]="configs/standard_ft_llm2vec.yaml"
+    [llama8b]="configs/standard_ft_llm2vec_llama8b.yaml"
     [gritlm]="configs/standard_ft_gritlm.yaml"
 )
 declare -A BACKBONE_STANDARD_FT_MSMARCO_CFG=(
@@ -107,7 +113,9 @@ declare -A BACKBONE_STANDARD_FT_MSMARCO_CFG=(
     [bge]="configs/standard_ft_bge_msmarco.yaml"
     [qwen06b]="configs/standard_ft_qwen06b_msmarco.yaml"
     [qwen4b]="configs/standard_ft_qwen4b_msmarco.yaml"
+    [qwen8b]="configs/standard_ft_qwen8b_msmarco.yaml"
     [llm2vec]="configs/standard_ft_llm2vec_msmarco.yaml"
+    [llama8b]="configs/standard_ft_llm2vec_llama8b_msmarco.yaml"
     [gritlm]="configs/standard_ft_gritlm_msmarco.yaml"
 )
 
@@ -116,7 +124,9 @@ declare -A BACKBONE_EDU_CFG=(
     [bge]="configs/bam_pq_bge_large.yaml"
     [qwen06b]="configs/bam_pq_qwen06b.yaml"
     [qwen4b]="configs/bam_pq_qwen4b.yaml"
+    [qwen8b]="configs/bam_pq_qwen8b.yaml"
     [llm2vec]="configs/bam_pq_llm2vec_mistral7b.yaml"
+    [llama8b]="configs/bam_pq_llm2vec_llama8b.yaml"
     [gritlm]="configs/bam_pq_gritlm7b.yaml"
 )
 declare -A BACKBONE_MSMARCO_CFG=(
@@ -124,15 +134,17 @@ declare -A BACKBONE_MSMARCO_CFG=(
     [bge]="configs/bam_pq_bge_large_msmarco.yaml"
     [qwen06b]="configs/bam_pq_qwen06b_msmarco.yaml"
     [qwen4b]="configs/bam_pq_qwen4b_msmarco.yaml"
+    [qwen8b]="configs/bam_pq_qwen8b_msmarco.yaml"
     [llm2vec]="configs/bam_pq_llm2vec_mistral7b_msmarco.yaml"
+    [llama8b]="configs/bam_pq_llm2vec_llama8b_msmarco.yaml"
     [gritlm]="configs/bam_pq_gritlm7b_msmarco.yaml"
 )
 # All backbones warm-start BAM-PQ from their own backbone-matched MRL checkpoint.
 # e5large MRL is also used for BAM-B (e5large only model).
-BACKBONE_USE_MRL_INIT="e5large bge qwen06b qwen4b llm2vec gritlm"
+BACKBONE_USE_MRL_INIT="e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm"
 
 # Which backbones to run for BAM-PQ (override with --backbone or BACKBONES_TO_RUN)
-BACKBONES_TO_RUN="${BACKBONES_TO_RUN:-e5large bge qwen06b qwen4b llm2vec gritlm}"
+BACKBONES_TO_RUN="${BACKBONES_TO_RUN:-e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ARGUMENT PARSING
@@ -206,11 +218,11 @@ HF_CACHE_DIR="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
 # Returns 0 if backbone can be loaded (cached or enough disk), 1 to skip.
 check_backbone_loadable() {
     local bk="$1"
-    if [[ "$bk" != "llm2vec" && "$bk" != "gritlm" ]]; then
+    if [[ "$bk" != "llm2vec" && "$bk" != "llama8b" && "$bk" != "gritlm" && "$bk" != "qwen8b" ]]; then
         return 0   # small models: always fine
     fi
-    # Check required library is installed — without it we can't train 7B models
-    if [[ "$bk" == "llm2vec" ]]; then
+    # Check required library is installed for LLM2Vec-based models
+    if [[ "$bk" == "llm2vec" || "$bk" == "llama8b" ]]; then
         python3 -c "import llm2vec" 2>/dev/null || {
             echo "  SKIP [$bk]: llm2vec library not installed."
             echo "    Training requires proper LoRA loading. Run: pip install llm2vec"

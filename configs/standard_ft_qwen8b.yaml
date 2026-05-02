@@ -1,0 +1,52 @@
+# Standard FT Baseline — Qwen3-Embedding-8B (contrastive only, no Matryoshka)
+
+model:
+  backbone: "Qwen/Qwen3-Embedding-8B"
+  backbone_type: "qwen"
+  query_instruction: "Instruct: Retrieve relevant educational passages for the query\nQuery: "
+  embedding_dim: 4096
+  pooling: "last_token"
+  normalize_embeddings: true
+  mrl_dims: [4096]
+  torch_dtype: "bfloat16"
+
+data:
+  train_path: "./data/real/train_curriculum.jsonl"
+  val_path: "./data/real/val.jsonl"
+  test_path: "./data/real/test.jsonl"
+  corpus_path: "./data/real/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
+  max_query_length: 128
+  max_passage_length: 256
+  num_hard_negatives: 15
+
+training:
+  seed: 42
+  num_epochs: 15
+  batch_size: 4
+  gradient_accumulation_steps: 32
+  fp16: false
+  bf16: true
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+  optimizer:
+    type: "adamw"
+    lr: 2.0e-5
+    weight_decay: 0.01
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.1
+  checkpoint_dir: "/tmp/standard-ft-qwen8b-ckpts/"
+  save_every_n_steps: 1000
+  eval_every_n_steps: 500
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50, 100]
+  bloom_stratified: true
+
+logging:
+  use_wandb: true
+  wandb_project: "bam-emnlp"
+  wandb_entity: null
+  log_every_n_steps: 10
