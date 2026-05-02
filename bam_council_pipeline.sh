@@ -832,8 +832,12 @@ for DS in $DATASETS; do
                 && { [[ -f "$BK_BEST/checkpoint.pt" ]] || ls "$BK_CKPT"/epoch_* &>/dev/null 2>&1; }; then
                 echo "  BAM-PQ ($BK) checkpoint exists — skipping."
             else
-                [[ -f "$BK_MRL_BEST/checkpoint.pt" ]] \
-                    || die "[$DS][$BK] MRL best not found — run find_mrl_bk first"
+                if [[ "$BK" == "e5large" ]] && [[ -f "$BAM_B_BEST/checkpoint.pt" ]]; then
+                    : # warm from BAM-B — no MRL prereq needed
+                else
+                    [[ -f "$BK_MRL_BEST/checkpoint.pt" ]] \
+                        || die "[$DS][$BK] MRL best not found — run find_mrl_bk first"
+                fi
                 python3 scripts/train_bam.py \
                     --config         "$BK_CFG" \
                     --checkpoint_dir "$BK_CKPT" \
