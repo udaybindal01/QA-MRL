@@ -89,6 +89,8 @@ declare -A BACKBONE_MRL_EDU_CFG=(
     [llm2vec]="configs/mrl_llm2vec_mistral7b.yaml"
     [llama8b]="configs/mrl_llm2vec_llama8b.yaml"
     [gritlm]="configs/mrl_gritlm7b.yaml"
+    [llama1b]="configs/mrl_llama1b.yaml"
+    [llama3b]="configs/mrl_llama3b.yaml"
 )
 declare -A BACKBONE_MRL_MSMARCO_CFG=(
     [e5large]="configs/mrl_e5large_msmarco.yaml"
@@ -99,6 +101,8 @@ declare -A BACKBONE_MRL_MSMARCO_CFG=(
     [llm2vec]="configs/mrl_llm2vec_mistral7b_msmarco.yaml"
     [llama8b]="configs/mrl_llm2vec_llama8b_msmarco.yaml"
     [gritlm]="configs/mrl_gritlm7b_msmarco.yaml"
+    [llama1b]="configs/mrl_llama1b_msmarco.yaml"
+    [llama3b]="configs/mrl_llama3b_msmarco.yaml"
 )
 
 declare -A BACKBONE_STANDARD_FT_EDU_CFG=(
@@ -110,6 +114,8 @@ declare -A BACKBONE_STANDARD_FT_EDU_CFG=(
     [llm2vec]="configs/standard_ft_llm2vec.yaml"
     [llama8b]="configs/standard_ft_llm2vec_llama8b.yaml"
     [gritlm]="configs/standard_ft_gritlm.yaml"
+    [llama1b]="configs/standard_ft_llama1b.yaml"
+    [llama3b]="configs/standard_ft_llama3b.yaml"
 )
 declare -A BACKBONE_STANDARD_FT_MSMARCO_CFG=(
     [e5large]="configs/standard_ft_e5large_msmarco.yaml"
@@ -120,6 +126,8 @@ declare -A BACKBONE_STANDARD_FT_MSMARCO_CFG=(
     [llm2vec]="configs/standard_ft_llm2vec_msmarco.yaml"
     [llama8b]="configs/standard_ft_llm2vec_llama8b_msmarco.yaml"
     [gritlm]="configs/standard_ft_gritlm_msmarco.yaml"
+    [llama1b]="configs/standard_ft_llama1b_msmarco.yaml"
+    [llama3b]="configs/standard_ft_llama3b_msmarco.yaml"
 )
 
 declare -A BACKBONE_EDU_CFG=(
@@ -131,6 +139,8 @@ declare -A BACKBONE_EDU_CFG=(
     [llm2vec]="configs/bam_pq_llm2vec_mistral7b.yaml"
     [llama8b]="configs/bam_pq_llm2vec_llama8b.yaml"
     [gritlm]="configs/bam_pq_gritlm7b.yaml"
+    [llama1b]="configs/bam_pq_llama1b.yaml"
+    [llama3b]="configs/bam_pq_llama3b.yaml"
 )
 declare -A BACKBONE_MSMARCO_CFG=(
     [e5large]="configs/bam_pq_msmarco.yaml"
@@ -141,13 +151,15 @@ declare -A BACKBONE_MSMARCO_CFG=(
     [llm2vec]="configs/bam_pq_llm2vec_mistral7b_msmarco.yaml"
     [llama8b]="configs/bam_pq_llm2vec_llama8b_msmarco.yaml"
     [gritlm]="configs/bam_pq_gritlm7b_msmarco.yaml"
+    [llama1b]="configs/bam_pq_llama1b_msmarco.yaml"
+    [llama3b]="configs/bam_pq_llama3b_msmarco.yaml"
 )
 # All backbones warm-start BAM-PQ from their own backbone-matched MRL checkpoint.
 # e5large MRL is also used for BAM-B (e5large only model).
-BACKBONE_USE_MRL_INIT="e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm"
+BACKBONE_USE_MRL_INIT="e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm llama1b llama3b"
 
 # Which backbones to run for BAM-PQ (override with --backbone or BACKBONES_TO_RUN)
-BACKBONES_TO_RUN="${BACKBONES_TO_RUN:-e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm}"
+BACKBONES_TO_RUN="${BACKBONES_TO_RUN:-e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm llama1b llama3b}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ARGUMENT PARSING
