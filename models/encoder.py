@@ -124,19 +124,26 @@ class MRLEncoder(nn.Module):
         return {"local_files_only": True} if offline else {}
 
     def _load_llm2vec(self, base_model_name: str, peft_model_name: Optional[str], dtype):
-        """Load LLM2Vec; retries with local_files_only on network / disk-space errors."""
-        def _try_load(local_only: bool):
+        """Load LLM2Vec; handles both old and new API conventions, retries on network errors.
+
+        LLM2Vec ≥0.2.x changed from_pretrained to take the supervised PEFT model as the
+        first arg (it infers the base model from the PEFT adapter config).  Older versions
+        expected the base model first + peft_model_name_or_path as a kwarg.  We try the
+        new convention first; if model_class comes back None (AttributeError) we retry with
+        the old convention; if both fail we fall back to plain AutoModel.
+        """
+        def _try_load(first_arg: str, peft_kwarg: Optional[str], local_only: bool):
             kw = {"local_files_only": True} if local_only else {}
             try:
                 from llm2vec import LLM2Vec
-                effective_peft = peft_model_name or base_model_name
-                obj = LLM2Vec.from_pretrained(
-                    base_model_name,
-                    peft_model_name_or_path=effective_peft,
+                load_kw = dict(
                     torch_dtype=dtype or torch.bfloat16,
                     enable_bidirectional=True,
                     **kw,
                 )
+                if peft_kwarg is not None:
+                    load_kw["peft_model_name_or_path"] = peft_kwarg
+                obj = LLM2Vec.from_pretrained(first_arg, **load_kw)
                 self.transformer = obj.model
                 return True
             except ImportError:
@@ -144,23 +151,42 @@ class MRLEncoder(nn.Module):
                     "WARNING: llm2vec not installed — falling back to AutoModel.\n"
                     "Install: pip install llm2vec"
                 )
-                self.transformer = self._load_automodel(
-                    base_model_name, dtype or torch.bfloat16)
+                self.transformer = self._load_automodel(base_model_name, dtype or torch.bfloat16)
                 return True
+            except AttributeError as e:
+                # model_class lookup returned None — wrong API convention or unsupported arch.
+                return e
             except Exception as e:
                 return e
 
-        result = _try_load(local_only=False)
+        # Try new API: supervised PEFT model as primary arg (llm2vec ≥0.2.x)
+        peft = peft_model_name or base_model_name
+        result = _try_load(peft, None, local_only=False)
         if result is True:
             return
+
+        # Try old API: base model primary + peft_model_name_or_path kwarg (llm2vec <0.2)
+        if isinstance(result, (AttributeError, Exception)):
+            print(f"  LLM2Vec new API failed ({type(result).__name__}: {result}) "
+                  f"— retrying with old API (base_model + peft kwarg).")
+            result = _try_load(base_model_name, peft, local_only=False)
+            if result is True:
+                return
+
         err = result
         if _is_network_or_disk_error(err):
-            print(f"  Network/disk error — retrying {base_model_name} with local_files_only.")
-            result2 = _try_load(local_only=True)
-            if result2 is True:
-                return
-            err = result2
-        raise err
+            print(f"  Network/disk error — retrying with local_files_only.")
+            for first, pkw in [(peft, None), (base_model_name, peft)]:
+                r = _try_load(first, pkw, local_only=True)
+                if r is True:
+                    return
+            err = r
+
+        # Both LLM2Vec API attempts failed — fall back to AutoModel (no bidirectional patch)
+        print(f"  WARNING: all LLM2Vec load attempts failed ({type(err).__name__}: {err}).\n"
+              f"  Falling back to AutoModel — bidirectional attention will NOT be applied.\n"
+              f"  To fix: check llm2vec version compatibility with transformers.")
+        self.transformer = self._load_automodel(base_model_name, dtype or torch.bfloat16)
 
     @staticmethod
     def _patch_mistral_config_rope_theta():
