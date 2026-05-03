@@ -98,6 +98,8 @@ def main():
     set_seed(config["training"]["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(config["model"]["backbone"])
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     evaluator = FullEvaluator(config)
 
     test_path = config["data"]["test_path"]
