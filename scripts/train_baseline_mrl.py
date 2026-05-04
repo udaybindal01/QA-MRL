@@ -71,7 +71,14 @@ def main():
 
     loaders = build_dataloaders(config, model.get_tokenizer())
 
-    trainer = MRLBaselineTrainer(config, model, loaders.get("train"), loaders.get("val"))
+    train_loader = loaders.get("train")
+    if train_loader is None:
+        raise RuntimeError(
+            f"Training data not found at: {config['data']['train_path']}\n"
+            f"Run the build step first to download/prepare the dataset."
+        )
+
+    trainer = MRLBaselineTrainer(config, model, train_loader, loaders.get("val"))
     trainer.train()
 
 if __name__ == "__main__":
