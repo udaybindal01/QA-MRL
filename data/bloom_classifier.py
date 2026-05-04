@@ -71,7 +71,6 @@ def _load_council():
         except AttributeError:
             # transformers >=4.50 changed extra_special_tokens format (list vs dict).
             # Fix the saved tokenizer config in-place and retry.
-            import json
             tok_cfg_path = os.path.join(path, "tokenizer_config.json")
             if os.path.exists(tok_cfg_path):
                 with open(tok_cfg_path) as f:
