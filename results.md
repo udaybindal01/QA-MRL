@@ -452,17 +452,17 @@ BAM-PQ adds a per-query residual MLP (alpha-weighted) on top of the per-Bloom ro
 
 ### 7.1 Alpha Convergence Per Backbone
 
-Run `python scripts/extract_alpha.py` on the server to fill this table.
-
-| Backbone | alpha_raw (converged) | alpha = σ(raw) | Interpretation |
-|----------|----------------------|----------------|----------------|
-| e5-large | — | — | Pending |
-| bge-large | — | — | Pending |
-| arctic | — | — | Pending |
-| roberta | — | — | Pending |
-| qwen06b | — | — | Pending |
+| Backbone | alpha_raw (converged) | alpha = σ(raw) | Epoch | Interpretation |
+|----------|----------------------|----------------|-------|----------------|
+| e5-large | -2.5402 | 0.0731 | 9 | Bloom prior dominates; mild per-query contribution |
+| bge-large | — | — | — | Pending (dir not found on available nodes) |
+| arctic | -2.5691 | 0.0712 | 9 | Bloom prior dominates |
+| roberta | -2.5568 | 0.0720 | 9 | Bloom prior dominates |
+| qwen0.6B | -2.9886 | 0.0479 | 0 ⚠️ | Near-init — qwen best epoch=0, likely weak training signal |
 
 **Reference:** alpha_raw=-3.0 → alpha=0.047 (init); alpha_raw=0.0 → alpha=0.500; alpha_raw=+3.0 → alpha=0.953
+
+**Takeaway:** Alpha converges to ~0.07 across all trained backbones — the Bloom-level prior (`E[b]`) carries ~93% of the routing signal. The per-query MLP residual (`Δ(z)`) adds a small but consistent adjustment. Qwen's alpha at epoch 0 reflects the very weak MRL initialization for that backbone.
 
 ---
 
