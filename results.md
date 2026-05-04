@@ -444,10 +444,25 @@ All models use scattered (non-prefix) masks, so per-level dim counts reflect **h
 ## 7. Per-Query Routing (BAM-PQ vs BAM-B)
 
 BAM-PQ adds a per-query residual MLP (alpha-weighted) on top of the per-Bloom routing:
-- Measured alpha ≈ 0.071 (per-query contribution weight)
+- `alpha = sigmoid(alpha_raw)`, init: alpha_raw=-3.0 → alpha≈0.047
+- Alpha grows toward 1 if per-query adjustment helps; stays near 0.05 if Bloom prior alone is sufficient
 - Per-query MLP contributes minimally — most routing signal comes from the Bloom-level component
 - BAM-B (pure Bloom-level routing) achieves comparable or higher R@10 vs BAM-PQ on e5-large (0.5337 vs 0.5297)
 - BAM-PQ advantage shows more clearly on bge-large (0.5358) and qwen06b (0.4915) where encoder quality enables meaningful per-query specialization
+
+### 7.1 Alpha Convergence Per Backbone
+
+Run `python scripts/extract_alpha.py` on the server to fill this table.
+
+| Backbone | alpha_raw (converged) | alpha = σ(raw) | Interpretation |
+|----------|----------------------|----------------|----------------|
+| e5-large | — | — | Pending |
+| bge-large | — | — | Pending |
+| arctic | — | — | Pending |
+| roberta | — | — | Pending |
+| qwen06b | — | — | Pending |
+
+**Reference:** alpha_raw=-3.0 → alpha=0.047 (init); alpha_raw=0.0 → alpha=0.500; alpha_raw=+3.0 → alpha=0.953
 
 ---
 
