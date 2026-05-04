@@ -11,7 +11,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 # ── CONFIG ──────────────────────────────────────────────────
 BACKBONE_NAME="qwen06b"
 CONFIG="configs/bam_pq_qwen06b.yaml"
-CKPT_DIR="/tmp/bam-pq-qwen06b-ckpts"
+CKPT_DIR="/tmp/uday/multi-domain/educational/bam_pq_qwen06b"
 STD_FT_CFG="configs/standard_ft_qwen06b.yaml"
 STD_FT_CKPT="/tmp/uday/multi-domain/educational/standard_ft_qwen06b/best"
 # ────────────────────────────────────────────────────────────
@@ -39,13 +39,12 @@ echo "======================================================"
 #     --model_type bam_pq \
 #     --metric "recall@10"
 
-# # 3. Evaluate BAM-PQ
-# echo "[3/5] Evaluating BAM-PQ ..."
-# python3 scripts/eval_edu_baselines.py \
-#     --config      "$CONFIG" \
-#     --checkpoint  "$CKPT_DIR/best" \
-#     --model_type  bam_pq \
-#     --output_dir  "$OUT_DIR/bam_pq" \
+# 3. Evaluate BAM-PQ
+echo "[3/5] Evaluating BAM-PQ ..."
+python3 scripts/eval_edu_baselines.py \
+    --config         "$CONFIG" \
+    --bam_checkpoint "$CKPT_DIR/best" \
+    --output_dir     "$OUT_DIR/bam_pq"
 
 # # 4. Standard FT baseline
 # echo "[4/5] Standard FT — train ..."

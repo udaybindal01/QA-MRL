@@ -11,11 +11,11 @@ import argparse, os, glob
 import torch
 
 BACKBONES = {
-    "e5large":  "/tmp/bam-pq-ckpts/",
-    "bge":      "/tmp/bam-pq-bge-large-ckpts/",
-    "arctic":   "/tmp/bam-pq-arctic-ckpts/",
-    "roberta":  "/tmp/bam-pq-roberta-ckpts/",
-    "qwen06b":  "/tmp/bam-pq-qwen06b-ckpts/",
+    "e5large":  "/tmp/uday/multi-domain/educational/bam_pq_e5large/",
+    "bge":      "/tmp/uday/multi-domain/educational/bam_pq_bge_large/",
+    "arctic":   "/tmp/uday/multi-domain/educational/bam_pq_arctic/",
+    "roberta":  "/tmp/uday/multi-domain/educational/bam_pq_roberta/",
+    "qwen06b":  "/tmp/uday/multi-domain/educational/bam_pq_qwen06b/",
 }
 
 def read_alpha(ckpt_path):
