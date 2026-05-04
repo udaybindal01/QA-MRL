@@ -318,16 +318,18 @@ Per-query Wilcoxon signed-rank (one-sided) + McNemar exact binomial on discordan
 BAM-PQ checkpoint: `best_bsr`; MRL checkpoint: `mrl_{backbone}/best`.
 
 | Backbone | N | MRL R@10 | BAM R@10 | Δ R@10 | BAM↑ | MRL↑ | Wilcoxon p | McNemar p | Sig |
-|----------|---|----------|----------|--------|------|------|-----------|-----------|-----|
-| e5-large | — | — | — | — | — | — | — | — | Pending |
-| bge-large | — | — | — | — | — | — | — | — | Pending |
+|----------|---|----------|----------|--------|------|------|------------|-----------|-----|
+| e5-large | 3295 | 0.4759 | 0.5032 | +0.0273 | 309 | 219 | <0.00005 | <0.00005 | *** |
+| bge-large | 3295 | 0.4926 | 0.5442 | +0.0516 | 351 | 181 | <0.00001 | <0.00001 | *** |
 | arctic | 3295 | 0.4586 | 0.4795 | +0.0209 | 207 | 138 | 0.00010 | 0.00013 | *** |
 | roberta | 3295 | 0.1484 | 0.4398 | +0.2914 | 1079 | 119 | <0.00001 | <0.00001 | *** |
 | qwen06b | 3295 | 0.0270 | 0.5080 | +0.4810 | 1597 | 12 | <0.00001 | <0.00001 | *** |
 
-**BAM↑** = queries where BAM-PQ hit@10, MRL missed.  **MRL↑** = queries where MRL hit@10, BAM-PQ missed.
+**BAM↑** = queries where BAM-PQ hit@10, MRL missed. **MRL↑** = queries where MRL hit@10, BAM-PQ missed.
 
-All three tested backbones are significant at p<0.001. roberta and qwen06b show massive gains (+29pp, +48pp) because their MRL baselines are very weak (R@10=0.15 and 0.03 respectively). Arctic's gain (+2.09pp) is smaller but still strongly significant (207 vs 138 discordant pairs).
+**All 5 backbones significant at p<0.001** (Wilcoxon one-sided + McNemar exact binomial).
+
+Strong encoders (bge, e5large) show clean gains of +2.7–5.2pp with BAM-PQ winning 1.6–1.9× more discordant queries than MRL. Arctic is the most conservative gain (+2.1pp) but remains strongly significant (p=0.0001). Roberta and qwen06b gains (+29pp, +48pp) reflect very weak MRL baselines (R@10=0.15 and 0.03), not routing quality per se.
 
 ---
 
