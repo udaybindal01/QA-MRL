@@ -27,38 +27,38 @@ echo "  $(date)"
 echo "======================================================"
 
 # 1. Train BAM-PQ
-echo "[1/5] Training BAM-PQ ..."
-python3 scripts/train_bam.py --config "$CONFIG" --checkpoint_dir "$CKPT_DIR"
-echo "  Done training"
+# echo "[1/5] Training BAM-PQ ..."
+# python3 scripts/train_bam.py --config "$CONFIG" --checkpoint_dir "$CKPT_DIR"
+# echo "  Done training"
 
-# 2. Find best epoch (corpus-level, not in-batch)
-echo "[2/5] Selecting best epoch ..."
-python3 scripts/find_best_epoch.py \
-    --config "$CONFIG" \
-    --checkpoint_dir "$CKPT_DIR" \
-    --model_type bam_pq \
-    --metric "recall@10"
+# # 2. Find best epoch (corpus-level, not in-batch)
+# echo "[2/5] Selecting best epoch ..."
+# python3 scripts/find_best_epoch.py \
+#     --config "$CONFIG" \
+#     --checkpoint_dir "$CKPT_DIR" \
+#     --model_type bam_pq \
+#     --metric "recall@10"
 
-# 3. Evaluate BAM-PQ
-echo "[3/5] Evaluating BAM-PQ ..."
-python3 scripts/eval_edu_baselines.py \
-    --config      "$CONFIG" \
-    --checkpoint  "$CKPT_DIR/best" \
-    --model_type  bam_pq \
-    --output_dir  "$OUT_DIR/bam_pq" \
-    --bloom_stratified
+# # 3. Evaluate BAM-PQ
+# echo "[3/5] Evaluating BAM-PQ ..."
+# python3 scripts/eval_edu_baselines.py \
+#     --config      "$CONFIG" \
+#     --checkpoint  "$CKPT_DIR/best" \
+#     --model_type  bam_pq \
+#     --output_dir  "$OUT_DIR/bam_pq" \
+#     --bloom_stratified
 
-# 4. Standard FT baseline
-echo "[4/5] Standard FT — train ..."
-python3 scripts/train_baseline_mrl.py \
-    --config "$STD_FT_CFG" \
-    --checkpoint_dir "$STD_FT_CKPT"
+# # 4. Standard FT baseline
+# echo "[4/5] Standard FT — train ..."
+# python3 scripts/train_baseline_mrl.py \
+#     --config "$STD_FT_CFG" \
+#     --checkpoint_dir "$STD_FT_CKPT"
 
-python3 scripts/find_best_epoch.py \
-    --config "$STD_FT_CFG" \
-    --checkpoint_dir "$STD_FT_CKPT" \
-    --model_type mrl \
-    --metric "recall@10"
+# python3 scripts/find_best_epoch.py \
+#     --config "$STD_FT_CFG" \
+#     --checkpoint_dir "$STD_FT_CKPT" \
+#     --model_type mrl \
+#     --metric "recall@10"
 
 echo "[5/5] Standard FT — evaluate ..."
 python3 scripts/eval_edu_baselines.py \
