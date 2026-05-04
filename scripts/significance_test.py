@@ -58,14 +58,17 @@ BACKBONE_MAP = {
 }
 
 
-def load_data(config):
+def load_data(config, split="test"):
     data_cfg = config["data"]
     corpus, queries = [], []
     with open(data_cfg["corpus_path"]) as f:
         for line in f:
             corpus.append(json.loads(line))
-    val_path = data_cfg.get("val_path") or data_cfg.get("test_path")
-    with open(val_path) as f:
+    if split == "test":
+        query_path = data_cfg.get("test_path") or data_cfg.get("val_path")
+    else:
+        query_path = data_cfg.get("val_path") or data_cfg.get("test_path")
+    with open(query_path) as f:
         for line in f:
             queries.append(json.loads(line))
     corpus_id_to_idx = {c["id"]: i for i, c in enumerate(corpus)}
@@ -181,7 +184,7 @@ def run_tests(hits_bam, hits_mrl, backbone):
     }
 
 
-def run_backbone(name, paths, device, output_dir):
+def run_backbone(name, paths, device, output_dir, split="test"):
     print(f"\n{'═'*60}")
     print(f"  {name}")
     print(f"{'═'*60}")
@@ -190,9 +193,9 @@ def run_backbone(name, paths, device, output_dir):
     mrl_cfg = load_config(paths["mrl_config"])
     set_seed(42)
 
-    corpus, queries, corpus_id_to_idx = load_data(bam_cfg)
+    corpus, queries, corpus_id_to_idx = load_data(bam_cfg, split=split)
     gt_indices = np.array([corpus_id_to_idx[q["positive_id"]] for q in queries])
-    print(f"  Corpus: {len(corpus)}, Queries: {len(queries)}")
+    print(f"  Corpus: {len(corpus)}, Queries ({split}): {len(queries)}")
 
     # BAM-PQ
     print("  Loading BAM-PQ ...")
@@ -244,6 +247,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backbones", nargs="+",
                         default=["e5large", "bge", "arctic", "roberta", "qwen06b"])
+    parser.add_argument("--split", default="test", choices=["val", "test"],
+                        help="Which split to evaluate on (default: test)")
     parser.add_argument("--output_dir", default="results/significance/")
     args = parser.parse_args()
 
@@ -256,7 +261,7 @@ def main():
             print(f"  Unknown backbone: {name}")
             continue
         try:
-            all_results.append(run_backbone(name, BACKBONE_MAP[name], device, args.output_dir))
+            all_results.append(run_backbone(name, BACKBONE_MAP[name], device, args.output_dir, split=args.split))
         except Exception as e:
             print(f"  ERROR on {name}: {e}")
             import traceback; traceback.print_exc()
