@@ -47,9 +47,10 @@ def main():
             print(f"  {name:<12}  {'[dir not found]':<35}  {'—':>10}  {'—':>13}")
             continue
 
-        # Prefer best/ checkpoint; fall back to highest epoch
-        candidates = [os.path.join(root, "best", "checkpoint.pt")]
-        epoch_ckpts = sorted(glob.glob(os.path.join(root, "epoch_*", "checkpoint.pt")))
+        # root already points to best/ dir; also try epoch_* as fallback
+        candidates = [os.path.join(root, "checkpoint.pt")]
+        parent = os.path.dirname(root.rstrip("/"))
+        epoch_ckpts = sorted(glob.glob(os.path.join(parent, "epoch_*", "checkpoint.pt")))
         candidates += epoch_ckpts[::-1]  # highest epoch first
 
         found = False
