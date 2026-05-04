@@ -46,7 +46,6 @@ echo "======================================================"
 #     --checkpoint  "$CKPT_DIR/best" \
 #     --model_type  bam_pq \
 #     --output_dir  "$OUT_DIR/bam_pq" \
-#     --bloom_stratified
 
 # # 4. Standard FT baseline
 # echo "[4/5] Standard FT — train ..."
@@ -63,10 +62,8 @@ echo "======================================================"
 echo "[5/5] Standard FT — evaluate ..."
 python3 scripts/eval_edu_baselines.py \
     --config      "$STD_FT_CFG" \
-    --checkpoint  "$STD_FT_CKPT/best" \
-    --model_type  mrl \
+    --mrl_checkpoint "$STD_FT_CKPT" \
     --output_dir  "$OUT_DIR/standard_ft" \
-    --bloom_stratified
 
 # Alpha
 echo ""
