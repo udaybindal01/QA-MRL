@@ -66,7 +66,22 @@ def _load_council():
             print(f"  [council] {name} not found at {path}, skipping.")
             continue
         print(f"  [council] Loading {name} from {path} ...")
-        tokenizer = AutoTokenizer.from_pretrained(path)
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(path)
+        except AttributeError:
+            # transformers >=4.50 changed extra_special_tokens format (list vs dict).
+            # Fix the saved tokenizer config in-place and retry.
+            import json
+            tok_cfg_path = os.path.join(path, "tokenizer_config.json")
+            if os.path.exists(tok_cfg_path):
+                with open(tok_cfg_path) as f:
+                    tok_cfg = json.load(f)
+                if isinstance(tok_cfg.get("extra_special_tokens"), list):
+                    tok_cfg["extra_special_tokens"] = {}
+                    with open(tok_cfg_path, "w") as f:
+                        json.dump(tok_cfg, f, indent=2)
+                    print(f"  [council] Fixed extra_special_tokens in {tok_cfg_path}, retrying.")
+            tokenizer = AutoTokenizer.from_pretrained(path)
         model = AutoModelForSequenceClassification.from_pretrained(path)
         model.to(device).eval()
         council[name] = {"type": "transformer", "model": model, "tokenizer": tokenizer}
