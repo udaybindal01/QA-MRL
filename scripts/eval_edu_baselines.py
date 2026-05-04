@@ -65,6 +65,8 @@ def compute_metrics(query_embs, corpus_embs, gt_indices, query_blooms, device):
         query_embs = torch.tensor(query_embs, dtype=torch.float32)
     if not isinstance(corpus_embs, torch.Tensor):
         corpus_embs = torch.tensor(corpus_embs, dtype=torch.float32)
+    query_embs  = query_embs.float()
+    corpus_embs = corpus_embs.float()
 
     rankings = []
     for i in range(0, N, 256):
