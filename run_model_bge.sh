@@ -11,7 +11,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 # ── CONFIG ──────────────────────────────────────────────────
 BACKBONE_NAME="bge"
 CONFIG="configs/bam_pq_bge_large.yaml"
-CKPT_DIR="/tmp/uday/multi-domain/educational/bam_pq_bge_large"
+CKPT_DIR="/tmp/uday/multi-domain/educational/bam_pq_bge_large/best"
 STD_FT_CFG="configs/standard_ft_bge.yaml"
 STD_FT_CKPT="/tmp/uday/multi-domain/educational/standard_ft_roberta/best"
 # ────────────────────────────────────────────────────────────
@@ -43,7 +43,7 @@ echo "======================================================"
 echo "[3/5] Evaluating BAM-PQ ..."
 python3 scripts/eval_edu_baselines.py \
     --config         "$CONFIG" \
-    --bam_checkpoint "$CKPT_DIR/best" \
+    --bam_checkpoint "$CKPT_DIR" \
     --output_dir     "$OUT_DIR/bam_pq"
 
 # # 4. Standard FT baseline
