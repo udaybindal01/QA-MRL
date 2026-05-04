@@ -13,7 +13,7 @@ BACKBONE_NAME="roberta"
 CONFIG="configs/bam_pq_roberta.yaml"
 CKPT_DIR="/tmp/bam-pq-roberta-ckpts"
 STD_FT_CFG="configs/standard_ft_roberta.yaml"
-STD_FT_CKPT="/tmp/uday/"
+STD_FT_CKPT="/tmp/uday/multi-domain/educational/standard_ft_roberta/best"
 # ────────────────────────────────────────────────────────────
 
 OUT_DIR="results/per_backbone/${BACKBONE_NAME}"
