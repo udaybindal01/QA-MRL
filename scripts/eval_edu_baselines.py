@@ -190,7 +190,7 @@ def eval_bge_base(corpus, valid, corpus_id_to_idx, model_name, device) -> Dict:
     gt_indices = np.array([corpus_id_to_idx[s["positive_id"]] for s in valid])
     query_blooms = np.array([s["bloom_level"] for s in valid])
     metrics = compute_metrics(query_embs, corpus_embs, gt_indices, query_blooms, device)
-    metrics["avg_dims"] = 768.0
+    metrics["avg_dims"] = float(query_embs.shape[-1])
     return metrics
 
 
@@ -225,7 +225,7 @@ def eval_mrl_baseline(corpus, valid, corpus_id_to_idx, config, checkpoint_path, 
     gt_indices = np.array([corpus_id_to_idx[s["positive_id"]] for s in valid])
     query_blooms = np.array([s["bloom_level"] for s in valid])
     metrics = compute_metrics(query_embs, corpus_embs, gt_indices, query_blooms, device)
-    metrics["avg_dims"] = 768.0
+    metrics["avg_dims"] = float(mc["embedding_dim"])
     return metrics
 
 
