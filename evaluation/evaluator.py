@@ -100,9 +100,10 @@ class FullEvaluator:
         print(f"  Corpus: {len(corpus)} passages")
 
         print("  Encoding corpus...")
+        eval_batch_size = self.config.get("evaluation", {}).get("eval_batch_size", 128)
         corpus_embs = self._encode_texts(
             model, [p["text"] for p in corpus], tokenizer, device,
-            is_query=False, batch_size=128,
+            is_query=False, batch_size=eval_batch_size,
         )
         print(f"  Corpus embeddings: {corpus_embs.shape}")
 
@@ -451,7 +452,7 @@ class FullEvaluator:
         all_embs, all_masks, all_dims, all_full_embs = [], [], [], []
         all_active_dims, all_bloom_probs = [], []
         latencies = []
-        batch_size = 64
+        batch_size = self.config.get("evaluation", {}).get("eval_batch_size", 64)
 
         for i in range(0, len(query_texts), batch_size):
             batch = query_texts[i:i + batch_size]

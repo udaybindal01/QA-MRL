@@ -46,6 +46,7 @@ training:
   eval_every_n_steps: 500
 
 evaluation:
+  eval_batch_size: 16
   retrieval_ks: [1, 5, 10, 20, 50, 100]
   bloom_stratified: true
 

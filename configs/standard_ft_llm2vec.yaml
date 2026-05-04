@@ -24,6 +24,7 @@ data:
   train_path: ./data/real/train_curriculum.jsonl
   val_path: ./data/real/val.jsonl
 evaluation:
+  eval_batch_size: 16
   bloom_stratified: true
   retrieval_ks:
   - 1

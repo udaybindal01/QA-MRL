@@ -20,6 +20,7 @@ data:
   train_path: /tmp/data/msmarco/train.jsonl
   val_path: /tmp/data/msmarco/val.jsonl
 evaluation:
+  eval_batch_size: 16
   bloom_stratified: true
   retrieval_ks:
   - 1
