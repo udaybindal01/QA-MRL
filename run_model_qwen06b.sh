@@ -13,7 +13,7 @@ BACKBONE_NAME="qwen06b"
 CONFIG="configs/bam_pq_qwen06b.yaml"
 CKPT_DIR="/tmp/bam-pq-qwen06b-ckpts"
 STD_FT_CFG="configs/standard_ft_qwen06b.yaml"
-STD_FT_CKPT="/tmp/uday/standard-ft/qwen06b"
+STD_FT_CKPT="/tmp/uday/multi-domain/educational/standard_ft_qwen06b/best"
 # ────────────────────────────────────────────────────────────
 
 OUT_DIR="results/per_backbone/${BACKBONE_NAME}"

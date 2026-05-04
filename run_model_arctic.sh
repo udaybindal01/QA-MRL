@@ -13,7 +13,7 @@ BACKBONE_NAME="arctic"
 CONFIG="configs/bam_pq_arctic.yaml"
 CKPT_DIR="/tmp/bam-pq-arctic-ckpts"
 STD_FT_CFG="configs/standard_ft_arctic.yaml"
-STD_FT_CKPT="/tmp/uday/standard-ft/arctic"
+STD_FT_CKPT="/tmp/uday/multi-domain/educational/standard_ft_arctic/best"
 # ────────────────────────────────────────────────────────────
 
 OUT_DIR="results/per_backbone/${BACKBONE_NAME}"

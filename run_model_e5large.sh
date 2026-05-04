@@ -13,7 +13,7 @@ BACKBONE_NAME="e5large"
 CONFIG="configs/bam_pq.yaml"
 CKPT_DIR="/tmp/bam-pq-ckpts"
 STD_FT_CFG="configs/standard_ft_e5large.yaml"
-STD_FT_CKPT="/tmp/uday/standard-ft/e5large"
+STD_FT_CKPT="/tmp/uday/multi-domain/educational/standard_ft_e5large/best"
 # ────────────────────────────────────────────────────────────
 
 OUT_DIR="results/per_backbone/${BACKBONE_NAME}"

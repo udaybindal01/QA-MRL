@@ -13,7 +13,7 @@ BACKBONE_NAME="bge"
 CONFIG="configs/bam_pq_bge_large.yaml"
 CKPT_DIR="/tmp/bam-pq-bge-large-ckpts"
 STD_FT_CFG="configs/standard_ft_bge.yaml"
-STD_FT_CKPT="/tmp/uday/standard-ft/bge"
+STD_FT_CKPT="/tmp/uday/multi-domain/educational/standard_ft_roberta/best"
 # ────────────────────────────────────────────────────────────
 
 OUT_DIR="results/per_backbone/${BACKBONE_NAME}"
