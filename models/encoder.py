@@ -108,12 +108,16 @@ class MRLEncoder(nn.Module):
     def _load_tokenizer(model_name: str):
         """AutoTokenizer.from_pretrained with automatic offline/disk-error fallback."""
         try:
-            return AutoTokenizer.from_pretrained(model_name)
+            tok = AutoTokenizer.from_pretrained(model_name)
         except Exception as e:
             if _is_network_or_disk_error(e):
                 print(f"  Network/disk error — loading tokenizer from cache.")
-                return AutoTokenizer.from_pretrained(model_name, local_files_only=True)
-            raise
+                tok = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+            else:
+                raise
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+        return tok
 
     @staticmethod
     def _hf_kwargs() -> dict:

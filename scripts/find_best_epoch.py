@@ -34,7 +34,6 @@ from utils.misc import load_config, set_seed
 from models.bam import BloomAlignedMRL
 from models.encoder import MRLEncoder
 from evaluation.evaluator import FullEvaluator
-from transformers import AutoTokenizer
 
 
 def _warn_ckpt_mismatch(result, ckpt_dir, model_label):
@@ -97,9 +96,7 @@ def main():
     config = load_config(args.config)
     set_seed(config["training"]["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = AutoTokenizer.from_pretrained(config["model"]["backbone"])
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = MRLEncoder._load_tokenizer(config["model"]["backbone"])
     evaluator = FullEvaluator(config)
 
     test_path = config["data"]["test_path"]

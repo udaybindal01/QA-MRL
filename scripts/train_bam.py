@@ -12,7 +12,7 @@ from utils.misc import load_config, set_seed, count_parameters
 from models.bam import BloomAlignedMRL
 from data.dataset import build_dataloaders
 from training.bam_trainer import BAMTrainer
-from transformers import AutoTokenizer
+from models.encoder import MRLEncoder
 
 
 def compute_bloom_frequencies(train_path: str):
@@ -116,7 +116,7 @@ def main():
         print(f"Parameters: {count_parameters(model)}")
     config["training"]["freeze_encoder"] = args.freeze_encoder
 
-    tokenizer = AutoTokenizer.from_pretrained(config["model"]["backbone"])
+    tokenizer = MRLEncoder._load_tokenizer(config["model"]["backbone"])
     loaders = build_dataloaders(config, tokenizer)
     print(f"Train: {len(loaders.get('train', []))} batches")
     print(f"Val:   {len(loaders.get('val', []))} batches")
