@@ -265,7 +265,7 @@ def eval_bam(corpus, valid, corpus_id_to_idx, config, checkpoint_path, device) -
         out = model.encode_queries(enc["input_ids"], enc["attention_mask"],
                                    bloom_labels=bloom_labels)
         query_embs.append(out["masked_embedding"].cpu())
-        avg_dims_list.append(out["policy_output"]["selected_dim"].cpu())
+        avg_dims_list.append(out["active_dims"].cpu())
 
     query_embs = torch.cat(query_embs)
     avg_dims = torch.cat(avg_dims_list)
