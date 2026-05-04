@@ -31,8 +31,8 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-BACKBONES_TO_RUN="arctic roberta phi3mini" \
+BACKBONES_TO_RUN="phi3mini" \
 REUSE_TRAINED_MODELS=1 \
 exec bash "$SCRIPT_DIR/bam_council_pipeline.sh" \
-    --from eval_pretrained \
+    --from find_mrl_bk \
     "$@"
