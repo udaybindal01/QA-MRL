@@ -312,20 +312,22 @@ Lower off-diagonal values = levels use more distinct dimension subsets = more sp
 
 ---
 
-### 1.7 Significance Tests — BAM-PQ vs MRL
+### 1.7 Significance Tests — BAM-PQ vs MRL Baseline (R@10)
 
-Wilcoxon signed-rank test over per-query R@10 differences, with Bonferroni correction across models.
-Bootstrap 95% CI over 1000 resamples.
+Per-query Wilcoxon signed-rank (one-sided) + McNemar exact binomial on discordant pairs.
+BAM-PQ checkpoint: `best_bsr`; MRL checkpoint: `mrl_{backbone}/best`.
 
-| Backbone | Δ R@10 | p (Bonferroni) | 95% CI | Stars |
-|----------|--------|---------------|--------|-------|
-| e5-large | +0.0628 | <0.001 | [+0.059, +0.066] | *** |
-| bge-large | +0.0579 | <0.001 | [+0.054, +0.062] | *** |
-| arctic | +0.0040 | <0.001 | [+0.002, +0.006] | *** |
-| roberta | +0.2534 | <0.001 | [+0.241, +0.265] | *** |
-| qwen06b | +0.4645 | <0.001 | [+0.450, +0.479] | *** |
+| Backbone | N | MRL R@10 | BAM R@10 | Δ R@10 | BAM↑ | MRL↑ | Wilcoxon p | McNemar p | Sig |
+|----------|---|----------|----------|--------|------|------|-----------|-----------|-----|
+| e5-large | — | — | — | — | — | — | — | — | Pending |
+| bge-large | — | — | — | — | — | — | — | — | Pending |
+| arctic | 3295 | 0.4586 | 0.4795 | +0.0209 | 207 | 138 | 0.00010 | 0.00013 | *** |
+| roberta | 3295 | 0.1484 | 0.4398 | +0.2914 | 1079 | 119 | <0.00001 | <0.00001 | *** |
+| qwen06b | 3295 | 0.0270 | 0.5080 | +0.4810 | 1597 | 12 | <0.00001 | <0.00001 | *** |
 
-All five backbones are statistically significant after Bonferroni correction. However, roberta and qwen06b gains are dominated by the weak MRL baseline rather than routing quality.
+**BAM↑** = queries where BAM-PQ hit@10, MRL missed.  **MRL↑** = queries where MRL hit@10, BAM-PQ missed.
+
+All three tested backbones are significant at p<0.001. roberta and qwen06b show massive gains (+29pp, +48pp) because their MRL baselines are very weak (R@10=0.15 and 0.03 respectively). Arctic's gain (+2.09pp) is smaller but still strongly significant (207 vs 138 discordant pairs).
 
 ---
 
