@@ -1,0 +1,120 @@
+# BAM-PQ — Bloom + Per-Query combined routing
+#
+# Architecture: BloomQueryMaskHead
+#   final_logits = bloom_logit[level] + alpha * query_mlp(normalize(cls))
+#
+#   bloom_logit: Embedding(6, D)          — coarse cognitive-level prior
+#   query_mlp:   Linear(D,256)→GELU→LN→Linear(256,D) — per-query residual
+#   alpha:       sigmoid(alpha_raw) ∈ [0,1], init≈0.047 → pure Bloom at epoch 0
+#
+# Training strategy: identical reverse two-stage as BAM-B.
+#   Stage 1 [epochs 0-7]:  Encoder frozen. BloomQueryMaskHead trains.
+#     Bloom logits + query MLP converge. Alpha grows from ~0.05 if
+#     per-query signal helps.
+#   Stage 2 [epochs 8-19]: Encoder unfreezes at very low LR (1e-6).
+#     Encoder adapts to push more information into mask-selected dims.
+#
+# Novelty over BAM-B:
+#   BAM-B: all queries of same Bloom level → identical mask
+#   BAM-PQ: each query gets its own mask = Bloom_base + alpha * query_delta
+#   Alpha at convergence tells you how much query content adds beyond
+#   the cognitive-level prior. If alpha → 1: queries within same level
+#   have very different retrieval needs. If alpha → 0: Bloom level is
+#   sufficient (BAM-B is near-optimal).
+
+model:
+  backbone: "intfloat/e5-large-v2"
+  embedding_dim: 1024
+  pooling: "cls"
+  normalize_embeddings: true
+  mrl_dims: [64, 128, 256, 512, 768, 1024]
+  use_mask_routing: true             # Scattered mask (not prefix)
+  use_query_delta: true              # BAM-PQ: enable per-query MLP residual
+  query_delta_hidden: 256            # Hidden dim of query MLP (keep small to avoid overfit)
+  mask_sparsity_target: null
+  use_soft_bloom_routing: false
+
+data:
+  train_path: "./data/real/train_curriculum.jsonl"
+  val_path: "./data/real/val.jsonl"
+  test_path: "./data/real/test.jsonl"
+  corpus_path: "./data/real/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
+  max_query_length: 128
+  max_passage_length: 256
+  num_hard_negatives: 15
+
+training:
+  seed: 42
+  num_epochs: 20                   # 8 frozen + 12 fine-tuning
+  batch_size: 16
+  gradient_accumulation_steps: 8   # effective batch = 128
+  fp16: true
+  max_grad_norm: 1.0
+  optimizer:
+    type: "adamw"
+    lr: 2.0e-4
+    weight_decay: 0.01
+    encoder_lr: 2.0e-5
+    router_lr: 2.0e-4              # bloom_logit + query_mlp + alpha_raw all at router_lr
+    encoder_finetune_lr: 1.0e-6
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.1
+  loss:
+    contrastive_weight: 1.0
+    efficiency_weight: 0.0
+    efficiency_uniform_weights: true
+    mrl_anchor_weight: 0.0
+    diversity_weight: 0.0
+    use_topk_sparsity: true         # Per-query top-k count loss (Wu et al. style)
+    topk_threshold_weight: 0.5     # Threshold hinge weight relative to count loss
+    mask_sparsity_weight: 1.5      # Weight applied to whichever sparsity loss is active
+    mask_level_targets: null       # Use cognitive defaults (0.35–0.72)
+    mask_diversity_weight: 0.5     # Push per-level masks apart
+    mask_diversity_margin: 0.0
+    mask_variance_weight: 0.3
+    mask_distill_weight: 0.5
+    query_routing_div_weight: 0.3  # Pushes different-level queries toward different masks
+    query_routing_div_margin_neg: 0.5
+    query_routing_div_attraction: 0.0
+    dropmask_rate: 0.0
+    dim_redist_weight: 0.0
+    encoder_warmup_epochs: 0
+    mask_differentiation_epochs: 0
+    temperature_schedule:
+      start: 0.1
+      end: 0.02
+    gumbel_temperature_schedule:
+      start: 1.0
+      end: 0.1
+  balanced_bloom_sampling: true
+  use_pcgrad: false
+  encoder_freeze_after_epochs: null
+  encoder_unfreeze_after_epochs: 8
+  bloom_noise_rate: 0.0
+  hard_neg_refresh_epochs: null
+  checkpoint_dir: "/tmp/bam-pq-ckpts/abl_full/"
+  save_every_n_steps: 1000
+  eval_every_n_steps: 500
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50, 100]
+  bloom_stratified: true
+  tail_topic_threshold: 20
+  measure_latency: true
+
+diagnostics:
+  gradient_attribution: true
+  num_diagnostic_queries: 1000
+  probing:
+    probe_type: "linear"
+    probe_tasks: ["bloom_level", "subject_area"]
+    num_dimension_groups: 8
+
+logging:
+  use_wandb: true
+  wandb_project: "bam-emnlp"
+  wandb_entity: null
+  log_every_n_steps: 10
