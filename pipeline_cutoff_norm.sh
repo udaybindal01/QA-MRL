@@ -2,24 +2,33 @@
 # =============================================================================
 # pipeline_cutoff_norm.sh
 #
-# Evaluate Cutoff and Norm baselines on educational MRL checkpoints.
+# Evaluate Cutoff and Norm baselines on educational Standard FT and MRL
+# checkpoints for all backbones.
 #
 # Both methods are post-hoc (no training) — they run directly on the best/
-# checkpoint produced by find_mrl_bk for each backbone.
+# checkpoint produced by find_standard_ft / find_mrl_bk for each backbone.
 #
-#   Cutoff  — fixed prefix truncation at each MRL dim budget.
+#   Cutoff  — fixed prefix truncation at each dim budget.
 #             All queries use the same d dimensions.
 #
 #   Norm    — per-query top-d dimension selection by embedding magnitude |e_q[i]|.
 #             Each query picks its own dims; corpus projected to match.
 #
-# Checkpoint path expected: $CKPT_ROOT/educational/mrl_$BACKBONE/best/checkpoint.pt
+# Runs both Standard FT and MRL checkpoints so results can be compared side
+# by side. Standard FT shows how badly random-structured dims degrade under
+# Cutoff; MRL shows the benefit of Matryoshka training for prefix truncation.
+#
+# Checkpoint paths expected:
+#   Standard FT : $CKPT_ROOT/educational/standard_ft_$BK/best/checkpoint.pt
+#   MRL         : $CKPT_ROOT/educational/mrl_$BK/best/checkpoint.pt
 #
 # Usage:
-#   ./pipeline_cutoff_norm.sh                         # all backbones
+#   ./pipeline_cutoff_norm.sh                            # all backbones, both models
 #   ./pipeline_cutoff_norm.sh --backbone "bge qwen06b"
-#   ./pipeline_cutoff_norm.sh --add_30pct              # also evaluate at 30% of dim
-#   ./pipeline_cutoff_norm.sh --force                  # re-run even if output exists
+#   ./pipeline_cutoff_norm.sh --model mrl                # MRL only
+#   ./pipeline_cutoff_norm.sh --model standard_ft        # Standard FT only
+#   ./pipeline_cutoff_norm.sh --add_30pct                # also eval at 30% of dim
+#   ./pipeline_cutoff_norm.sh --force                    # re-run even if output exists
 #   CKPT_ROOT=/my/ckpts ./pipeline_cutoff_norm.sh
 # =============================================================================
 
@@ -35,10 +44,28 @@ DATASET="educational"
 # ── Defaults ──────────────────────────────────────────────────────────────────
 ALL_BACKBONES="e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm llama1b llama3b arctic roberta phi3mini"
 BACKBONES="${BACKBONES:-$ALL_BACKBONES}"
+RUN_MODELS="standard_ft mrl"   # which model types to evaluate
 ADD_30PCT=""
 FORCE=0
 BATCH_SIZE=128
 K=10
+
+# ── Backbone → Standard FT config map (educational) ──────────────────────────
+declare -A SFT_CFG=(
+    [e5large]="configs/standard_ft_e5large.yaml"
+    [bge]="configs/standard_ft_bge.yaml"
+    [qwen06b]="configs/standard_ft_qwen06b.yaml"
+    [qwen4b]="configs/standard_ft_qwen4b.yaml"
+    [qwen8b]="configs/standard_ft_qwen8b.yaml"
+    [llm2vec]="configs/standard_ft_llm2vec.yaml"
+    [llama8b]="configs/standard_ft_llm2vec_llama8b.yaml"
+    [gritlm]="configs/standard_ft_gritlm.yaml"
+    [llama1b]="configs/standard_ft_llama1b.yaml"
+    [llama3b]="configs/standard_ft_llama3b.yaml"
+    [arctic]="configs/standard_ft_arctic.yaml"
+    [roberta]="configs/standard_ft_roberta.yaml"
+    [phi3mini]="configs/standard_ft_phi3mini.yaml"
+)
 
 # ── Backbone → MRL config map (educational) ───────────────────────────────────
 declare -A MRL_CFG=(
@@ -60,17 +87,18 @@ declare -A MRL_CFG=(
 # ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --backbone)   BACKBONES="$2";  shift 2 ;;
-        --add_30pct)  ADD_30PCT="--add_30pct"; shift ;;
-        --force)      FORCE=1;         shift ;;
-        --batch_size) BATCH_SIZE="$2"; shift 2 ;;
-        --k)          K="$2";          shift 2 ;;
+        --backbone)    BACKBONES="$2";    shift 2 ;;
+        --model)       RUN_MODELS="$2";   shift 2 ;;
+        --add_30pct)   ADD_30PCT="--add_30pct"; shift ;;
+        --force)       FORCE=1;           shift ;;
+        --batch_size)  BATCH_SIZE="$2";   shift 2 ;;
+        --k)           K="$2";            shift 2 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
 
-log()  { echo "[$(date '+%H:%M:%S')] $*"; }
-die()  { echo "ERROR: $*" >&2; exit 1; }
+log() { echo "[$(date '+%H:%M:%S')] $*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
 
 # ── Validate paths ────────────────────────────────────────────────────────────
 [[ -d "$EDU_DATA_DIR" ]] || die "EDU_DATA_DIR not found: $EDU_DATA_DIR"
@@ -87,51 +115,50 @@ echo "============================================================"
 echo "  CKPT_ROOT   : $CKPT_ROOT"
 echo "  Results     : $RESULTS_ROOT"
 echo "  Backbones   : $BACKBONES"
+echo "  Models      : $RUN_MODELS"
 echo "  R@K         : $K"
 echo "  Add 30%     : ${ADD_30PCT:-no}"
 echo "============================================================"
 
-# ── Track results for summary ─────────────────────────────────────────────────
-declare -a DONE_BACKBONES=()
-declare -a SKIP_BACKBONES=()
-declare -a MISS_BACKBONES=()
+# ── Helper: run one backbone + model type ─────────────────────────────────────
+run_eval() {
+    local BK="$1"
+    local MODEL_TYPE="$2"   # "standard_ft" or "mrl"
+    local CKPT_SUBDIR       # e.g. standard_ft_bge or mrl_bge
+    local CFG
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
-for BK in $BACKBONES; do
-    [[ -n "${MRL_CFG[$BK]+x}" ]] || { log "[$BK] Unknown backbone — skipping"; continue; }
+    if [[ "$MODEL_TYPE" == "standard_ft" ]]; then
+        [[ -n "${SFT_CFG[$BK]+x}" ]] || { log "[$BK][sft] No SFT config — skipping"; return; }
+        CFG="${SFT_CFG[$BK]}"
+        CKPT_SUBDIR="standard_ft_$BK"
+    else
+        [[ -n "${MRL_CFG[$BK]+x}" ]] || { log "[$BK][mrl] No MRL config — skipping"; return; }
+        CFG="${MRL_CFG[$BK]}"
+        CKPT_SUBDIR="mrl_$BK"
+    fi
 
-    CKPT_DIR="$CKPT_ROOT/$DATASET/mrl_$BK/best"
-    CKPT_FILE="$CKPT_DIR/checkpoint.pt"
-    OUT_DIR="$RESULTS_ROOT/$BK"
-    OUT_FILE="$OUT_DIR/cutoff_norm.json"
-    CFG="${MRL_CFG[$BK]}"
+    local CKPT_DIR="$CKPT_ROOT/$DATASET/$CKPT_SUBDIR/best"
+    local CKPT_FILE="$CKPT_DIR/checkpoint.pt"
+    local OUT_DIR="$RESULTS_ROOT/$MODEL_TYPE/$BK"
+    local OUT_FILE="$OUT_DIR/cutoff_norm.json"
 
-    # Skip if already done and not forced
     if [[ -f "$OUT_FILE" && "$FORCE" -eq 0 ]]; then
-        log "[$BK] Already done — skipping (use --force to re-run)"
-        SKIP_BACKBONES+=("$BK")
-        continue
+        log "[$BK][$MODEL_TYPE] Already done — skipping (use --force to re-run)"
+        return 0
     fi
 
-    # Skip if checkpoint missing
     if [[ ! -f "$CKPT_FILE" ]]; then
-        log "[$BK] No checkpoint at $CKPT_FILE — skipping"
-        MISS_BACKBONES+=("$BK")
-        continue
+        log "[$BK][$MODEL_TYPE] No checkpoint at $CKPT_FILE — skipping"
+        return 1
     fi
 
-    # Skip if config missing
     if [[ ! -f "$CFG" ]]; then
-        log "[$BK] Config not found: $CFG — skipping"
-        MISS_BACKBONES+=("$BK")
-        continue
+        log "[$BK][$MODEL_TYPE] Config not found: $CFG — skipping"
+        return 1
     fi
 
     mkdir -p "$OUT_DIR"
-    log "[$BK] Running Cutoff + Norm eval..."
-    log "[$BK]   checkpoint : $CKPT_DIR"
-    log "[$BK]   config     : $CFG"
-    log "[$BK]   output     : $OUT_FILE"
+    log "[$BK][$MODEL_TYPE] Running Cutoff + Norm eval..."
 
     python "$SCRIPT_DIR/scripts/eval_cutoff_norm.py" \
         --config      "$CFG" \
@@ -143,83 +170,100 @@ for BK in $BACKBONES; do
         --k           "$K" \
         $ADD_30PCT
 
-    log "[$BK] Done → $OUT_FILE"
-    DONE_BACKBONES+=("$BK")
+    log "[$BK][$MODEL_TYPE] Done → $OUT_FILE"
+    return 0
+}
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+for BK in $BACKBONES; do
+    for MODEL_TYPE in $RUN_MODELS; do
+        run_eval "$BK" "$MODEL_TYPE" || true
+    done
 done
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+# ── Summary table ─────────────────────────────────────────────────────────────
 echo ""
 echo "============================================================"
-echo "  Summary"
+echo "  Aggregated R@${K}  —  Standard FT vs MRL  (Cutoff | Norm)"
 echo "============================================================"
-echo "  Completed  (${#DONE_BACKBONES[@]}): ${DONE_BACKBONES[*]:-none}"
-echo "  Skipped    (${#SKIP_BACKBONES[@]}): ${SKIP_BACKBONES[*]:-none}"
-echo "  Missing ck (${#MISS_BACKBONES[@]}): ${MISS_BACKBONES[*]:-none}"
 
-if [[ ${#DONE_BACKBONES[@]} -eq 0 && ${#SKIP_BACKBONES[@]} -eq 0 ]]; then
-    echo ""
-    echo "  No backbones ran. Check that MRL training has completed and"
-    echo "  find_mrl_bk has been run for each backbone."
-    echo "  Expected checkpoint path: $CKPT_ROOT/educational/mrl_<backbone>/best/"
-    exit 1
-fi
-
-# ── Aggregate results table ───────────────────────────────────────────────────
-ALL_DONE=( "${DONE_BACKBONES[@]:-}" "${SKIP_BACKBONES[@]:-}" )
-
-if [[ ${#ALL_DONE[@]} -gt 0 ]]; then
-    echo ""
-    echo "  Aggregated R@${K} across backbones"
-    echo "  (run python scripts/aggregate_cutoff_norm.py for full table)"
-    python - <<PYEOF
+python - <<PYEOF
 import json, os, sys
 
 results_root = "$RESULTS_ROOT"
 k            = $K
 backbones    = "$BACKBONES".split()
+models       = "$RUN_MODELS".split()
 
-rows = []
-for bk in backbones:
-    path = os.path.join(results_root, bk, "cutoff_norm.json")
-    if not os.path.exists(path):
-        continue
-    with open(path) as f:
-        data = json.load(f)
+# Collect results for each (model_type, backbone)
+all_data = {}
+all_dims = set()
+for mt in models:
+    for bk in backbones:
+        path = os.path.join(results_root, mt, bk, "cutoff_norm.json")
+        if not os.path.exists(path):
+            continue
+        with open(path) as f:
+            d = json.load(f)
+        all_data[(mt, bk)] = d
+        all_dims.update(int(x) for x in d["cutoff"].keys())
 
-    dims = data["dims_evaluated"]
-    row  = {"backbone": bk, "embedding_dim": data["embedding_dim"]}
-    for d in dims:
-        s  = str(d)
-        r_c = data["cutoff"].get(s, {}).get(f"recall@{k}", float("nan"))
-        r_n = data["norm"].get(s,   {}).get(f"recall@{k}", float("nan"))
-        row[f"cut_{d}"] = r_c
-        row[f"nrm_{d}"] = r_n
-    rows.append(row)
-
-if not rows:
-    print("  No results to aggregate yet.")
+if not all_data:
+    print("  No results found yet.")
     sys.exit(0)
 
-# Print header
-all_dims = sorted({d for row in rows for key in row
-                   if key.startswith("cut_")
-                   for d in [int(key.split("_")[1])]})
+all_dims = sorted(all_dims)
 
-hdr = f"  {'Backbone':14s}  {'Dim':>5}"
-for d in all_dims:
-    hdr += f"  {'Cut'+str(d):>8}  {'Nrm'+str(d):>8}"
-print(hdr)
-print("  " + "-" * (len(hdr) - 2))
+# Print one row per backbone, columns = (model_type × dim × cutoff/norm)
+# Header: Backbone | SFT Cut-D  SFT Nrm-D  MRL Cut-D  MRL Nrm-D  ...
+print(f"\n  Standard FT = model trained with standard contrastive loss (no MRL structure)")
+print(f"  MRL         = model trained with Matryoshka multi-resolution loss\n")
 
-for row in rows:
-    line = f"  {row['backbone']:14s}  {row['embedding_dim']:>5}"
+# Show a compact table: for each backbone, per-dim recall for both model types
+for mt in models:
+    label = "Standard FT" if mt == "standard_ft" else "MRL"
+    print(f"  [{label}]  R@{k} by dim budget")
+    hdr = f"  {'Backbone':14s}  {'EmbDim':>7}"
     for d in all_dims:
-        r_c = row.get(f"cut_{d}", float("nan"))
-        r_n = row.get(f"nrm_{d}", float("nan"))
-        line += f"  {r_c:>8.4f}  {r_n:>8.4f}"
-    print(line)
-PYEOF
-fi
+        hdr += f"  {'Cut@'+str(d):>9}  {'Nrm@'+str(d):>9}"
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
 
-echo ""
-echo "  Results saved in $RESULTS_ROOT/<backbone>/cutoff_norm.json"
+    for bk in backbones:
+        entry = all_data.get((mt, bk))
+        if entry is None:
+            print(f"  {bk:14s}  {'—':>7}  (no checkpoint)")
+            continue
+        emb_dim = entry["embedding_dim"]
+        line = f"  {bk:14s}  {emb_dim:>7}"
+        for d in all_dims:
+            r_c = entry["cutoff"].get(str(d), {}).get(f"recall@{k}", float("nan"))
+            r_n = entry["norm"].get(str(d),   {}).get(f"recall@{k}", float("nan"))
+            line += f"  {r_c:>9.4f}  {r_n:>9.4f}"
+        print(line)
+    print()
+
+# Side-by-side diff: MRL Cutoff - SFT Cutoff at each dim
+if "standard_ft" in models and "mrl" in models:
+    print(f"  [Delta: MRL Cutoff − SFT Cutoff]  (positive = MRL structure helps)")
+    hdr = f"  {'Backbone':14s}"
+    for d in all_dims:
+        hdr += f"  {'Δ Cut@'+str(d):>10}"
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+    for bk in backbones:
+        sft = all_data.get(("standard_ft", bk))
+        mrl = all_data.get(("mrl", bk))
+        if sft is None or mrl is None:
+            continue
+        line = f"  {bk:14s}"
+        for d in all_dims:
+            r_sft = sft["cutoff"].get(str(d), {}).get(f"recall@{k}", float("nan"))
+            r_mrl = mrl["cutoff"].get(str(d), {}).get(f"recall@{k}", float("nan"))
+            delta = r_mrl - r_sft
+            line += f"  {delta:>+10.4f}"
+        print(line)
+    print()
+PYEOF
+
+echo "  Results saved in $RESULTS_ROOT/{standard_ft,mrl}/<backbone>/cutoff_norm.json"
