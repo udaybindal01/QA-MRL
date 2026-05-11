@@ -9,8 +9,9 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from tqdm import tqdm
 
+import torch.nn.functional as F
+
 from models.encoder import MRLEncoder
-from models.losses import MRLContrastiveLoss, InfoNCELoss
 from utils.misc import AverageMeter, move_to_device, set_seed, count_parameters
 from utils.logging_utils import setup_logger, WandbLogger
 
@@ -75,6 +76,37 @@ def _freeze_except_last_n_layers(model: MRLEncoder, n: int) -> int:
     total = sum(p.numel() for p in model.parameters())
     print(f"  Trainable: {trainable:,} / {total:,} params ({100 * trainable / total:.1f}%)")
     return trainable
+
+
+class InfoNCELoss(nn.Module):
+    def __init__(self, temperature: float = 0.05):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, q: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+        q = F.normalize(q.float(), p=2, dim=-1)
+        p = F.normalize(p.float(), p=2, dim=-1)
+        sim = torch.mm(q, p.t()) / self.temperature
+        labels = torch.arange(q.size(0), device=q.device)
+        return F.cross_entropy(sim, labels)
+
+
+class MRLContrastiveLoss(nn.Module):
+    def __init__(self, mrl_dims, temperature: float = 0.05):
+        super().__init__()
+        self.mrl_dims = mrl_dims
+        self.temperature = temperature
+
+    def forward(self, q_list, p_list):
+        losses = []
+        for q_d, p_d in zip(q_list, p_list):
+            q_d = F.normalize(q_d.float(), p=2, dim=-1)
+            p_d = F.normalize(p_d.float(), p=2, dim=-1)
+            sim = torch.mm(q_d, p_d.t()) / self.temperature
+            labels = torch.arange(q_d.size(0), device=q_d.device)
+            losses.append(F.cross_entropy(sim, labels))
+        loss = torch.stack(losses).mean()
+        return loss, {}
 
 
 class MRLBaselineTrainer:
