@@ -79,35 +79,50 @@ def _freeze_except_last_n_layers(model: MRLEncoder, n: int) -> int:
 
 
 class InfoNCELoss(nn.Module):
+    """Standard InfoNCE contrastive loss with in-batch + hard negatives."""
+
     def __init__(self, temperature: float = 0.05):
         super().__init__()
         self.temperature = temperature
 
-    def forward(self, q: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
-        q = F.normalize(q.float(), p=2, dim=-1)
-        p = F.normalize(p.float(), p=2, dim=-1)
-        sim = torch.mm(q, p.t()) / self.temperature
-        labels = torch.arange(q.size(0), device=q.device)
-        return F.cross_entropy(sim, labels)
+    def forward(self, query_emb, positive_emb, negative_embs=None):
+        pos_sim = (query_emb * positive_emb).sum(dim=-1) / self.temperature
+
+        if negative_embs is not None:
+            neg_sim = torch.bmm(
+                negative_embs, query_emb.unsqueeze(-1)
+            ).squeeze(-1) / self.temperature
+            logits = torch.cat([pos_sim.unsqueeze(-1), neg_sim], dim=-1)
+            labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
+        else:
+            logits = torch.mm(query_emb, positive_emb.t()) / self.temperature
+            labels = torch.arange(logits.size(0), device=logits.device)
+
+        return F.cross_entropy(logits, labels)
 
 
 class MRLContrastiveLoss(nn.Module):
-    def __init__(self, mrl_dims, temperature: float = 0.05):
+    """Multi-resolution contrastive loss: InfoNCE at each truncation point."""
+
+    def __init__(self, mrl_dims, temperature: float = 0.05, dim_weights=None):
         super().__init__()
         self.mrl_dims = mrl_dims
-        self.temperature = temperature
+        self.infonce = InfoNCELoss(temperature)
+        if dim_weights is None:
+            dim_weights = [1.0 / len(mrl_dims)] * len(mrl_dims)
+        self.dim_weights = dim_weights
 
-    def forward(self, q_dict, p_dict):
-        # q_dict / p_dict: {dim: tensor, ...} from MRLEncoder
-        losses = []
-        for q_d, p_d in zip(q_dict.values(), p_dict.values()):
-            q_d = F.normalize(q_d.float(), p=2, dim=-1)
-            p_d = F.normalize(p_d.float(), p=2, dim=-1)
-            sim = torch.mm(q_d, p_d.t()) / self.temperature
-            labels = torch.arange(q_d.size(0), device=q_d.device)
-            losses.append(F.cross_entropy(sim, labels))
-        loss = torch.stack(losses).mean()
-        return loss, {}
+    def forward(self, query_truncated, positive_truncated, negative_truncated=None):
+        total_loss = 0.0
+        per_dim_losses = {}
+        for dim, weight in zip(self.mrl_dims, self.dim_weights):
+            q = query_truncated[dim]
+            p = positive_truncated[dim]
+            n = negative_truncated[dim] if negative_truncated else None
+            loss = self.infonce(q, p, n)
+            total_loss += weight * loss
+            per_dim_losses[f"mrl_loss_d{dim}"] = loss.item()
+        return total_loss, per_dim_losses
 
 
 class MRLBaselineTrainer:
