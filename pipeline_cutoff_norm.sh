@@ -42,7 +42,7 @@ EDU_DATA_DIR="${EDU_DATA_DIR:-./data/real}"
 DATASET="educational"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-ALL_BACKBONES="e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm llama1b llama3b arctic roberta phi3mini"
+ALL_BACKBONES="e5large bge roberta arctic qwen06b"
 BACKBONES="${BACKBONES:-$ALL_BACKBONES}"
 RUN_MODELS="standard_ft mrl"   # which model types to evaluate
 ADD_30PCT=""
