@@ -97,9 +97,10 @@ class MRLContrastiveLoss(nn.Module):
         self.mrl_dims = mrl_dims
         self.temperature = temperature
 
-    def forward(self, q_list, p_list):
+    def forward(self, q_dict, p_dict):
+        # q_dict / p_dict: {dim: tensor, ...} from MRLEncoder
         losses = []
-        for q_d, p_d in zip(q_list, p_list):
+        for q_d, p_d in zip(q_dict.values(), p_dict.values()):
             q_d = F.normalize(q_d.float(), p=2, dim=-1)
             p_d = F.normalize(p_d.float(), p=2, dim=-1)
             sim = torch.mm(q_d, p_d.t()) / self.temperature
