@@ -199,8 +199,15 @@ def eval_bge_base(corpus, valid, corpus_id_to_idx, model_name, device) -> Dict:
 @torch.no_grad()
 def eval_mrl_baseline(corpus, valid, corpus_id_to_idx, config, checkpoint_path, device) -> Dict:
     mc = config["model"]
-    model = MRLEncoder(model_name=mc["backbone"], embedding_dim=mc["embedding_dim"],
-                       mrl_dims=mc["mrl_dims"])
+    model = MRLEncoder(
+        model_name=mc["backbone"],
+        embedding_dim=mc["embedding_dim"],
+        mrl_dims=mc["mrl_dims"],
+        pooling=mc.get("pooling", "cls"),
+        backbone_type=mc.get("backbone_type", "standard"),
+        query_instruction=mc.get("query_instruction", None),
+        peft_model_name=mc.get("peft_model_name", None),
+    )
     ckpt = os.path.join(checkpoint_path, "checkpoint.pt")
     if os.path.exists(ckpt):
         model.load_state_dict(torch.load(ckpt, map_location=device)["model_state_dict"],

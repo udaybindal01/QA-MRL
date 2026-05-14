@@ -176,9 +176,15 @@ def encode_mrl(config, checkpoint, corpus, queries, device):
     from models.encoder import MRLEncoder
 
     mc = config["model"]
-    model = MRLEncoder(model_name=mc["backbone"],
-                       embedding_dim=mc["embedding_dim"],
-                       mrl_dims=mc["mrl_dims"])
+    model = MRLEncoder(
+        model_name=mc["backbone"],
+        embedding_dim=mc["embedding_dim"],
+        mrl_dims=mc["mrl_dims"],
+        pooling=mc.get("pooling", "cls"),
+        backbone_type=mc.get("backbone_type", "standard"),
+        query_instruction=mc.get("query_instruction", None),
+        peft_model_name=mc.get("peft_model_name", None),
+    )
     ckpt_file = os.path.join(checkpoint, "checkpoint.pt")
     if os.path.exists(ckpt_file):
         state = torch.load(ckpt_file, map_location=device)

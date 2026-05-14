@@ -216,9 +216,15 @@ def run_backbone(name, paths, device, output_dir, split="test"):
     # MRL baseline
     print("  Loading MRL baseline ...")
     mc = mrl_cfg["model"]
-    mrl_model = MRLEncoder(model_name=mc["backbone"],
-                           embedding_dim=mc["embedding_dim"],
-                           mrl_dims=mc["mrl_dims"])
+    mrl_model = MRLEncoder(
+        model_name=mc["backbone"],
+        embedding_dim=mc["embedding_dim"],
+        mrl_dims=mc["mrl_dims"],
+        pooling=mc.get("pooling", "cls"),
+        backbone_type=mc.get("backbone_type", "standard"),
+        query_instruction=mc.get("query_instruction", None),
+        peft_model_name=mc.get("peft_model_name", None),
+    )
     ckpt = os.path.join(paths["mrl_ckpt"], "checkpoint.pt")
     if os.path.exists(ckpt):
         mrl_model.load_state_dict(

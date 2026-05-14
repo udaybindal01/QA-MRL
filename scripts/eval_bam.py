@@ -50,8 +50,15 @@ def load_bam(config, ckpt_path, device):
 
 def load_mrl(config, ckpt_path, device):
     mc = config["model"]
-    model = MRLEncoder(model_name=mc["backbone"], embedding_dim=mc["embedding_dim"],
-                       mrl_dims=mc["mrl_dims"])
+    model = MRLEncoder(
+        model_name=mc["backbone"],
+        embedding_dim=mc["embedding_dim"],
+        mrl_dims=mc["mrl_dims"],
+        pooling=mc.get("pooling", "cls"),
+        backbone_type=mc.get("backbone_type", "standard"),
+        query_instruction=mc.get("query_instruction", None),
+        peft_model_name=mc.get("peft_model_name", None),
+    )
     f = os.path.join(ckpt_path, "checkpoint.pt")
     if os.path.exists(f):
         ckpt = torch.load(f, map_location=device)
