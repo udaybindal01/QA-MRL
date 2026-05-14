@@ -3,9 +3,8 @@
 # BAM Council Pipeline — full end-to-end: build → annotate → train → eval
 #
 # Models trained per dataset:
-#   MRL baseline    — intfloat/e5-large-v2
-#   BAM-B           — intfloat/e5-large-v2
-#   BAM-PQ ×6       — e5-large | BGE-large | Qwen-0.6B | Qwen-4B | LLM2Vec-7B | GritLM-7B
+#   MRL baseline    — per backbone (fair comparison)
+#   BAM-PQ          — e5-large | BGE-large | Qwen-0.6B | Qwen-4B | LLM2Vec-7B | GritLM-7B
 #
 # Datasets:
 #   educational     — SciQ / ARC / OpenBookQA / QASC  (small, curriculum negatives)
@@ -20,7 +19,6 @@
 #   ./bam_council_pipeline.sh --msmarco-only                  # MS MARCO → BEIR zero-shot
 #   ./bam_council_pipeline.sh --from train_mrl                # skip build+annotate
 #   ./bam_council_pipeline.sh --from train_bam_pq             # skip to BAM-PQ
-#   ./bam_council_pipeline.sh --until find_bam_b              # stop after BAM-B (shared steps only)
 #   ./bam_council_pipeline.sh --datasets "scifact fiqa"       # subset of datasets
 #   ./bam_council_pipeline.sh --backbone "e5large qwen06b"    # subset of BAM-PQ backbones
 #   ./bam_council_pipeline.sh --force                         # wipe checkpoints and retrain
@@ -72,14 +70,12 @@ REUSE_TRAINED_MODELS="${REUSE_TRAINED_MODELS:-0}"
 #   edu_base_config    — used for educational + BEIR datasets (small corpus)
 #   msmarco_base_config — used for MS MARCO (different batch/dtype/freeze settings)
 #
-# MRL and BAM-B always use e5-large.
-# BAM-PQ loops over BACKBONES_TO_RUN.
+# MRL and BAM-PQ both loop over BACKBONES_TO_RUN.
+# e5-large shared MRL is the default; each backbone gets its own MRL baseline.
 BASE_MRL_CONFIG="configs/mrl_e5large.yaml"
-BASE_BAM_B_CONFIG="configs/bam_optionb_e5large.yaml"
 
 # MRL base configs per backbone (educational and MS MARCO variants)
-# e5large MRL is the shared baseline also used for BAM-B warm-start.
-# All other backbones get their own backbone-matched MRL baseline.
+# All backbones get their own backbone-matched MRL baseline.
 declare -A BACKBONE_MRL_EDU_CFG=(
     [e5large]="configs/mrl_e5large.yaml"
     [bge]="configs/mrl_bge_large.yaml"
@@ -170,7 +166,6 @@ declare -A BACKBONE_MSMARCO_CFG=(
     [phi3mini]="configs/bam_pq_phi3mini_msmarco.yaml"
 )
 # All backbones warm-start BAM-PQ from their own backbone-matched MRL checkpoint.
-# e5large MRL is also used for BAM-B (e5large only model).
 BACKBONE_USE_MRL_INIT="e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm llama1b llama3b arctic roberta phi3mini"
 
 # Which backbones to run for BAM-PQ (override with --backbone or BACKBONES_TO_RUN)
@@ -203,12 +198,10 @@ ALL_STEPS=(
     build
     annotate
     train_mrl find_mrl
-    train_bam_b find_bam_b
     eval_pretrained
     train_standard_ft find_standard_ft eval_standard_ft
     train_mrl_bk find_mrl_bk
     train_bam_pq find_bam_pq
-    eval fair_cmp eff_curves
     eval_bam_pq fair_cmp_pq
 )
 
@@ -403,16 +396,13 @@ for DS in $DATASETS; do
 
     # ── Checkpoint dirs ──────────────────────────────────────────────────────
     MRL_CKPT="$CKPT_ROOT/$DS/mrl"
-    BAM_B_CKPT="$CKPT_ROOT/$DS/bam_b"
     DS_RESULTS="$RESULTS_ROOT/$DS"
     CFG_DIR="$DS_RESULTS/configs"
 
-    mkdir -p "$MRL_CKPT" "$BAM_B_CKPT" "$DS_RESULTS" "$CFG_DIR"
+    mkdir -p "$MRL_CKPT" "$DS_RESULTS" "$CFG_DIR"
 
     MRL_CFG="$CFG_DIR/mrl.yaml"
-    BAM_B_CFG="$CFG_DIR/bam_b.yaml"
     MRL_BEST="$MRL_CKPT/best"
-    BAM_B_BEST="$BAM_B_CKPT/best_bsr"
 
     # ─────────────────────────────────────────────────────────────────────────
     # STEP 1: BUILD
@@ -485,9 +475,8 @@ for DS in $DATASETS; do
             fi
         fi
 
-        # Generate per-dataset configs for MRL and BAM-B (e5-large only)
-        make_config "$BASE_MRL_CONFIG"   "$MRL_CFG"   "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$MRL_CKPT/"
-        make_config "$BASE_BAM_B_CONFIG" "$BAM_B_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BAM_B_CKPT/"
+        # Generate per-dataset config for MRL (e5-large shared baseline)
+        make_config "$BASE_MRL_CONFIG" "$MRL_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$MRL_CKPT/"
 
         # Generate per-dataset configs for each BAM-PQ backbone
         for BK in $BACKBONES_TO_RUN; do
@@ -505,8 +494,7 @@ for DS in $DATASETS; do
     fi
 
     # Always regenerate configs — ensures changes to base configs propagate
-    make_config "$BASE_MRL_CONFIG"   "$MRL_CFG"   "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$MRL_CKPT/"
-    make_config "$BASE_BAM_B_CONFIG" "$BAM_B_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BAM_B_CKPT/"
+    make_config "$BASE_MRL_CONFIG" "$MRL_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$MRL_CKPT/"
     for BK in $BACKBONES_TO_RUN; do
         BK_CFG="$CFG_DIR/bam_pq_${BK}.yaml"
         BK_CKPT="$CKPT_ROOT/$DS/bam_pq_$BK"
@@ -608,56 +596,7 @@ for DS in $DATASETS; do
     fi
 
     # ─────────────────────────────────────────────────────────────────────────
-    # STEP 5: TRAIN BAM-B (e5-large, once per dataset)
-    # ─────────────────────────────────────────────────────────────────────────
-    if should_run train_bam_b; then
-        log "[$DS] TRAIN BAM-B (e5-large, reverse two-stage)"
-        if [[ "$FORCE" == "1" ]] || [[ "$BLOOM_COUNCIL_REFRESHED" == "1" ]]; then
-            rm -rf "$BAM_B_CKPT"/epoch_* "$BAM_B_CKPT"/inbatch_best "$BAM_B_CKPT"/best_bsr "$BAM_B_CKPT"/final 2>/dev/null || true
-        fi
-        if [[ "$REUSE_TRAINED_MODELS" == "1" ]] && [[ "$FORCE" != "1" ]] \
-            && [[ "$BLOOM_COUNCIL_REFRESHED" != "1" ]] \
-            && { [[ -f "$BAM_B_BEST/checkpoint.pt" ]] || ls "$BAM_B_CKPT"/epoch_* &>/dev/null 2>&1; }; then
-            echo "  BAM-B checkpoint exists — skipping (REUSE_TRAINED_MODELS=1)."
-        else
-            [[ -f "$MRL_BEST/checkpoint.pt" ]] || die "[$DS] MRL best not found — run find_mrl first"
-            python3 scripts/train_bam.py \
-                --config         "$BAM_B_CFG" \
-                --init_encoder   "$MRL_BEST" \
-                --checkpoint_dir "$BAM_B_CKPT" \
-                --freeze_encoder \
-                || die "[$DS] BAM-B training failed"
-        fi
-    fi
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # STEP 6: FIND BEST BAM-B EPOCH
-    # ─────────────────────────────────────────────────────────────────────────
-    if should_run find_bam_b; then
-        if [[ "$IS_MSMARCO" == "1" ]]; then
-            log "[$DS] BSR SELECTION BAM-B — using final checkpoint"
-            if [[ -f "$BAM_B_BEST/checkpoint.pt" ]]; then
-                echo "  BAM-B best already linked."
-            elif [[ -f "$BAM_B_CKPT/final/checkpoint.pt" ]]; then
-                ln -sfn "$BAM_B_CKPT/final" "$BAM_B_BEST"
-                echo "  Linked $BAM_B_BEST → final"
-            else
-                die "[$DS] BAM-B final checkpoint not found"
-            fi
-        else
-            log "[$DS] BSR SELECTION — BAM-B"
-            mkdir -p "$DS_RESULTS/bam_b_bsr"
-            python3 scripts/find_best_epoch_bsr.py \
-                --config         "$BAM_B_CFG" \
-                --checkpoint_dir "$BAM_B_CKPT" \
-                --output_dir     "$DS_RESULTS/bam_b_bsr/" \
-                --alpha          "$BSR_ALPHA" \
-                || die "[$DS] BSR selection (BAM-B) failed"
-        fi
-    fi
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # STEPS 7–12: Per-backbone MRL + BAM-PQ
+    # STEPS 5–10: Per-backbone MRL + BAM-PQ
     # Each backbone gets its own MRL baseline (fair comparison), then BAM-PQ
     # warm-starts from that backbone's MRL checkpoint.
     # e5large MRL is already done in the shared steps — skip train_mrl_bk for it.
@@ -840,13 +779,8 @@ for DS in $DATASETS; do
             fi
         fi  # end non-e5large MRL
 
-        # e5large BAM-PQ warms from BAM-B (encoder already mask-adapted, bloom_logit pre-trained).
-        # Other backbones have no BAM-B — warm from their own backbone-matched MRL.
-        if [[ "$BK" == "e5large" ]] && [[ -f "$BAM_B_BEST/checkpoint.pt" ]]; then
-            INIT_ENCODER_ARG="--init_encoder $BAM_B_BEST"
-        else
-            INIT_ENCODER_ARG="--init_encoder $BK_MRL_BEST"
-        fi
+        # All backbones warm-start BAM-PQ from their backbone-matched MRL checkpoint.
+        INIT_ENCODER_ARG="--init_encoder $BK_MRL_BEST"
 
         # ── STEP 9: train_bam_pq ─────────────────────────────────────────────
         if should_run train_bam_pq; then
@@ -859,12 +793,8 @@ for DS in $DATASETS; do
                 && { [[ -f "$BK_BEST/checkpoint.pt" ]] || ls "$BK_CKPT"/epoch_* &>/dev/null 2>&1; }; then
                 echo "  BAM-PQ ($BK) checkpoint exists — skipping."
             else
-                if [[ "$BK" == "e5large" ]] && [[ -f "$BAM_B_BEST/checkpoint.pt" ]]; then
-                    : # warm from BAM-B — no MRL prereq needed
-                else
-                    [[ -f "$BK_MRL_BEST/checkpoint.pt" ]] \
-                        || die "[$DS][$BK] MRL best not found — run find_mrl_bk first"
-                fi
+                [[ -f "$BK_MRL_BEST/checkpoint.pt" ]] \
+                    || die "[$DS][$BK] MRL best not found — run find_mrl_bk first"
                 python3 scripts/train_bam.py \
                     --config         "$BK_CFG" \
                     --checkpoint_dir "$BK_CKPT" \
@@ -906,145 +836,58 @@ for DS in $DATASETS; do
     # ─────────────────────────────────────────────────────────────────────────
     if [[ "$IS_MSMARCO" == "1" ]]; then
 
-        if should_run eval || should_run eval_bam_pq; then
-            if [[ ! -f "$MRL_BEST/checkpoint.pt" ]] || [[ ! -f "$BAM_B_BEST/checkpoint.pt" ]]; then
-                echo "  SKIP [$DS] eval: shared checkpoints not found — run pipeline_shared.sh first."
+        if should_run eval_bam_pq; then
+            if [[ ! -f "$MRL_BEST/checkpoint.pt" ]]; then
+                echo "  SKIP [$DS] eval: MRL checkpoint not found — run find_mrl first."
             else
 
-            # Build --bam_pq_checkpoint / --bam_pq_config args for eval_zero_shot.py
-            # Use e5large BAM-PQ as the "primary" PQ model for the combined script;
-            # other backbones are evaluated separately below.
-            E5_PQ_BEST="$CKPT_ROOT/$DS/bam_pq_e5large/best_bsr"
-            E5_PQ_CFG="$CFG_DIR/bam_pq_e5large.yaml"
-            BAM_PQ_ARGS=""
-            if [[ -f "$E5_PQ_BEST/checkpoint.pt" ]] && [[ -f "$E5_PQ_CFG" ]]; then
-                BAM_PQ_ARGS="--bam_pq_checkpoint $E5_PQ_BEST --bam_pq_config $E5_PQ_CFG"
-            fi
-
-            # ── In-domain MS MARCO eval ───────────────────────────────────────
-            log "[$DS] IN-DOMAIN EVAL — corpus capped at $MSMARCO_EVAL_CORPUS_SIZE"
-            INDOMAIN_OUT="$DS_RESULTS/indomain"
-            mkdir -p "$INDOMAIN_OUT"
-            python3 scripts/eval_zero_shot.py \
-                --mrl_checkpoint   "$MRL_BEST"   \
-                --mrl_config       "$MRL_CFG"    \
-                --bam_b_checkpoint "$BAM_B_BEST" \
-                --bam_b_config     "$BAM_B_CFG"  \
-                $BAM_PQ_ARGS                     \
-                --datasets         msmarco        \
-                --output_dir       "$INDOMAIN_OUT" \
-                --max_corpus_size  "$MSMARCO_EVAL_CORPUS_SIZE" \
-                || die "[$DS] in-domain eval failed"
-
-            # ── Eval additional BAM-PQ backbones (in-domain) ─────────────────
+            # ── In-domain MS MARCO eval (per backbone) ───────────────────────
             for BK in $BACKBONES_TO_RUN; do
-                [[ "$BK" == "e5large" ]] && continue   # already included above
                 BK_BEST="$CKPT_ROOT/$DS/bam_pq_$BK/best_bsr"
                 BK_CFG_F="$CFG_DIR/bam_pq_${BK}.yaml"
+                BK_MRL_B="$CKPT_ROOT/$DS/mrl_$BK/best"
+                [[ "$BK" == "e5large" ]] && BK_MRL_B="$MRL_BEST"
                 [[ -f "$BK_BEST/checkpoint.pt" ]] || { echo "  [$BK] no checkpoint — skipping in-domain eval."; continue; }
                 INDOMAIN_BK="$DS_RESULTS/indomain_$BK"
                 mkdir -p "$INDOMAIN_BK"
                 python3 scripts/eval_zero_shot.py \
-                    --mrl_checkpoint   "$MRL_BEST"   \
-                    --mrl_config       "$MRL_CFG"    \
-                    --bam_b_checkpoint "$BAM_B_BEST" \
-                    --bam_b_config     "$BAM_B_CFG"  \
+                    --mrl_checkpoint    "$BK_MRL_B"  \
+                    --mrl_config        "$BK_CFG_F"  \
                     --bam_pq_checkpoint "$BK_BEST"   \
-                    --bam_pq_config    "$BK_CFG_F"   \
-                    --datasets         msmarco        \
-                    --output_dir       "$INDOMAIN_BK" \
-                    --max_corpus_size  "$MSMARCO_EVAL_CORPUS_SIZE" \
+                    --bam_pq_config     "$BK_CFG_F"  \
+                    --datasets          msmarco       \
+                    --output_dir        "$INDOMAIN_BK" \
+                    --max_corpus_size   "$MSMARCO_EVAL_CORPUS_SIZE" \
                     || echo "  WARNING: in-domain eval failed for backbone $BK"
                 echo "  In-domain [$BK] → $INDOMAIN_BK/zero_shot_results.json"
             done
 
-            # ── Zero-shot BEIR eval ───────────────────────────────────────────
+            # ── Zero-shot BEIR eval (per backbone) ───────────────────────────
             log "[$DS] ZERO-SHOT BEIR EVAL — $ZERO_SHOT_DATASETS"
-            ZERO_SHOT_OUT="$DS_RESULTS/zero_shot"
-            mkdir -p "$ZERO_SHOT_OUT"
-            python3 scripts/eval_zero_shot.py \
-                --mrl_checkpoint   "$MRL_BEST"   \
-                --mrl_config       "$MRL_CFG"    \
-                --bam_b_checkpoint "$BAM_B_BEST" \
-                --bam_b_config     "$BAM_B_CFG"  \
-                $BAM_PQ_ARGS                     \
-                --datasets         $ZERO_SHOT_DATASETS \
-                --output_dir       "$ZERO_SHOT_OUT" \
-                || die "[$DS] zero-shot BEIR eval failed"
-
-            # ── Zero-shot eval for additional backbones ───────────────────────
             for BK in $BACKBONES_TO_RUN; do
-                [[ "$BK" == "e5large" ]] && continue
                 BK_BEST="$CKPT_ROOT/$DS/bam_pq_$BK/best_bsr"
                 BK_CFG_F="$CFG_DIR/bam_pq_${BK}.yaml"
+                BK_MRL_B="$CKPT_ROOT/$DS/mrl_$BK/best"
+                [[ "$BK" == "e5large" ]] && BK_MRL_B="$MRL_BEST"
                 [[ -f "$BK_BEST/checkpoint.pt" ]] || { echo "  [$BK] no checkpoint — skipping zero-shot eval."; continue; }
                 ZERO_SHOT_BK="$DS_RESULTS/zero_shot_$BK"
                 mkdir -p "$ZERO_SHOT_BK"
                 python3 scripts/eval_zero_shot.py \
-                    --mrl_checkpoint   "$MRL_BEST"   \
-                    --mrl_config       "$MRL_CFG"    \
-                    --bam_b_checkpoint "$BAM_B_BEST" \
-                    --bam_b_config     "$BAM_B_CFG"  \
+                    --mrl_checkpoint    "$BK_MRL_B"  \
+                    --mrl_config        "$BK_CFG_F"  \
                     --bam_pq_checkpoint "$BK_BEST"   \
-                    --bam_pq_config    "$BK_CFG_F"   \
-                    --datasets         $ZERO_SHOT_DATASETS \
-                    --output_dir       "$ZERO_SHOT_BK" \
+                    --bam_pq_config     "$BK_CFG_F"  \
+                    --datasets          $ZERO_SHOT_DATASETS \
+                    --output_dir        "$ZERO_SHOT_BK" \
                     || echo "  WARNING: zero-shot eval failed for backbone $BK"
                 echo "  Zero-shot [$BK] → $ZERO_SHOT_BK/zero_shot_results.json"
             done
-            fi  # end shared-checkpoint guard
+            fi  # end MRL checkpoint guard
         fi
 
     else  # ── Non-MS MARCO datasets ──────────────────────────────────────────
 
-        # STEP 9: eval BAM-B
-        if should_run eval; then
-            log "[$DS] EVAL — BAM-B vs MRL"
-            if [[ ! -f "$MRL_BEST/checkpoint.pt" ]]; then
-                echo "  SKIP: MRL best not found at $MRL_BEST — run pipeline_shared.sh first."
-            elif [[ ! -f "$BAM_B_BEST/checkpoint.pt" ]]; then
-                echo "  SKIP: BAM-B best not found at $BAM_B_BEST — run pipeline_shared.sh first."
-            else
-            python3 scripts/eval_bam.py \
-                --config     "$BAM_B_CFG" \
-                --checkpoint "$BAM_B_BEST" \
-                --baseline   "$MRL_BEST" \
-                --output_dir "$DS_RESULTS/" \
-                || die "[$DS] eval_bam.py (BAM-B) failed"
-            echo "  Results → $DS_RESULTS/results.json"
-            fi
-        fi
-
-        # STEP 10: fair comparison BAM-B
-        if should_run fair_cmp; then
-            log "[$DS] FAIR COMPARISON — BAM-B vs MRL at same per-Bloom budget"
-            if [[ ! -f "$MRL_BEST/checkpoint.pt" ]] || [[ ! -f "$BAM_B_BEST/checkpoint.pt" ]]; then
-                echo "  SKIP: shared checkpoints not found — run pipeline_shared.sh first."
-            else
-            mkdir -p "$DS_RESULTS/fair_comparison"
-            python3 scripts/eval_fair_comparison.py \
-                --config         "$BAM_B_CFG" \
-                --bam_checkpoint "$BAM_B_BEST" \
-                --mrl_checkpoint "$MRL_BEST" \
-                --bam_results    "$DS_RESULTS/results.json" \
-                --output_dir     "$DS_RESULTS/fair_comparison/" \
-                || die "[$DS] eval_fair_comparison.py (BAM-B) failed"
-            fi
-        fi
-
-        # STEP 11: efficiency curves
-        if should_run eff_curves; then
-            log "[$DS] EFFICIENCY CURVES — R@10 vs dims (paper Figure 2)"
-            mkdir -p "$DS_RESULTS/efficiency_curves"
-            python3 scripts/eval_efficiency_curves.py \
-                --config         "$BAM_B_CFG" \
-                --bam_checkpoint "$BAM_B_BEST" \
-                --mrl_checkpoint "$MRL_BEST" \
-                --output_dir     "$DS_RESULTS/efficiency_curves/" \
-                || die "[$DS] eval_efficiency_curves.py failed"
-        fi
-
-        # STEPS 12–13: BAM-PQ eval per backbone
+        # BAM-PQ eval per backbone
         # Each backbone is evaluated against its own backbone-matched MRL baseline.
         for BK in $BACKBONES_TO_RUN; do
             BK_BEST="$CKPT_ROOT/$DS/bam_pq_$BK/best_bsr"
@@ -1163,20 +1006,6 @@ if "msmarco" in datasets:
 # ── In-domain summary (non-MS MARCO) ─────────────────────────────────────────
 non_ms = [d for d in datasets if d != "msmarco"]
 if non_ms:
-    print(f"\n  Standard: BAM-B vs MRL (R@10)")
-    print(f"  {'Dataset':<14}  {'MRL':>8}  {'BAM-B':>8}  {'Dims':>6}  {'Δ':>7}")
-    print("  " + "─" * 52)
-    for ds in non_ms:
-        r = _load(os.path.join(results_root, ds, "results.json"))
-        if r is None:
-            print(f"  {ds:<14}  (not run)")
-            continue
-        mrl = r.get("MRL Baseline", {}).get("recall@10", float("nan"))
-        bam = r.get("BAM v4 (Option B)", {}).get("recall@10", float("nan"))
-        dim = r.get("BAM v4 (Option B)", {}).get("avg_active_dims", float("nan"))
-        d   = bam - mrl if not (math.isnan(bam) or math.isnan(mrl)) else float("nan")
-        print(f"  {ds:<14}  {fmt(mrl):>8}  {fmt(bam):>8}  {dim:>6.0f}  {'+' if d>=0 else ''}{d*100:>5.2f}%")
-
     print(f"\n  BAM-PQ backbones vs MRL (R@10)")
     print(f"  {'Dataset':<14}  {'Backbone':<12}  {'MRL':>8}  {'BAM-PQ':>8}  {'Dims':>6}  {'Δ':>7}")
     print("  " + "─" * 66)
@@ -1211,7 +1040,7 @@ PYEOF
 log "PIPELINE COMPLETE"
 echo ""
 echo "  Council         : $COUNCIL_WEIGHTS"
-echo "  Checkpoints     : $CKPT_ROOT/{dataset}/{mrl,bam_b,bam_pq_{backbone}}/"
+echo "  Checkpoints     : $CKPT_ROOT/{dataset}/{mrl,bam_pq_{backbone}}/"
 echo "  Results         : $RESULTS_ROOT/{dataset}/bam_pq_{backbone}/results.json"
 echo "  MS MARCO BEIR   : $RESULTS_ROOT/msmarco/zero_shot_{backbone}/zero_shot_results.json"
 echo ""
