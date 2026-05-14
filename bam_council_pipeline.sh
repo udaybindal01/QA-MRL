@@ -17,7 +17,7 @@
 #   ./bam_council_pipeline.sh                                 # all models, all datasets
 #   ./bam_council_pipeline.sh --edu-only                      # educational only
 #   ./bam_council_pipeline.sh --msmarco-only                  # MS MARCO → BEIR zero-shot
-#   ./bam_council_pipeline.sh --from train_mrl                # skip build+annotate
+#   ./bam_council_pipeline.sh --from train_mrl_bk             # skip build+annotate
 #   ./bam_council_pipeline.sh --from train_bam_pq             # skip to BAM-PQ
 #   ./bam_council_pipeline.sh --datasets "scifact fiqa"       # subset of datasets
 #   ./bam_council_pipeline.sh --backbone "e5large qwen06b"    # subset of BAM-PQ backbones
@@ -197,7 +197,6 @@ ALL_STEPS=(
     train_classifier
     build
     annotate
-    train_mrl find_mrl
     eval_pretrained
     train_standard_ft find_standard_ft eval_standard_ft
     train_mrl_bk find_mrl_bk
@@ -547,59 +546,10 @@ for DS in $DATASETS; do
     fi
 
     # ─────────────────────────────────────────────────────────────────────────
-    # STEP 3: TRAIN MRL (e5-large baseline, once per dataset)
     # ─────────────────────────────────────────────────────────────────────────
-    if should_run train_mrl; then
-        log "[$DS] TRAIN MRL BASELINE (e5-large)"
-        if [[ "$FORCE" == "1" ]] || [[ "$BLOOM_COUNCIL_REFRESHED" == "1" ]]; then
-            rm -rf "$MRL_CKPT"/epoch_* "$MRL_CKPT"/inbatch_best "$MRL_CKPT"/best "$MRL_CKPT"/final 2>/dev/null || true
-        fi
-        if [[ "$REUSE_TRAINED_MODELS" == "1" ]] && [[ "$FORCE" != "1" ]] \
-            && [[ "$BLOOM_COUNCIL_REFRESHED" != "1" ]] \
-            && { [[ -f "$MRL_BEST/checkpoint.pt" ]] || ls "$MRL_CKPT"/epoch_* &>/dev/null 2>&1; }; then
-            echo "  MRL checkpoint exists — skipping (REUSE_TRAINED_MODELS=1)."
-        else
-            python3 scripts/train_baseline_mrl.py \
-                --config "$MRL_CFG" \
-                --checkpoint_dir "$MRL_CKPT" \
-                || die "[$DS] MRL training failed"
-        fi
-    fi
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # STEP 4: FIND BEST MRL EPOCH
-    # ─────────────────────────────────────────────────────────────────────────
-    if should_run find_mrl; then
-        if [[ "$IS_MSMARCO" == "1" ]]; then
-            log "[$DS] SELECT BEST MRL — using final checkpoint (2.9M corpus OOMs sweep)"
-            if [[ -f "$MRL_BEST/checkpoint.pt" ]]; then
-                echo "  MRL best already linked."
-            elif [[ -f "$MRL_CKPT/final/checkpoint.pt" ]]; then
-                ln -sfn "$MRL_CKPT/final" "$MRL_BEST"
-                echo "  Linked $MRL_BEST → final"
-            else
-                die "[$DS] MRL final checkpoint not found at $MRL_CKPT/final"
-            fi
-        else
-            log "[$DS] SELECT BEST MRL EPOCH (corpus-level retrieval)"
-            if [[ "$FORCE" != "1" ]] && [[ "$BLOOM_COUNCIL_REFRESHED" != "1" ]] \
-                && [[ -f "$MRL_BEST/checkpoint.pt" ]]; then
-                echo "  MRL best already selected."
-            else
-                python3 scripts/find_best_epoch.py \
-                    --config "$MRL_CFG" \
-                    --checkpoint_dir "$MRL_CKPT" \
-                    --model_type mrl \
-                    || die "[$DS] find_best_epoch (MRL) failed"
-            fi
-        fi
-    fi
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # STEPS 5–10: Per-backbone MRL + BAM-PQ
-    # Each backbone gets its own MRL baseline (fair comparison), then BAM-PQ
-    # warm-starts from that backbone's MRL checkpoint.
-    # e5large MRL is already done in the shared steps — skip train_mrl_bk for it.
+    # STEPS 3–N: Per-backbone MRL + BAM-PQ
+    # Every backbone (including e5large) trains its own MRL baseline here,
+    # then BAM-PQ warm-starts from that checkpoint.
     # ─────────────────────────────────────────────────────────────────────────
     for BK in $BACKBONES_TO_RUN; do
         # Skip 7B models when there isn't enough disk space in the HF cache dir
@@ -612,22 +562,24 @@ for DS in $DATASETS; do
         mkdir -p "$BK_CKPT" "$BK_RESULTS"
 
         # Per-backbone MRL checkpoint location
-        BK_MRL_CKPT="$CKPT_ROOT/$DS/mrl_$BK"
+        # e5large keeps the legacy "mrl" directory name for backward compat.
+        if [[ "$BK" == "e5large" ]]; then
+            BK_MRL_CKPT="$MRL_CKPT"
+            BK_MRL_CFG="$MRL_CFG"
+        else
+            BK_MRL_CKPT="$CKPT_ROOT/$DS/mrl_$BK"
+            BK_MRL_CFG="$CFG_DIR/mrl_${BK}.yaml"
+        fi
         BK_MRL_BEST="$BK_MRL_CKPT/best"
-        BK_MRL_CFG="$CFG_DIR/mrl_${BK}.yaml"
         mkdir -p "$BK_MRL_CKPT"
 
-        # Resolve base MRL config for this backbone + dataset and generate it
-        # early — needed by eval_pretrained (no training) and train_mrl_bk.
+        # Generate backbone MRL config (e5large config already generated in build step).
         if [[ "$IS_MSMARCO" == "1" ]]; then
             BASE_BK_MRL_CFG="${BACKBONE_MRL_MSMARCO_CFG[$BK]}"
         else
             BASE_BK_MRL_CFG="${BACKBONE_MRL_EDU_CFG[$BK]}"
         fi
-        if [[ "$BK" == "e5large" ]]; then
-            BK_MRL_CFG="$MRL_CFG"
-            BK_MRL_BEST="$MRL_BEST"
-        else
+        if [[ "$BK" != "e5large" ]]; then
             make_config "$BASE_BK_MRL_CFG" "$BK_MRL_CFG" \
                 "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BK_MRL_CKPT/"
         fi
@@ -730,54 +682,48 @@ for DS in $DATASETS; do
             fi
         fi
 
-        # ── STEP 8: train_mrl_bk ─────────────────────────────────────────────
-        # e5large MRL was already trained in the shared step (train_mrl).
-        # For e5large, just reuse $MRL_BEST as BK_MRL_BEST.
-        if [[ "$BK" == "e5large" ]]; then
-            : # BK_MRL_BEST and BK_MRL_CFG already set above
-        else
-            if should_run train_mrl_bk; then
-                log "[$DS][$BK] TRAIN MRL BASELINE"
-                if [[ "$FORCE" == "1" ]] || [[ "$BLOOM_COUNCIL_REFRESHED" == "1" ]]; then
-                    rm -rf "$BK_MRL_CKPT"/epoch_* "$BK_MRL_CKPT"/best "$BK_MRL_CKPT"/final 2>/dev/null || true
-                fi
-                if [[ "$REUSE_TRAINED_MODELS" == "1" ]] && [[ "$FORCE" != "1" ]] \
-                    && { [[ -f "$BK_MRL_BEST/checkpoint.pt" ]] || ls "$BK_MRL_CKPT"/epoch_* &>/dev/null 2>&1; }; then
-                    echo "  MRL ($BK) checkpoint exists — skipping."
+        # ── train_mrl_bk ─────────────────────────────────────────────────────
+        if should_run train_mrl_bk; then
+            log "[$DS][$BK] TRAIN MRL BASELINE"
+            if [[ "$FORCE" == "1" ]] || [[ "$BLOOM_COUNCIL_REFRESHED" == "1" ]]; then
+                rm -rf "$BK_MRL_CKPT"/epoch_* "$BK_MRL_CKPT"/best "$BK_MRL_CKPT"/final 2>/dev/null || true
+            fi
+            if [[ "$REUSE_TRAINED_MODELS" == "1" ]] && [[ "$FORCE" != "1" ]] \
+                && { [[ -f "$BK_MRL_BEST/checkpoint.pt" ]] || ls "$BK_MRL_CKPT"/epoch_* &>/dev/null 2>&1; }; then
+                echo "  MRL ($BK) checkpoint exists — skipping."
+            else
+                python3 scripts/train_baseline_mrl.py \
+                    --config         "$BK_MRL_CFG" \
+                    --checkpoint_dir "$BK_MRL_CKPT" \
+                    || die "[$DS][$BK] MRL training failed"
+            fi
+        fi
+
+        # ── find_mrl_bk ──────────────────────────────────────────────────────
+        if should_run find_mrl_bk; then
+            if [[ "$IS_MSMARCO" == "1" || "$BK" == "qwen8b" || "$BK" == "llama8b" || "$BK" == "qwen4b" ]]; then
+                log "[$DS][$BK] SELECT BEST MRL — using final checkpoint"
+                if [[ -f "$BK_MRL_BEST/checkpoint.pt" ]]; then
+                    echo "  MRL ($BK) best already linked."
+                elif [[ -f "$BK_MRL_CKPT/final/checkpoint.pt" ]]; then
+                    ln -sfn "$BK_MRL_CKPT/final" "$BK_MRL_BEST"
+                    echo "  Linked $BK_MRL_BEST → final"
                 else
-                    python3 scripts/train_baseline_mrl.py \
+                    die "[$DS][$BK] MRL final checkpoint not found"
+                fi
+            else
+                log "[$DS][$BK] SELECT BEST MRL EPOCH"
+                if [[ "$FORCE" != "1" ]] && [[ -f "$BK_MRL_BEST/checkpoint.pt" ]]; then
+                    echo "  MRL ($BK) best already selected."
+                else
+                    python3 scripts/find_best_epoch.py \
                         --config         "$BK_MRL_CFG" \
                         --checkpoint_dir "$BK_MRL_CKPT" \
-                        || die "[$DS][$BK] MRL training failed"
+                        --model_type     mrl \
+                        || die "[$DS][$BK] find_best_epoch (MRL) failed"
                 fi
             fi
-
-            # ── STEP 8: find_mrl_bk ──────────────────────────────────────────
-            if should_run find_mrl_bk; then
-                if [[ "$IS_MSMARCO" == "1" || "$BK" == "qwen8b" || "$BK" == "llama8b" || "$BK" == "qwen4b" ]]; then
-                    log "[$DS][$BK] SELECT BEST MRL — using final checkpoint"
-                    if [[ -f "$BK_MRL_BEST/checkpoint.pt" ]]; then
-                        echo "  MRL ($BK) best already linked."
-                    elif [[ -f "$BK_MRL_CKPT/final/checkpoint.pt" ]]; then
-                        ln -sfn "$BK_MRL_CKPT/final" "$BK_MRL_BEST"
-                        echo "  Linked $BK_MRL_BEST → final"
-                    else
-                        die "[$DS][$BK] MRL final checkpoint not found"
-                    fi
-                else
-                    log "[$DS][$BK] SELECT BEST MRL EPOCH"
-                    if [[ "$FORCE" != "1" ]] && [[ -f "$BK_MRL_BEST/checkpoint.pt" ]]; then
-                        echo "  MRL ($BK) best already selected."
-                    else
-                        python3 scripts/find_best_epoch.py \
-                            --config         "$BK_MRL_CFG" \
-                            --checkpoint_dir "$BK_MRL_CKPT" \
-                            --model_type     mrl \
-                            || die "[$DS][$BK] find_best_epoch (MRL) failed"
-                    fi
-                fi
-            fi
-        fi  # end non-e5large MRL
+        fi
 
         # All backbones warm-start BAM-PQ from their backbone-matched MRL checkpoint.
         INIT_ENCODER_ARG="--init_encoder $BK_MRL_BEST"
@@ -838,7 +784,7 @@ for DS in $DATASETS; do
 
         if should_run eval_bam_pq; then
             if [[ ! -f "$MRL_BEST/checkpoint.pt" ]]; then
-                echo "  SKIP [$DS] eval: MRL checkpoint not found — run find_mrl first."
+                echo "  SKIP [$DS] eval: e5large MRL checkpoint not found — run find_mrl_bk first."
             else
 
             # ── In-domain MS MARCO eval (per backbone) ───────────────────────
@@ -846,7 +792,7 @@ for DS in $DATASETS; do
                 BK_BEST="$CKPT_ROOT/$DS/bam_pq_$BK/best_bsr"
                 BK_CFG_F="$CFG_DIR/bam_pq_${BK}.yaml"
                 BK_MRL_B="$CKPT_ROOT/$DS/mrl_$BK/best"
-                [[ "$BK" == "e5large" ]] && BK_MRL_B="$MRL_BEST"
+                [[ "$BK" == "e5large" ]] && BK_MRL_B="$MRL_CKPT/best"
                 [[ -f "$BK_BEST/checkpoint.pt" ]] || { echo "  [$BK] no checkpoint — skipping in-domain eval."; continue; }
                 INDOMAIN_BK="$DS_RESULTS/indomain_$BK"
                 mkdir -p "$INDOMAIN_BK"
@@ -868,7 +814,7 @@ for DS in $DATASETS; do
                 BK_BEST="$CKPT_ROOT/$DS/bam_pq_$BK/best_bsr"
                 BK_CFG_F="$CFG_DIR/bam_pq_${BK}.yaml"
                 BK_MRL_B="$CKPT_ROOT/$DS/mrl_$BK/best"
-                [[ "$BK" == "e5large" ]] && BK_MRL_B="$MRL_BEST"
+                [[ "$BK" == "e5large" ]] && BK_MRL_B="$MRL_CKPT/best"
                 [[ -f "$BK_BEST/checkpoint.pt" ]] || { echo "  [$BK] no checkpoint — skipping zero-shot eval."; continue; }
                 ZERO_SHOT_BK="$DS_RESULTS/zero_shot_$BK"
                 mkdir -p "$ZERO_SHOT_BK"
@@ -895,9 +841,9 @@ for DS in $DATASETS; do
             BK_RESULTS="$DS_RESULTS/bam_pq_$BK"
             mkdir -p "$BK_RESULTS"
 
-            # Resolve this backbone's MRL baseline (e5large reuses shared MRL_BEST)
+            # Resolve this backbone's MRL baseline checkpoint.
             if [[ "$BK" == "e5large" ]]; then
-                BK_MRL_BASELINE="$MRL_BEST"
+                BK_MRL_BASELINE="$MRL_CKPT/best"
             else
                 BK_MRL_BASELINE="$CKPT_ROOT/$DS/mrl_$BK/best"
             fi
