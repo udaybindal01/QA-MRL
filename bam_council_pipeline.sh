@@ -70,10 +70,6 @@ REUSE_TRAINED_MODELS="${REUSE_TRAINED_MODELS:-0}"
 #   edu_base_config    — used for educational + BEIR datasets (small corpus)
 #   msmarco_base_config — used for MS MARCO (different batch/dtype/freeze settings)
 #
-# MRL and BAM-PQ both loop over BACKBONES_TO_RUN.
-# e5-large shared MRL is the default; each backbone gets its own MRL baseline.
-BASE_MRL_CONFIG="configs/mrl_e5large.yaml"
-
 # MRL base configs per backbone (educational and MS MARCO variants)
 # All backbones get their own backbone-matched MRL baseline.
 declare -A BACKBONE_MRL_EDU_CFG=(
@@ -394,14 +390,10 @@ for DS in $DATASETS; do
     fi
 
     # ── Checkpoint dirs ──────────────────────────────────────────────────────
-    MRL_CKPT="$CKPT_ROOT/$DS/mrl"
     DS_RESULTS="$RESULTS_ROOT/$DS"
     CFG_DIR="$DS_RESULTS/configs"
 
-    mkdir -p "$MRL_CKPT" "$DS_RESULTS" "$CFG_DIR"
-
-    MRL_CFG="$CFG_DIR/mrl.yaml"
-    MRL_BEST="$MRL_CKPT/best"
+    mkdir -p "$DS_RESULTS" "$CFG_DIR"
 
     # ─────────────────────────────────────────────────────────────────────────
     # STEP 1: BUILD
@@ -474,9 +466,6 @@ for DS in $DATASETS; do
             fi
         fi
 
-        # Generate per-dataset config for MRL (e5-large shared baseline)
-        make_config "$BASE_MRL_CONFIG" "$MRL_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$MRL_CKPT/"
-
         # Generate per-dataset configs for each BAM-PQ backbone
         for BK in $BACKBONES_TO_RUN; do
             BK_CKPT="$CKPT_ROOT/$DS/bam_pq_$BK"
@@ -493,7 +482,6 @@ for DS in $DATASETS; do
     fi
 
     # Always regenerate configs — ensures changes to base configs propagate
-    make_config "$BASE_MRL_CONFIG" "$MRL_CFG" "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$MRL_CKPT/"
     for BK in $BACKBONES_TO_RUN; do
         BK_CFG="$CFG_DIR/bam_pq_${BK}.yaml"
         BK_CKPT="$CKPT_ROOT/$DS/bam_pq_$BK"
@@ -562,27 +550,18 @@ for DS in $DATASETS; do
         mkdir -p "$BK_CKPT" "$BK_RESULTS"
 
         # Per-backbone MRL checkpoint location
-        # e5large keeps the legacy "mrl" directory name for backward compat.
-        if [[ "$BK" == "e5large" ]]; then
-            BK_MRL_CKPT="$MRL_CKPT"
-            BK_MRL_CFG="$MRL_CFG"
-        else
-            BK_MRL_CKPT="$CKPT_ROOT/$DS/mrl_$BK"
-            BK_MRL_CFG="$CFG_DIR/mrl_${BK}.yaml"
-        fi
+        BK_MRL_CKPT="$CKPT_ROOT/$DS/mrl_$BK"
+        BK_MRL_CFG="$CFG_DIR/mrl_${BK}.yaml"
         BK_MRL_BEST="$BK_MRL_CKPT/best"
         mkdir -p "$BK_MRL_CKPT"
 
-        # Generate backbone MRL config (e5large config already generated in build step).
         if [[ "$IS_MSMARCO" == "1" ]]; then
             BASE_BK_MRL_CFG="${BACKBONE_MRL_MSMARCO_CFG[$BK]}"
         else
             BASE_BK_MRL_CFG="${BACKBONE_MRL_EDU_CFG[$BK]}"
         fi
-        if [[ "$BK" != "e5large" ]]; then
-            make_config "$BASE_BK_MRL_CFG" "$BK_MRL_CFG" \
-                "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BK_MRL_CKPT/"
-        fi
+        make_config "$BASE_BK_MRL_CFG" "$BK_MRL_CFG" \
+            "$TRAIN_PATH" "$VAL_PATH" "$TEST_PATH" "$CORPUS_PATH" "$BK_MRL_CKPT/"
 
         # ── STEP 7: eval_pretrained ──────────────────────────────────────────
         # Zero-shot truncation baseline — no training, just eval pretrained
@@ -783,16 +762,11 @@ for DS in $DATASETS; do
     if [[ "$IS_MSMARCO" == "1" ]]; then
 
         if should_run eval_bam_pq; then
-            if [[ ! -f "$MRL_BEST/checkpoint.pt" ]]; then
-                echo "  SKIP [$DS] eval: e5large MRL checkpoint not found — run find_mrl_bk first."
-            else
-
             # ── In-domain MS MARCO eval (per backbone) ───────────────────────
             for BK in $BACKBONES_TO_RUN; do
                 BK_BEST="$CKPT_ROOT/$DS/bam_pq_$BK/best_bsr"
                 BK_CFG_F="$CFG_DIR/bam_pq_${BK}.yaml"
                 BK_MRL_B="$CKPT_ROOT/$DS/mrl_$BK/best"
-                [[ "$BK" == "e5large" ]] && BK_MRL_B="$MRL_CKPT/best"
                 [[ -f "$BK_BEST/checkpoint.pt" ]] || { echo "  [$BK] no checkpoint — skipping in-domain eval."; continue; }
                 INDOMAIN_BK="$DS_RESULTS/indomain_$BK"
                 mkdir -p "$INDOMAIN_BK"
@@ -814,7 +788,6 @@ for DS in $DATASETS; do
                 BK_BEST="$CKPT_ROOT/$DS/bam_pq_$BK/best_bsr"
                 BK_CFG_F="$CFG_DIR/bam_pq_${BK}.yaml"
                 BK_MRL_B="$CKPT_ROOT/$DS/mrl_$BK/best"
-                [[ "$BK" == "e5large" ]] && BK_MRL_B="$MRL_CKPT/best"
                 [[ -f "$BK_BEST/checkpoint.pt" ]] || { echo "  [$BK] no checkpoint — skipping zero-shot eval."; continue; }
                 ZERO_SHOT_BK="$DS_RESULTS/zero_shot_$BK"
                 mkdir -p "$ZERO_SHOT_BK"
@@ -828,7 +801,6 @@ for DS in $DATASETS; do
                     || echo "  WARNING: zero-shot eval failed for backbone $BK"
                 echo "  Zero-shot [$BK] → $ZERO_SHOT_BK/zero_shot_results.json"
             done
-            fi  # end MRL checkpoint guard
         fi
 
     else  # ── Non-MS MARCO datasets ──────────────────────────────────────────
@@ -841,12 +813,7 @@ for DS in $DATASETS; do
             BK_RESULTS="$DS_RESULTS/bam_pq_$BK"
             mkdir -p "$BK_RESULTS"
 
-            # Resolve this backbone's MRL baseline checkpoint.
-            if [[ "$BK" == "e5large" ]]; then
-                BK_MRL_BASELINE="$MRL_CKPT/best"
-            else
-                BK_MRL_BASELINE="$CKPT_ROOT/$DS/mrl_$BK/best"
-            fi
+            BK_MRL_BASELINE="$CKPT_ROOT/$DS/mrl_$BK/best"
 
             if should_run eval_bam_pq; then
                 log "[$DS][$BK] EVAL — BAM-PQ vs MRL ($BK baseline)"
