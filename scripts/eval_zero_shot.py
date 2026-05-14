@@ -71,6 +71,10 @@ def load_mrl_model(config, ckpt_path, device):
         model_name=mc["backbone"],
         embedding_dim=mc.get("embedding_dim", 768),
         mrl_dims=mc.get("mrl_dims", [64, 128, 256, 512, 768]),
+        pooling=mc.get("pooling", "cls"),
+        backbone_type=mc.get("backbone_type", "standard"),
+        query_instruction=mc.get("query_instruction", None),
+        peft_model_name=mc.get("peft_model_name", None),
     )
     ckpt_file = os.path.join(ckpt_path, "checkpoint.pt")
     if os.path.exists(ckpt_file):

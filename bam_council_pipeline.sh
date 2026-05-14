@@ -766,17 +766,18 @@ for DS in $DATASETS; do
             for BK in $BACKBONES_TO_RUN; do
                 BK_BEST="$CKPT_ROOT/$DS/bam_pq_$BK/best_bsr"
                 BK_CFG_F="$CFG_DIR/bam_pq_${BK}.yaml"
+                BK_MRL_CFG_F="$CFG_DIR/mrl_${BK}.yaml"
                 BK_MRL_B="$CKPT_ROOT/$DS/mrl_$BK/best"
                 [[ -f "$BK_BEST/checkpoint.pt" ]] || { echo "  [$BK] no checkpoint — skipping in-domain eval."; continue; }
                 INDOMAIN_BK="$DS_RESULTS/indomain_$BK"
                 mkdir -p "$INDOMAIN_BK"
                 python3 scripts/eval_zero_shot.py \
-                    --mrl_checkpoint    "$BK_MRL_B"  \
-                    --mrl_config        "$BK_CFG_F"  \
-                    --bam_pq_checkpoint "$BK_BEST"   \
-                    --bam_pq_config     "$BK_CFG_F"  \
-                    --datasets          msmarco       \
-                    --output_dir        "$INDOMAIN_BK" \
+                    --mrl_checkpoint    "$BK_MRL_B"     \
+                    --mrl_config        "$BK_MRL_CFG_F" \
+                    --bam_pq_checkpoint "$BK_BEST"      \
+                    --bam_pq_config     "$BK_CFG_F"     \
+                    --datasets          msmarco          \
+                    --output_dir        "$INDOMAIN_BK"  \
                     --max_corpus_size   "$MSMARCO_EVAL_CORPUS_SIZE" \
                     || echo "  WARNING: in-domain eval failed for backbone $BK"
                 echo "  In-domain [$BK] → $INDOMAIN_BK/zero_shot_results.json"
@@ -787,15 +788,16 @@ for DS in $DATASETS; do
             for BK in $BACKBONES_TO_RUN; do
                 BK_BEST="$CKPT_ROOT/$DS/bam_pq_$BK/best_bsr"
                 BK_CFG_F="$CFG_DIR/bam_pq_${BK}.yaml"
+                BK_MRL_CFG_F="$CFG_DIR/mrl_${BK}.yaml"
                 BK_MRL_B="$CKPT_ROOT/$DS/mrl_$BK/best"
                 [[ -f "$BK_BEST/checkpoint.pt" ]] || { echo "  [$BK] no checkpoint — skipping zero-shot eval."; continue; }
                 ZERO_SHOT_BK="$DS_RESULTS/zero_shot_$BK"
                 mkdir -p "$ZERO_SHOT_BK"
                 python3 scripts/eval_zero_shot.py \
-                    --mrl_checkpoint    "$BK_MRL_B"  \
-                    --mrl_config        "$BK_CFG_F"  \
-                    --bam_pq_checkpoint "$BK_BEST"   \
-                    --bam_pq_config     "$BK_CFG_F"  \
+                    --mrl_checkpoint    "$BK_MRL_B"     \
+                    --mrl_config        "$BK_MRL_CFG_F" \
+                    --bam_pq_checkpoint "$BK_BEST"      \
+                    --bam_pq_config     "$BK_CFG_F"     \
                     --datasets          $ZERO_SHOT_DATASETS \
                     --output_dir        "$ZERO_SHOT_BK" \
                     || echo "  WARNING: zero-shot eval failed for backbone $BK"
