@@ -8,10 +8,12 @@
 # Step 2: Collect results and print table.
 #
 # Usage:
-#   bash scripts/run_loss_ablations.sh              # MRL + all 7 variants
-#   bash scripts/run_loss_ablations.sh full          # MRL (if needed) + full model only
-#   bash scripts/run_loss_ablations.sh no_sparsity   # MRL (if needed) + single ablation
-#   SKIP_MRL=1 bash scripts/run_loss_ablations.sh   # skip MRL training (reuse existing)
+#   bash scripts/run_loss_ablations.sh                        # MRL + all 7 variants
+#   bash scripts/run_loss_ablations.sh full                   # single variant
+#   bash scripts/run_loss_ablations.sh no_sparsity            # single variant
+#   bash scripts/run_loss_ablations.sh --from no_variance     # resume from this variant onwards
+#   SKIP_MRL=1 bash scripts/run_loss_ablations.sh             # skip MRL training
+#   SKIP_MRL=1 bash scripts/run_loss_ablations.sh --from no_variance  # resume + skip MRL
 
 set -euo pipefail
 
@@ -68,6 +70,16 @@ ABLATIONS=(
     contrastive_only
 )
 
+FROM_VARIANT=""
+SINGLE_VARIANT=""
+if [[ $# -gt 0 ]]; then
+    if [[ "$1" == "--from" ]]; then
+        FROM_VARIANT="$2"
+    else
+        SINGLE_VARIANT="$1"
+    fi
+fi
+
 run_variant() {
     local name="$1"
     local cfg="configs/ablations/abl_${name}.yaml"
@@ -106,15 +118,18 @@ run_variant() {
     echo "  Done: ${name}"
 }
 
-# If argument given, run only that variant (MRL already handled above)
-if [[ $# -gt 0 ]]; then
-    run_variant "$1"
+# Single variant
+if [[ -n "$SINGLE_VARIANT" ]]; then
+    run_variant "$SINGLE_VARIANT"
     exit 0
 fi
 
-# Otherwise run all 7 variants
+# Run all variants, optionally skipping those before FROM_VARIANT
+AFTER=0
+[[ -z "$FROM_VARIANT" ]] && AFTER=1
 for name in "${ABLATIONS[@]}"; do
-    run_variant "$name"
+    [[ "$name" == "$FROM_VARIANT" ]] && AFTER=1
+    [[ "$AFTER" == "1" ]] && run_variant "$name"
 done
 
 echo ""
