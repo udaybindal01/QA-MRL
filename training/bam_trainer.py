@@ -179,7 +179,10 @@ class BAMTrainer:
 
             # Enable gradient checkpointing to avoid OOM from storing all encoder activations
             # during backward pass (frozen stage had no encoder grads; now we need them).
+            # use_cache must be disabled — it is incompatible with gradient checkpointing
+            # (Qwen/causal LMs have it on by default, causing a warning + activation recompute).
             try:
+                self.model.encoder.transformer.config.use_cache = False
                 self.model.encoder.transformer.gradient_checkpointing_enable()
                 self.logger.info("Gradient checkpointing enabled for encoder fine-tuning.")
             except AttributeError:

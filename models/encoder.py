@@ -68,6 +68,7 @@ class MRLEncoder(nn.Module):
             # standard or qwen — both load via AutoModel
             self.transformer = self._load_automodel(model_name, dtype)
             if gradient_checkpointing:
+                self.transformer.config.use_cache = False
                 self.transformer.gradient_checkpointing_enable()
 
         self.tokenizer = self._load_tokenizer(model_name)
