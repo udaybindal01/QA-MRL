@@ -844,6 +844,7 @@ for DS in $DATASETS; do
                     mkdir -p "$BK_RESULTS/fair_comparison"
                     python3 scripts/eval_fair_comparison.py \
                         --config         "$BK_CFG_F" \
+                        --mrl_config     "$BK_MRL_CFG" \
                         --bam_checkpoint "$BK_BEST" \
                         --mrl_checkpoint "$BK_MRL_BASELINE" \
                         --bam_results    "$BK_RESULTS/results.json" \

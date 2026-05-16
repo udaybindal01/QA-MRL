@@ -48,9 +48,15 @@ def load_bam(config, ckpt_path, device):
 
 def load_mrl(config, ckpt_path, device):
     mc = config["model"]
-    model = MRLEncoder(model_name=mc["backbone"],
-                       embedding_dim=mc["embedding_dim"],
-                       mrl_dims=mc["mrl_dims"])
+    model = MRLEncoder(
+        model_name=mc["backbone"],
+        embedding_dim=mc["embedding_dim"],
+        mrl_dims=mc["mrl_dims"],
+        pooling=mc.get("pooling", "cls"),
+        backbone_type=mc.get("backbone_type", "standard"),
+        query_instruction=mc.get("query_instruction", None),
+        peft_model_name=mc.get("peft_model_name", None),
+    )
     f = os.path.join(ckpt_path, "checkpoint.pt")
     if os.path.exists(f):
         ckpt = torch.load(f, map_location=device)
@@ -187,6 +193,9 @@ def bam_retrieval_per_level(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/bam.yaml")
+    parser.add_argument("--mrl_config", default=None,
+                        help="Config for the MRL model (backbone/pooling/etc). "
+                             "Defaults to --config if not provided.")
     parser.add_argument("--bam_checkpoint", required=True)
     parser.add_argument("--mrl_checkpoint", required=True)
     parser.add_argument("--bam_results", default=None,
@@ -197,6 +206,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
+    mrl_config = load_config(args.mrl_config) if args.mrl_config else config
     set_seed(config["training"]["seed"])
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -224,7 +234,7 @@ def main():
 
     # ── MRL: encode corpus + queries ─────────────────────────────────────────
     print("\nEncoding corpus + queries with MRL...")
-    mrl_model = load_mrl(config, args.mrl_checkpoint, device)
+    mrl_model = load_mrl(mrl_config, args.mrl_checkpoint, device)
     mrl_corpus_embs = encode_corpus(mrl_model, corpus_texts, tokenizer, device)
     print(f"  MRL corpus: {mrl_corpus_embs.shape}")
     mrl_q_embs = encode_queries_mrl(mrl_model, valid, tokenizer, device)
