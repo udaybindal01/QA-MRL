@@ -1,7 +1,7 @@
 """
-Fair per-Bloom-level comparison: BAM-B vs MRL at the SAME dimension budget.
+Fair per-Bloom-level comparison: BAM-PQ vs MRL at the SAME dimension budget.
 
-For each Bloom level, BAM-B uses N_b active dims (e.g. Remember≈396, Understand≈675).
+For each Bloom level, BAM-PQ uses N_b active dims (e.g. Remember≈396, Understand≈675).
 This script evaluates MRL truncated to exactly N_b dims on that level's queries,
 so the retrieval budgets match.
 
@@ -285,7 +285,7 @@ def main():
     print(f"{'='*70}")
     header = (f"  {'Level':14s}  {'N':>5}  {'Budget':>7}  "
               f"{'MRL-full':>9}  {'MRL-trunc':>10}  "
-              f"{'BAM-B':>8}  {'Δ(BAM-MRL_trunc)':>17}")
+              f"{'BAM-PQ':>9}  {'Δ(BAM-MRL_trunc)':>17}")
     print(header)
     print("  " + "-" * (len(header) - 2))
 
