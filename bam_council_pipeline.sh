@@ -86,6 +86,7 @@ declare -A BACKBONE_MRL_EDU_CFG=(
     [arctic]="configs/mrl_arctic.yaml"
     [roberta]="configs/mrl_roberta.yaml"
     [phi3mini]="configs/mrl_phi3mini.yaml"
+    [bge_base]="configs/mrl_bge_base.yaml"
 )
 declare -A BACKBONE_MRL_MSMARCO_CFG=(
     [e5large]="configs/mrl_e5large_msmarco.yaml"
@@ -117,6 +118,7 @@ declare -A BACKBONE_STANDARD_FT_EDU_CFG=(
     [arctic]="configs/standard_ft_arctic.yaml"
     [roberta]="configs/standard_ft_roberta.yaml"
     [phi3mini]="configs/standard_ft_phi3mini.yaml"
+    [bge_base]="configs/standard_ft_bge_base.yaml"
 )
 declare -A BACKBONE_STANDARD_FT_MSMARCO_CFG=(
     [e5large]="configs/standard_ft_e5large_msmarco.yaml"
@@ -145,6 +147,7 @@ declare -A BACKBONE_EDU_CFG=(
     [arctic]="configs/bam_pq_arctic.yaml"
     [roberta]="configs/bam_pq_roberta.yaml"
     [phi3mini]="configs/bam_pq_phi3mini.yaml"
+    [bge_base]="configs/bam_pq_bge_base.yaml"
 )
 declare -A BACKBONE_MSMARCO_CFG=(
     [e5large]="configs/bam_pq_msmarco.yaml"
@@ -162,10 +165,10 @@ declare -A BACKBONE_MSMARCO_CFG=(
     [phi3mini]="configs/bam_pq_phi3mini_msmarco.yaml"
 )
 # All backbones warm-start BAM-PQ from their own backbone-matched MRL checkpoint.
-BACKBONE_USE_MRL_INIT="e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm llama1b llama3b arctic roberta phi3mini"
+BACKBONE_USE_MRL_INIT="e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm llama1b llama3b arctic roberta phi3mini bge_base"
 
 # Which backbones to run for BAM-PQ (override with --backbone or BACKBONES_TO_RUN)
-BACKBONES_TO_RUN="${BACKBONES_TO_RUN:-e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm llama1b llama3b arctic roberta phi3mini}"
+BACKBONES_TO_RUN="${BACKBONES_TO_RUN:-e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm llama1b llama3b arctic roberta phi3mini bge_base}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ARGUMENT PARSING
