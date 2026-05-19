@@ -18,14 +18,14 @@ data:
   bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
   subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
   max_query_length: 128
-  max_passage_length: 256
-  num_hard_negatives: 15
+  max_passage_length: 192
+  num_hard_negatives: 7
 
 training:
   seed: 42
   num_epochs: 15
-  batch_size: 8
-  gradient_accumulation_steps: 16
+  batch_size: 2
+  gradient_accumulation_steps: 64
   fp16: false
   bf16: true
   max_grad_norm: 1.0
