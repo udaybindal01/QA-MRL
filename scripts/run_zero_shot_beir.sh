@@ -23,6 +23,7 @@ RESULTS_ROOT="${RESULTS_ROOT:-./results/zero_shot_beir}"
 DATASETS="${DATASETS:-scifact nfcorpus fiqa}"
 BACKBONES="${BACKBONES:-e5large bge arctic mxbai bge_base phi3mini}"
 SKIP_SFT="${SKIP_SFT:-0}"   # set to 1 to skip standard FT evaluation
+SPARSE="${SPARSE:-0}"       # set to 1 to enable sparse retrieval + avg_active_dims logging
 
 # ── Config registry ───────────────────────────────────────────────────────────
 declare -A BAM_CFG=(
@@ -73,6 +74,8 @@ echo "  SKIP_SFT      : $SKIP_SFT"
 
 BEIR_DATA_ARGS=""
 [[ -n "$BEIR_DATA_ROOT" ]] && BEIR_DATA_ARGS="--beir_data_root $BEIR_DATA_ROOT"
+SPARSE_ARG=""
+[[ "$SPARSE" == "1" ]] && SPARSE_ARG="--sparse"
 
 # ── Per-backbone eval ─────────────────────────────────────────────────────────
 for BK in $BACKBONES; do
@@ -107,6 +110,7 @@ for BK in $BACKBONES; do
             --datasets   $DATASETS      \
             --output_dir "$BK_OUT/"     \
             $BEIR_DATA_ARGS             \
+            $SPARSE_ARG                 \
             || die "[$BK] eval_beir.py (BAM-PQ+MRL) failed"
 
         echo "  Saved → $BK_OUT/beir_results.json"
