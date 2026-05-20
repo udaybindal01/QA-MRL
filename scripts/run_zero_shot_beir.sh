@@ -18,6 +18,7 @@
 set -euo pipefail
 
 CKPT_ROOT="${CKPT_ROOT:-/tmp/multi-domain}"
+BEIR_DATA_ROOT="${BEIR_DATA_ROOT:-}"          # e.g. /scratch/ishaan.karan/bampq-data/beir
 RESULTS_ROOT="${RESULTS_ROOT:-./results/zero_shot_beir}"
 DATASETS="${DATASETS:-scifact nfcorpus fiqa}"
 BACKBONES="${BACKBONES:-e5large bge arctic mxbai bge_base phi3mini}"
@@ -63,11 +64,15 @@ log() { echo ""; echo "═══════════════════
 mkdir -p "$RESULTS_ROOT"
 
 log "Zero-shot BEIR eval"
-echo "  CKPT_ROOT   : $CKPT_ROOT"
-echo "  RESULTS_ROOT: $RESULTS_ROOT"
-echo "  DATASETS    : $DATASETS"
-echo "  BACKBONES   : $BACKBONES"
-echo "  SKIP_SFT    : $SKIP_SFT"
+echo "  CKPT_ROOT     : $CKPT_ROOT"
+echo "  BEIR_DATA_ROOT: ${BEIR_DATA_ROOT:-(not set — will download)}"
+echo "  RESULTS_ROOT  : $RESULTS_ROOT"
+echo "  DATASETS      : $DATASETS"
+echo "  BACKBONES     : $BACKBONES"
+echo "  SKIP_SFT      : $SKIP_SFT"
+
+BEIR_DATA_ARGS=""
+[[ -n "$BEIR_DATA_ROOT" ]] && BEIR_DATA_ARGS="--beir_data_root $BEIR_DATA_ROOT"
 
 # ── Per-backbone eval ─────────────────────────────────────────────────────────
 for BK in $BACKBONES; do
@@ -101,6 +106,7 @@ for BK in $BACKBONES; do
             --model_type bam            \
             --datasets   $DATASETS      \
             --output_dir "$BK_OUT/"     \
+            $BEIR_DATA_ARGS             \
             || die "[$BK] eval_beir.py (BAM-PQ+MRL) failed"
 
         echo "  Saved → $BK_OUT/beir_results.json"
@@ -119,6 +125,7 @@ for BK in $BACKBONES; do
                 --model_type mrl            \
                 --datasets   $DATASETS      \
                 --output_dir "$BK_OUT/sft/" \
+                $BEIR_DATA_ARGS             \
                 || die "[$BK] eval_beir.py (Standard FT) failed"
 
             echo "  Saved → $BK_OUT/sft/beir_results.json"

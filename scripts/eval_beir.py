@@ -53,12 +53,78 @@ BEIR_DATASETS = [
 BEIR_QUICK = ["scifact", "nfcorpus", "fiqa", "arguana", "scidocs"]
 
 
-def load_beir_dataset(dataset_name: str, split: str = "test"):
+def load_local_jsonl_beir(data_dir: str, split: str = "test"):
     """
-    Load a BEIR dataset. Returns corpus, queries, qrels.
+    Load BEIR dataset from local JSONL files (pipeline format).
+    Expected files: corpus.jsonl, {split}.jsonl
+    corpus.jsonl  rows: {"_id": ..., "title": ..., "text": ...}
+    {split}.jsonl rows: {"_id": ..., "text": ..., "relevant_docs": [...]}
+                     OR {"query_id": ..., "query": ..., "relevant_docs": [...]}
+    Returns corpus, queries, qrels dicts.
+    """
+    import json as _json
+    corpus_path = os.path.join(data_dir, "corpus.jsonl")
+    split_path  = os.path.join(data_dir, f"{split}.jsonl")
+    if not os.path.exists(corpus_path) or not os.path.exists(split_path):
+        return None, None, None
 
-    Uses beir library if available, otherwise downloads manually.
+    corpus = {}
+    with open(corpus_path) as f:
+        for line in f:
+            row = _json.loads(line)
+            cid = str(row.get("_id") or row.get("doc_id") or row.get("id"))
+            corpus[cid] = {"title": row.get("title", ""), "text": row.get("text", "")}
+
+    queries, qrels = {}, defaultdict(dict)
+    with open(split_path) as f:
+        for line in f:
+            row = _json.loads(line)
+            qid = str(row.get("_id") or row.get("query_id") or row.get("id"))
+            qtxt = row.get("text") or row.get("query") or ""
+            queries[qid] = qtxt
+            for rel in row.get("relevant_docs", []):
+                if isinstance(rel, dict):
+                    cid = str(rel.get("doc_id") or rel.get("_id"))
+                    score = int(rel.get("score", 1))
+                else:
+                    cid, score = str(rel), 1
+                qrels[qid][cid] = score
+
+    print(f"  Loaded from local JSONL: corpus={len(corpus):,}  "
+          f"queries={len(queries):,}  qrels={len(qrels):,}")
+    return corpus, queries, dict(qrels)
+
+
+def load_beir_dataset(dataset_name: str, split: str = "test",
+                      beir_data_root: str = None):
     """
+    Load a BEIR dataset. Checks local path first, then downloads.
+    beir_data_root: if set, look for {beir_data_root}/{dataset_name}/
+    """
+    # ── 1. Try local JSONL (pipeline pre-built format) ────────────────────────
+    search_dirs = []
+    if beir_data_root:
+        search_dirs.append(os.path.join(beir_data_root, dataset_name))
+    search_dirs += [
+        os.path.join("data/beir", dataset_name),
+        os.path.join("/tmp/data/beir", dataset_name),
+    ]
+    for local_dir in search_dirs:
+        if os.path.isdir(local_dir):
+            corpus, queries, qrels = load_local_jsonl_beir(local_dir, split)
+            if corpus is not None:
+                print(f"  Using local data at {local_dir}")
+                return corpus, queries, qrels
+            # Also try beir GenericDataLoader for standard BEIR format
+            try:
+                from beir.datasets.data_loader import GenericDataLoader
+                corpus, queries, qrels = GenericDataLoader(local_dir).load(split=split)
+                print(f"  Using local BEIR data at {local_dir}")
+                return corpus, queries, qrels
+            except Exception:
+                pass
+
+    # ── 2. Download via beir library ──────────────────────────────────────────
     try:
         from beir import util as beir_util
         from beir.datasets.data_loader import GenericDataLoader
@@ -73,62 +139,128 @@ def load_beir_dataset(dataset_name: str, split: str = "test"):
         return corpus, queries, qrels
 
     except ImportError:
-        # Fallback: use HuggingFace datasets
+        pass
+    except Exception as e:
+        print(f"  beir library failed ({e}), trying HuggingFace ...")
+
+    # ── 3. HuggingFace fallback ───────────────────────────────────────────────
+    try:
         from datasets import load_dataset
-
         print(f"  Loading {dataset_name} from HuggingFace...")
-        try:
-            ds = load_dataset(f"BeIR/{dataset_name}", "corpus", split="corpus")
-            corpus = {}
-            for row in ds:
-                corpus[row["_id"]] = {
-                    "title": row.get("title", ""),
-                    "text": row.get("text", ""),
-                }
-
-            ds_q = load_dataset(f"BeIR/{dataset_name}", "queries", split="queries")
-            queries = {}
-            for row in ds_q:
-                queries[row["_id"]] = row.get("text", "")
-
-            # Load qrels
-            ds_qrels = load_dataset(f"BeIR/{dataset_name}-qrels", split=split)
-            qrels = defaultdict(dict)
-            for row in ds_qrels:
-                qrels[str(row["query-id"])][str(row["corpus-id"])] = int(row["score"])
-
-            return corpus, queries, dict(qrels)
-
-        except Exception as e:
-            print(f"  Failed to load {dataset_name}: {e}")
-            return None, None, None
+        ds = load_dataset(f"BeIR/{dataset_name}", "corpus", split="corpus")
+        corpus = {row["_id"]: {"title": row.get("title", ""), "text": row.get("text", "")}
+                  for row in ds}
+        ds_q = load_dataset(f"BeIR/{dataset_name}", "queries", split="queries")
+        queries = {row["_id"]: row.get("text", "") for row in ds_q}
+        ds_qrels = load_dataset(f"BeIR/{dataset_name}-qrels", split=split)
+        qrels = defaultdict(dict)
+        for row in ds_qrels:
+            qrels[str(row["query-id"])][str(row["corpus-id"])] = int(row["score"])
+        return corpus, queries, dict(qrels)
+    except Exception as e:
+        print(f"  Failed to load {dataset_name}: {e}")
+        return None, None, None
 
 
 # ─────────────────────── Encoding ───────────────────────
 
-def annotate_bloom_labels(query_texts: List[str], device) -> List[int]:
+def annotate_bloom_labels(query_texts: List[str], device,
+                          cache_path: str = None,
+                          query_ids: List[str] = None) -> List[int]:
     """
-    Classify queries into Bloom taxonomy levels using pretrained classifier.
-    Returns 0-indexed labels (0=Remember ... 5=Create) for BAM routing.
+    Returns 0-indexed Bloom labels (0=Remember … 5=Create).
+    Loads from cache_path if available, otherwise runs the classifier.
+    cache_path: path to {split}.jsonl.bloom_cache.json produced by the pipeline.
     """
-    from data.annotate_bloom_pretrained import load_pretrained_classifier, predict_bloom
-    print("  Annotating queries with Bloom levels...")
-    bloom_model, bloom_tok, id2label = load_pretrained_classifier(device=device)
-    # predict_bloom returns 1-indexed (1-6); convert to 0-indexed (0-5) for BAM
-    labels_1idx = predict_bloom(query_texts, bloom_model, bloom_tok,
-                                device=device, id2label=id2label)
-    labels_0idx = [l - 1 for l in labels_1idx]
-    # Print distribution
+    import json as _json
     from collections import Counter
-    dist = Counter(labels_0idx)
+
     bloom_names = {0: "Remember", 1: "Understand", 2: "Apply",
                    3: "Analyze", 4: "Evaluate", 5: "Create"}
+
+    # ── Try cache first ───────────────────────────────────────────────────────
+    if cache_path and os.path.exists(cache_path):
+        print(f"  Loading Bloom labels from cache: {cache_path}")
+        cache = _json.load(open(cache_path))
+        # cache may be keyed by query_id or be a list
+        if isinstance(cache, dict) and query_ids is not None:
+            labels = []
+            for qid in query_ids:
+                entry = cache.get(str(qid), cache.get(qid))
+                if entry is None:
+                    labels.append(0)
+                elif isinstance(entry, dict):
+                    lv = entry.get("bloom_level", entry.get("label", 1))
+                    labels.append(int(lv) - 1 if int(lv) >= 1 else int(lv))
+                else:
+                    lv = int(entry)
+                    labels.append(lv - 1 if lv >= 1 else lv)
+        elif isinstance(cache, list):
+            labels = []
+            for entry in cache:
+                if isinstance(entry, dict):
+                    lv = entry.get("bloom_level", entry.get("label", 1))
+                    labels.append(int(lv) - 1 if int(lv) >= 1 else int(lv))
+                else:
+                    labels.append(int(entry) - 1)
+            labels = labels[:len(query_texts)]
+        else:
+            # flat dict keyed by text or index
+            labels = [0] * len(query_texts)
+            for i, qt in enumerate(query_texts):
+                if qt in cache:
+                    lv = int(cache[qt]) if not isinstance(cache[qt], dict) \
+                         else int(cache[qt].get("bloom_level", 1))
+                    labels[i] = lv - 1 if lv >= 1 else lv
+
+        dist = Counter(labels)
+        print("  Bloom distribution (from cache):")
+        for b in sorted(dist):
+            print(f"    {bloom_names.get(b, b)}: {dist[b]} ({dist[b]/len(labels):.1%})")
+        return labels
+
+    # ── Run classifier ────────────────────────────────────────────────────────
+    print("  Annotating queries with Bloom classifier...")
+    try:
+        from data.annotate_bloom_pretrained import load_pretrained_classifier, predict_bloom
+        bloom_model, bloom_tok, id2label = load_pretrained_classifier(device=device)
+        labels_1idx = predict_bloom(query_texts, bloom_model, bloom_tok,
+                                    device=device, id2label=id2label)
+        labels_0idx = [l - 1 for l in labels_1idx]
+        del bloom_model
+        if str(device) != "cpu":
+            torch.cuda.empty_cache()
+    except ImportError:
+        # NLI zero-shot fallback
+        print("  annotate_bloom_pretrained not found — using NLI zero-shot classifier.")
+        from transformers import pipeline as hf_pipeline
+        HYPOTHESES = [
+            "This query is asking to recall or retrieve a specific fact, name, or definition.",
+            "This query is asking to explain, describe, or summarize how something works.",
+            "This query is asking how to use or apply knowledge to solve a practical problem.",
+            "This query is asking to compare, contrast, or examine the relationship between things.",
+            "This query is asking to evaluate evidence, assess effectiveness, or judge quality.",
+            "This query is asking to design, propose, or synthesize something new.",
+        ]
+        clf = hf_pipeline("zero-shot-classification",
+                          model="MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
+                          device=0 if str(device) != "cpu" else -1,
+                          hypothesis_template="{}")
+        labels_0idx = []
+        for i in range(0, len(query_texts), 32):
+            batch = query_texts[i:i+32]
+            res = clf(batch, HYPOTHESES, multi_label=False)
+            if isinstance(res, dict): res = [res]
+            for r in res:
+                labels_0idx.append(HYPOTHESES.index(r["labels"][0]))
+        del clf
+        if str(device) != "cpu":
+            torch.cuda.empty_cache()
+
+    dist = Counter(labels_0idx)
     print("  Bloom distribution:")
     for b in sorted(dist):
         print(f"    {bloom_names.get(b, b)}: {dist[b]} ({dist[b]/len(labels_0idx):.1%})")
-    # Free GPU memory
-    del bloom_model
-    torch.cuda.empty_cache() if device != "cpu" else None
     return labels_0idx
 
 
@@ -387,6 +519,7 @@ def evaluate_on_beir(
     use_sparse: bool = False,
     mrl_truncation_dims: List[int] = None,
     split: str = "test",
+    beir_data_root: str = None,
 ) -> Dict[str, float]:
     """Evaluate a model on a single BEIR dataset."""
     print(f"\n{'='*60}")
@@ -394,7 +527,8 @@ def evaluate_on_beir(
     print(f"{'='*60}")
 
     # Load dataset
-    corpus, queries, qrels = load_beir_dataset(dataset_name, split=split)
+    corpus, queries, qrels = load_beir_dataset(
+        dataset_name, split=split, beir_data_root=beir_data_root)
     if corpus is None:
         print(f"  Skipping {dataset_name} (failed to load)")
         return {}
@@ -421,7 +555,18 @@ def evaluate_on_beir(
     # Annotate queries with Bloom levels for BAM routing
     bloom_labels = None
     if hasattr(model, "encode_queries"):
-        bloom_labels = annotate_bloom_labels(query_texts, device)
+        # Look for pre-built bloom cache alongside the data
+        cache_path = None
+        if beir_data_root:
+            candidate = os.path.join(beir_data_root, dataset_name,
+                                     f"{split}.jsonl.bloom_cache.json")
+            if os.path.exists(candidate):
+                cache_path = candidate
+        bloom_labels = annotate_bloom_labels(
+            query_texts, device,
+            cache_path=cache_path,
+            query_ids=query_ids,
+        )
 
     # Encode
     print("  Encoding corpus...")
@@ -541,6 +686,10 @@ def main():
     parser.add_argument("--split", default="test",
                         help="Dataset split (default: test; use 'dev' for msmarco)")
     parser.add_argument("--output_dir", default="results/beir/")
+    parser.add_argument("--beir_data_root", default=None,
+                        help="Root dir containing local BEIR JSONL data "
+                             "(e.g. /scratch/user/bampq-data/beir). "
+                             "Checked before downloading.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -591,6 +740,7 @@ def main():
             model_name=model_label, use_sparse=args.sparse,
             mrl_truncation_dims=mrl_trunc,
             split=args.split,
+            beir_data_root=args.beir_data_root,
         )
         primary_results[ds_name] = metrics
     all_results[model_label] = primary_results
@@ -602,10 +752,13 @@ def main():
         print("=" * 70)
         mc = config["model"]
         bl_model = MRLEncoder(model_name=mc["backbone"], embedding_dim=mc["embedding_dim"],
-                              mrl_dims=mc["mrl_dims"])
+                              mrl_dims=mc["mrl_dims"],
+                              pooling=mc.get("pooling", "cls"),
+                              backbone_type=mc.get("backbone_type", "standard"))
         ckpt = os.path.join(args.baseline, "checkpoint.pt")
         if os.path.exists(ckpt):
-            bl_model.load_state_dict(torch.load(ckpt, map_location=device)["model_state_dict"])
+            bl_model.load_state_dict(torch.load(ckpt, map_location=device)["model_state_dict"],
+                                     strict=False)
         bl_model.to(device).eval()
 
         bl_results = {}
@@ -615,6 +768,7 @@ def main():
                 model_name="MRL Baseline",
                 mrl_truncation_dims=[64, 128, 256, 384, 512],
                 split=args.split,
+                beir_data_root=args.beir_data_root,
             )
             bl_results[ds_name] = metrics
         all_results["MRL Baseline"] = bl_results
