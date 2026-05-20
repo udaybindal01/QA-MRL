@@ -32,12 +32,14 @@ Usage:
 """
 
 import argparse, json, os, sys, shutil, math
+import numpy as np
 import torch
+import torch.nn.functional as F
+from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.misc import load_config, set_seed
 from models.bam import BloomAlignedMRL
-from evaluation.evaluator import FullEvaluator
 from transformers import AutoTokenizer
 
 BLOOM_NAMES = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
@@ -131,6 +133,144 @@ def load_bam(config, ckpt_dir, device):
     return model
 
 
+@torch.no_grad()
+def evaluate_epoch(model, test_path, corpus_path, tokenizer, device):
+    """
+    Evaluate one epoch checkpoint.
+
+    Corpus: full embeddings (all dims active) — single pre-built index.
+    Queries: masked embeddings (bloom-routed) — same as training forward pass.
+    Similarity: masked_query · full_corpus  (zero dims naturally ignored).
+
+    This matches the training objective and the realistic deployment scenario.
+    Returns a metrics dict with bloom_{name}_recall@10, bloom_{name}_avg_dim,
+    recall@{1,5,10,50}, ndcg@10, mrr.
+    """
+    import json as _json
+
+    # Load corpus
+    corpus = []
+    with open(corpus_path) as f:
+        for line in f:
+            corpus.append(_json.loads(line.strip()))
+    corpus_id_to_idx = {p["id"]: i for i, p in enumerate(corpus)}
+
+    # Encode corpus at full dims
+    corpus_embs = []
+    for i in tqdm(range(0, len(corpus), 128), desc="  corpus", leave=False):
+        batch = [c["text"] for c in corpus[i:i+128]]
+        enc = tokenizer(batch, padding=True, truncation=True,
+                        max_length=256, return_tensors="pt")
+        enc = {k: v.to(device) for k, v in enc.items()}
+        out = model.encode_documents(enc["input_ids"], enc["attention_mask"])
+        corpus_embs.append(out["full_embedding"].float().cpu())
+    corpus_embs = torch.cat(corpus_embs)  # [C, D]
+
+    # Load test queries
+    samples = []
+    with open(test_path) as f:
+        for line in f:
+            samples.append(_json.loads(line.strip()))
+    valid = [s for s in samples if s.get("positive_id", "") in corpus_id_to_idx]
+
+    # Encode queries with bloom-adaptive mask
+    query_embs, query_blooms, query_active_dims = [], [], []
+    for i in tqdm(range(0, len(valid), 64), desc="  queries", leave=False):
+        batch = valid[i:i+64]
+        enc = tokenizer([q["query"] for q in batch], padding=True,
+                        truncation=True, max_length=128, return_tensors="pt")
+        enc = {k: v.to(device) for k, v in enc.items()}
+        bloom_labels = torch.tensor(
+            [q["bloom_level"] - 1 for q in batch], dtype=torch.long, device=device
+        )
+        out = model.encode_queries(enc["input_ids"], enc["attention_mask"],
+                                   bloom_labels=bloom_labels)
+        query_embs.append(out["masked_embedding"].float().cpu())
+        query_blooms.extend([q["bloom_level"] - 1 for q in batch])
+        if "active_dims" in out:
+            query_active_dims.append(out["active_dims"].float().cpu())
+
+    query_embs = torch.cat(query_embs)       # [N, D]
+    query_blooms = np.array(query_blooms)    # [N]
+    gt_indices = np.array([corpus_id_to_idx[s["positive_id"]] for s in valid])
+
+    # Retrieval: masked query · full corpus
+    KS = [1, 5, 10, 50]
+    max_k = max(KS)
+    rankings = np.zeros((len(valid), max_k), dtype=np.int64)
+    chunk = 256
+    corpus_embs_dev = corpus_embs.to(device)
+    for i in range(0, len(valid), chunk):
+        q = query_embs[i:i+chunk].to(device)
+        sim = torch.mm(q, corpus_embs_dev.t())
+        topk = sim.topk(max_k, dim=-1).indices.cpu().numpy()
+        rankings[i:i+chunk] = topk
+    del corpus_embs_dev
+
+    # Standard metrics
+    metrics = {}
+    for k in KS:
+        hits = (rankings[:, :k] == gt_indices[:, None]).any(axis=1)
+        metrics[f"recall@{k}"] = float(hits.mean())
+
+    # NDCG@10
+    ndcg_scores = []
+    for i in range(len(valid)):
+        rank_of_pos = np.where(rankings[i] == gt_indices[i])[0]
+        if len(rank_of_pos) == 0 or rank_of_pos[0] >= 10:
+            ndcg_scores.append(0.0)
+        else:
+            ndcg_scores.append(1.0 / math.log2(rank_of_pos[0] + 2))
+    metrics["ndcg@10"] = float(np.mean(ndcg_scores))
+
+    # MRR
+    mrr_scores = []
+    for i in range(len(valid)):
+        rank_of_pos = np.where(rankings[i] == gt_indices[i])[0]
+        mrr_scores.append(1.0 / (rank_of_pos[0] + 1) if len(rank_of_pos) > 0 else 0.0)
+    metrics["mrr"] = float(np.mean(mrr_scores))
+
+    # Per-bloom R@10 and avg_dim
+    active_dims_tensor = torch.cat(query_active_dims) if query_active_dims else None
+    for b, name in enumerate(BLOOM_NAMES):
+        idx = np.where(query_blooms == b)[0]
+        if len(idx) == 0:
+            continue
+        hits = (rankings[idx, :10] == gt_indices[idx, None]).any(axis=1)
+        metrics[f"bloom_{name}_recall@10"] = float(hits.mean())
+        if active_dims_tensor is not None:
+            metrics[f"bloom_{name}_avg_dim"] = float(active_dims_tensor[idx].mean().item())
+        else:
+            # Fallback: count non-zero dims in the masked embeddings
+            metrics[f"bloom_{name}_avg_dim"] = float(
+                (query_embs[idx] != 0).float().sum(dim=-1).mean().item()
+            )
+
+    # Overall avg_dim
+    if active_dims_tensor is not None:
+        metrics["avg_active_dims"] = float(active_dims_tensor.mean().item())
+
+    # Print summary
+    sparse_ratio = 1.0 - metrics.get("avg_active_dims", EMBEDDING_DIM) / EMBEDDING_DIM
+    print(f"\n  === Results (N={len(valid)}) ===")
+    for k in KS:
+        print(f"  R@{k}:    {metrics[f'recall@{k}']:.4f}")
+    print(f"  MRR:    {metrics['mrr']:.4f}")
+    print(f"  NDCG@10:{metrics['ndcg@10']:.4f}")
+    if "avg_active_dims" in metrics:
+        print(f"  Active dims: {metrics['avg_active_dims']:.0f} / {int(EMBEDDING_DIM)}"
+              f"  (sparse_ratio={sparse_ratio:.2f})")
+    print(f"\n  Bloom-Stratified R@10:")
+    for b, name in enumerate(BLOOM_NAMES):
+        r10 = metrics.get(f"bloom_{name}_recall@10")
+        dim = metrics.get(f"bloom_{name}_avg_dim")
+        n   = int((query_blooms == b).sum())
+        if r10 is not None:
+            print(f"    {name:12s} (n={n:4d}): R@10={r10:.4f}  dim={dim:.0f}")
+
+    return metrics
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config",          required=True)
@@ -153,7 +293,6 @@ def main():
     global EMBEDDING_DIM
     EMBEDDING_DIM = float(config["model"].get("embedding_dim", 768))
     tokenizer = AutoTokenizer.from_pretrained(config["model"]["backbone"])
-    evaluator = FullEvaluator(config)
 
     test_path   = config["data"]["test_path"]
     corpus_path = config["data"]["corpus_path"]
@@ -217,10 +356,7 @@ def main():
 
     for epoch_num, name, ckpt_dir in epoch_dirs:
         model = load_bam(config, ckpt_dir, device)
-        metrics = evaluator.evaluate_model(
-            model, test_path, corpus_path, tokenizer, device,
-            compute_bootstrap=False,
-        )
+        metrics = evaluate_epoch(model, test_path, corpus_path, tokenizer, device)
         results[name] = metrics
 
         is_warmup = (epoch_num != 9999 and epoch_num < warmup_cutoff)
