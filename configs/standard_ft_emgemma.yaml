@@ -1,0 +1,68 @@
+# Standard Fine-tuning Baseline — google/embeddinggemma-300m
+# Memory-tuned for 10.57 GB GPU.
+# Effective batch = 128 (8 × 16), num_neg cut 15 → 7.
+# bf16 only — fp16 not supported by this model.
+
+data:
+  bloom_levels:
+    1: Remember
+    2: Understand
+    3: Apply
+    4: Analyze
+    5: Evaluate
+    6: Create
+  corpus_path: ./data/real/corpus.jsonl
+  max_passage_length: 256
+  max_query_length: 128
+  num_hard_negatives: 7
+  subjects:
+  - biology
+  - chemistry
+  - physics
+  - earth_science
+  - general_science
+  test_path: ./data/real/test.jsonl
+  train_path: ./data/real/train_curriculum.jsonl
+  val_path: ./data/real/val.jsonl
+evaluation:
+  bloom_stratified: true
+  retrieval_ks:
+  - 1
+  - 5
+  - 10
+  - 20
+  - 50
+  - 100
+logging:
+  log_every_n_steps: 10
+  use_wandb: true
+  wandb_entity: null
+  wandb_project: bam-emnlp
+model:
+  backbone: google/embeddinggemma-300m
+  backbone_type: standard
+  embedding_dim: 768
+  mrl_dims:
+  - 768
+  normalize_embeddings: true
+  pooling: mean
+  torch_dtype: bfloat16
+training:
+  batch_size: 8
+  checkpoint_dir: /tmp/standard-ft-emgemma-ckpts/
+  eval_every_n_steps: 500
+  fp16: false
+  bf16: true
+  gradient_accumulation_steps: 16
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+  num_epochs: 15
+  optimizer:
+    lr: 2.0e-05
+    type: adamw
+    weight_decay: 0.01
+  save_every_n_steps: 1000
+  scheduler:
+    type: cosine
+    warmup_ratio: 0.1
+  seed: 42

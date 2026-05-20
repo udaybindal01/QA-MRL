@@ -1,0 +1,106 @@
+{
+  "routing_mode": "scattered",
+  "k": 10,
+  "per_level": {
+    "Remember": {
+      "n": 1315,
+      "budget_dims": 233,
+      "mrl_full_recall@10": 0.5779467680608364,
+      "mrl_truncated_recall@10": 0.5368821292775665,
+      "bam_recall@10": 0.5787072243346008,
+      "delta_bam_minus_mrl_trunc": 0.041825095057034245,
+      "mrl_trunc_recall@10_ci": [
+        0.5125475285171103,
+        0.5650190114068441
+      ],
+      "bam_recall@10_ci": [
+        0.5543726235741445,
+        0.6045627376425855
+      ]
+    },
+    "Understand": {
+      "n": 728,
+      "budget_dims": 232,
+      "mrl_full_recall@10": 0.510989010989011,
+      "mrl_truncated_recall@10": 0.5082417582417582,
+      "bam_recall@10": 0.5013736263736264,
+      "delta_bam_minus_mrl_trunc": -0.006868131868131844,
+      "mrl_trunc_recall@10_ci": [
+        0.4739010989010989,
+        0.5453296703296703
+      ],
+      "bam_recall@10_ci": [
+        0.4642857142857143,
+        0.5384615384615384
+      ]
+    },
+    "Apply": {
+      "n": 476,
+      "budget_dims": 248,
+      "mrl_full_recall@10": 0.3445378151260504,
+      "mrl_truncated_recall@10": 0.29411764705882354,
+      "bam_recall@10": 0.34663865546218486,
+      "delta_bam_minus_mrl_trunc": 0.052521008403361324,
+      "mrl_trunc_recall@10_ci": [
+        0.25210084033613445,
+        0.33613445378151263
+      ],
+      "bam_recall@10_ci": [
+        0.30462184873949577,
+        0.39285714285714285
+      ]
+    },
+    "Analyze": {
+      "n": 212,
+      "budget_dims": 249,
+      "mrl_full_recall@10": 0.5235849056603774,
+      "mrl_truncated_recall@10": 0.47641509433962265,
+      "bam_recall@10": 0.49056603773584906,
+      "delta_bam_minus_mrl_trunc": 0.014150943396226412,
+      "mrl_trunc_recall@10_ci": [
+        0.41037735849056606,
+        0.5471698113207547
+      ],
+      "bam_recall@10_ci": [
+        0.42452830188679247,
+        0.5566037735849056
+      ]
+    },
+    "Evaluate": {
+      "n": 190,
+      "budget_dims": 284,
+      "mrl_full_recall@10": 0.4368421052631579,
+      "mrl_truncated_recall@10": 0.41578947368421054,
+      "bam_recall@10": 0.4421052631578947,
+      "delta_bam_minus_mrl_trunc": 0.02631578947368418,
+      "mrl_trunc_recall@10_ci": [
+        0.3473684210526316,
+        0.48947368421052634
+      ],
+      "bam_recall@10_ci": [
+        0.3736842105263158,
+        0.5157894736842106
+      ]
+    },
+    "Create": {
+      "n": 375,
+      "budget_dims": 258,
+      "mrl_full_recall@10": 0.5386666666666666,
+      "mrl_truncated_recall@10": 0.49066666666666664,
+      "bam_recall@10": 0.512,
+      "delta_bam_minus_mrl_trunc": 0.02133333333333337,
+      "mrl_trunc_recall@10_ci": [
+        0.44,
+        0.5413333333333333
+      ],
+      "bam_recall@10_ci": [
+        0.464,
+        0.56
+      ]
+    }
+  },
+  "avg_delta_bam_minus_mrl_trunc": 0.02487967296591795,
+  "bam_wins": 5,
+  "total_levels": 6,
+  "note": "Option B: scattered mask \u2014 BAM uses non-contiguous dims; MRL uses prefix dims of the same count. Note: MRL prefix-truncation is a stronger competitor for the same computational budget."
+}

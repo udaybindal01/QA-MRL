@@ -28,6 +28,27 @@ def _is_network_or_disk_error(exc: Exception) -> bool:
     ))
 
 
+# Models that ship custom modeling code via `auto_map` in their HF config.
+# When loaded via AutoModel.from_pretrained, these REQUIRE trust_remote_code=True.
+# Auto-detected by prefix match so users don't have to set it in every config
+# (and so the 8 different MRLEncoder() call sites in scripts/ also work).
+_TRUST_REMOTE_CODE_PREFIXES = (
+    "Alibaba-NLP/gte-",       # gte-v1.5 series — custom BERT++ (RoPE + GLU)
+    "nomic-ai/nomic-embed",   # nomic-embed-text-v1.x — custom modeling file
+    "jinaai/jina-embeddings", # jina-v3 — task-specific LoRA adapters
+    "jinaai/jina-",           # other jina models
+)
+
+
+def _auto_trust_remote_code(model_name: str, explicit: bool) -> bool:
+    """Auto-enable trust_remote_code for models known to require it."""
+    if explicit:
+        return True
+    if any(model_name.startswith(p) for p in _TRUST_REMOTE_CODE_PREFIXES):
+        return True
+    return False
+
+
 class MRLEncoder(nn.Module):
     """
     Matryoshka Representation Learning encoder.
@@ -48,6 +69,7 @@ class MRLEncoder(nn.Module):
         backbone_type: str = "standard",   # "standard" | "qwen" | "llm2vec" | "gritlm"
         query_instruction: Optional[str] = None,  # instruction prefix prepended to queries
         peft_model_name: Optional[str] = None,    # LLM2Vec supervised PEFT adapter repo
+        trust_remote_code: bool = False,          # NEW: required for GTE-v1.5, Nomic, Jina-v3, EmbeddingGemma
     ):
         super().__init__()
         self.model_name = model_name
@@ -56,6 +78,9 @@ class MRLEncoder(nn.Module):
         self.normalize = normalize
         self.backbone_type = backbone_type
         self.query_instruction = query_instruction
+        # Auto-enable trust_remote_code for known custom-code model families
+        # (GTE-v1.5, Nomic, Jina-v3) even when not explicitly set in config.
+        self.trust_remote_code = _auto_trust_remote_code(model_name, trust_remote_code)
 
         dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
         dtype = dtype_map.get(torch_dtype) if torch_dtype else None
@@ -66,12 +91,12 @@ class MRLEncoder(nn.Module):
             self._load_gritlm(model_name, dtype)
         else:
             # standard or qwen — both load via AutoModel
-            self.transformer = self._load_automodel(model_name, dtype)
+            self.transformer = self._load_automodel(model_name, dtype, self.trust_remote_code)
             if gradient_checkpointing:
                 self.transformer.config.use_cache = False
                 self.transformer.gradient_checkpointing_enable()
 
-        self.tokenizer = self._load_tokenizer(model_name)
+        self.tokenizer = self._load_tokenizer(model_name, self.trust_remote_code)
 
         # Qwen tokenizer needs a pad token (it uses EOS by default, fine for inference)
         if backbone_type == "qwen" and self.tokenizer.pad_token is None:
@@ -94,26 +119,45 @@ class MRLEncoder(nn.Module):
     # ── Private loaders ───────────────────────────────────────────────────────
 
     @staticmethod
-    def _load_automodel(model_name: str, dtype):
-        """AutoModel.from_pretrained with automatic offline/disk-error fallback."""
+    def _load_automodel(model_name: str, dtype, trust_remote_code: bool = False):
+        """AutoModel.from_pretrained with automatic offline/disk-error fallback.
+
+        trust_remote_code=True is required for models that ship custom modeling
+        code via `auto_map` in their HF config (GTE-v1.5, Nomic-embed, Jina-v3, etc.).
+        """
         try:
-            return AutoModel.from_pretrained(model_name, torch_dtype=dtype)
+            return AutoModel.from_pretrained(
+                model_name,
+                torch_dtype=dtype,
+                trust_remote_code=trust_remote_code,
+            )
         except Exception as e:
             if _is_network_or_disk_error(e):
                 print(f"  Network/disk error — loading {model_name} from cache.")
                 return AutoModel.from_pretrained(
-                    model_name, torch_dtype=dtype, local_files_only=True)
+                    model_name,
+                    torch_dtype=dtype,
+                    trust_remote_code=trust_remote_code,
+                    local_files_only=True,
+                )
             raise
 
     @staticmethod
-    def _load_tokenizer(model_name: str):
+    def _load_tokenizer(model_name: str, trust_remote_code: bool = False):
         """AutoTokenizer.from_pretrained with automatic offline/disk-error fallback."""
         try:
-            tok = AutoTokenizer.from_pretrained(model_name)
+            tok = AutoTokenizer.from_pretrained(
+                model_name,
+                trust_remote_code=trust_remote_code,
+            )
         except Exception as e:
             if _is_network_or_disk_error(e):
                 print(f"  Network/disk error — loading tokenizer from cache.")
-                tok = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+                tok = AutoTokenizer.from_pretrained(
+                    model_name,
+                    trust_remote_code=trust_remote_code,
+                    local_files_only=True,
+                )
             else:
                 raise
         if tok.pad_token is None:

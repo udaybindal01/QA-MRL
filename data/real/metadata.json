@@ -1,0 +1,21 @@
+{
+  "num_corpus": 40640,
+  "num_train": 26361,
+  "num_val": 3295,
+  "num_test": 3296,
+  "corpus_has_bloom": false,
+  "pair_bloom": {
+    "1": 13402,
+    "2": 7269,
+    "3": 4777,
+    "4": 1988,
+    "5": 1878,
+    "6": 3638
+  },
+  "source_dist": {
+    "sciq_support": 12240,
+    "obqa_fact": 4832,
+    "qasc_fact": 16219,
+    "qasc_combined": 7349
+  }
+}

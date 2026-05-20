@@ -1,0 +1,120 @@
+data:
+  bloom_levels:
+    1: Remember
+    2: Understand
+    3: Apply
+    4: Analyze
+    5: Evaluate
+    6: Create
+  corpus_path: ./data/real/corpus.jsonl
+  max_passage_length: 256
+  max_query_length: 128
+  num_hard_negatives: 7
+  subjects:
+  - biology
+  - chemistry
+  - physics
+  - earth_science
+  - general_science
+  test_path: ./data/real/test.jsonl
+  train_path: ./data/real/train_curriculum.jsonl
+  val_path: ./data/real/val.jsonl
+diagnostics:
+  gradient_attribution: true
+  num_diagnostic_queries: 1000
+  probing:
+    num_dimension_groups: 8
+    probe_tasks:
+    - bloom_level
+    - subject_area
+    probe_type: linear
+evaluation:
+  bloom_stratified: true
+  measure_latency: true
+  retrieval_ks:
+  - 1
+  - 5
+  - 10
+  - 20
+  - 50
+  - 100
+  tail_topic_threshold: 20
+logging:
+  log_every_n_steps: 10
+  use_wandb: true
+  wandb_entity: null
+  wandb_project: bam-emnlp
+model:
+  backbone: google/embeddinggemma-300m
+  backbone_type: standard
+  embedding_dim: 768
+  mask_sparsity_target: null
+  mrl_dims:
+  - 64
+  - 128
+  - 256
+  - 384
+  - 512
+  - 768
+  normalize_embeddings: true
+  pooling: mean
+  query_delta_hidden: 256
+  torch_dtype: bfloat16
+  use_mask_routing: true
+  use_query_delta: true
+  use_soft_bloom_routing: false
+training:
+  balanced_bloom_sampling: true
+  batch_size: 8
+  bf16: true
+  bloom_noise_rate: 0.0
+  checkpoint_dir: /scratch/ishaan.karan/bampq-checkpoints/educational/bam_pq_emgemma/
+  encoder_freeze_after_epochs: null
+  encoder_unfreeze_after_epochs: 8
+  eval_every_n_steps: 500
+  fp16: false
+  gradient_accumulation_steps: 16
+  gradient_checkpointing: true
+  hard_neg_refresh_epochs: null
+  loss:
+    contrastive_weight: 1.0
+    dim_redist_weight: 0.0
+    diversity_weight: 0.0
+    dropmask_rate: 0.0
+    efficiency_uniform_weights: true
+    efficiency_weight: 0.0
+    encoder_warmup_epochs: 0
+    gumbel_temperature_schedule:
+      end: 0.1
+      start: 1.0
+    mask_differentiation_epochs: 0
+    mask_distill_weight: 0.5
+    mask_diversity_margin: 0.0
+    mask_diversity_weight: 0.5
+    mask_level_targets: null
+    mask_sparsity_weight: 1.5
+    mask_variance_weight: 0.3
+    mrl_anchor_weight: 0.0
+    query_routing_div_attraction: 0.0
+    query_routing_div_margin_neg: 0.5
+    query_routing_div_weight: 0.3
+    temperature_schedule:
+      end: 0.02
+      start: 0.1
+    topk_threshold_weight: 0.5
+    use_topk_sparsity: true
+  max_grad_norm: 1.0
+  num_epochs: 20
+  optimizer:
+    encoder_finetune_lr: 1.0e-06
+    encoder_lr: 2.0e-05
+    lr: 0.0002
+    router_lr: 0.0002
+    type: adamw
+    weight_decay: 0.01
+  save_every_n_steps: 1000
+  scheduler:
+    type: cosine
+    warmup_ratio: 0.1
+  seed: 42
+  use_pcgrad: false

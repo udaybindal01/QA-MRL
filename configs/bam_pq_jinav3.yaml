@@ -1,0 +1,113 @@
+# BAM-PQ — jinaai/jina-embeddings-v3 backbone — educational + BEIR
+#
+# Jina-v3: 570M params, 1024-dim, mean pooling, long context (8192).
+# Natively MRL-trained AND task-LoRA conditional — the closest external analog
+# to BAM-PQ's per-query routing. Direct comparison: external LoRA-per-task vs.
+# BAM-PQ's mask-per-Bloom-level routing.
+#
+# IMPORTANT: encoder kept frozen throughout (encoder_unfreeze_after_epochs: null)
+# to fit in 12GB VRAM. Unfreezing the 570M encoder at epoch 8 would push past
+# 12GB even with gradient checkpointing.
+#
+# Requires trust_remote_code (auto-detected by encoder.py).
+
+model:
+  backbone: "jinaai/jina-embeddings-v3"
+  backbone_type: "standard"
+  embedding_dim: 1024
+  pooling: "mean"
+  normalize_embeddings: true
+  mrl_dims: [64, 128, 256, 512, 768, 1024]
+  use_mask_routing: true
+  use_query_delta: true
+  query_delta_hidden: 256
+  mask_sparsity_target: null
+  use_soft_bloom_routing: false
+  torch_dtype: "bfloat16"
+
+data:
+  train_path: "./data/real/train_curriculum.jsonl"
+  val_path: "./data/real/val.jsonl"
+  test_path: "./data/real/test.jsonl"
+  corpus_path: "./data/real/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
+  max_query_length: 128
+  max_passage_length: 256
+  num_hard_negatives: 15
+
+training:
+  seed: 42
+  num_epochs: 20
+  batch_size: 8
+  gradient_accumulation_steps: 16
+  fp16: false
+  bf16: true
+  max_grad_norm: 1.0
+  gradient_checkpointing: true
+  optimizer:
+    type: "adamw"
+    lr: 2.0e-4
+    weight_decay: 0.01
+    encoder_lr: 2.0e-5
+    router_lr: 2.0e-4
+    encoder_finetune_lr: 5.0e-7
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.1
+  loss:
+    contrastive_weight: 1.0
+    efficiency_weight: 0.0
+    efficiency_uniform_weights: true
+    mrl_anchor_weight: 0.0
+    diversity_weight: 0.0
+    use_topk_sparsity: true
+    topk_threshold_weight: 0.5
+    mask_sparsity_weight: 1.5
+    mask_level_targets: null
+    mask_diversity_weight: 0.5
+    mask_diversity_margin: 0.0
+    mask_variance_weight: 0.3
+    mask_distill_weight: 0.5
+    query_routing_div_weight: 0.3
+    query_routing_div_margin_neg: 0.5
+    query_routing_div_attraction: 0.0
+    dropmask_rate: 0.0
+    dim_redist_weight: 0.0
+    encoder_warmup_epochs: 0
+    mask_differentiation_epochs: 0
+    temperature_schedule:
+      start: 0.1
+      end: 0.02
+    gumbel_temperature_schedule:
+      start: 1.0
+      end: 0.1
+  balanced_bloom_sampling: true
+  use_pcgrad: false
+  encoder_freeze_after_epochs: null
+  encoder_unfreeze_after_epochs: null   # keep frozen — 570M model on 12GB
+  bloom_noise_rate: 0.0
+  hard_neg_refresh_epochs: null
+  checkpoint_dir: "/tmp/bam-pq-jinav3-ckpts/"
+  save_every_n_steps: 1000
+  eval_every_n_steps: 500
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50, 100]
+  bloom_stratified: true
+  tail_topic_threshold: 20
+  measure_latency: true
+
+diagnostics:
+  gradient_attribution: false
+  num_diagnostic_queries: 1000
+  probing:
+    probe_type: "linear"
+    probe_tasks: ["bloom_level", "subject_area"]
+    num_dimension_groups: 8
+
+logging:
+  use_wandb: true
+  wandb_project: "bam-emnlp"
+  wandb_entity: null
+  log_every_n_steps: 10

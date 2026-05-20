@@ -33,11 +33,14 @@ BLOOM_LABELS = {1: "Remember", 2: "Understand", 3: "Apply",
 
 TRANSFORMER_SPECS = [
     {"name": "deberta", "hf_name": "microsoft/deberta-v3-large",
-     "batch_size": 8,  "grad_accum": 4, "epochs": 5, "lr": 1e-5,  "fp16": False},
+     "batch_size": 2,  "grad_accum": 16, "epochs": 5, "lr": 1e-5,  "fp16": False,
+     "gradient_checkpointing": True},
     {"name": "roberta", "hf_name": "roberta-large",
-     "batch_size": 16, "grad_accum": 2, "epochs": 5, "lr": 2e-5,  "fp16": True},
+     "batch_size": 4, "grad_accum": 8, "epochs": 5, "lr": 2e-5,  "fp16": True,
+     "gradient_checkpointing": True},
     {"name": "bert",    "hf_name": "bert-base-uncased",
-     "batch_size": 32, "grad_accum": 1, "epochs": 5, "lr": 2e-5,  "fp16": True},
+     "batch_size": 32, "grad_accum": 1, "epochs": 5, "lr": 2e-5,  "fp16": True,
+     "gradient_checkpointing": False},
 ]
 
 BLOOM_VERBS = {
@@ -187,6 +190,22 @@ def train_transformer(spec: dict, train_data, val_data, test_data, output_dir: s
         tokenizer = AutoTokenizer.from_pretrained(hf_name)
         model = AutoModelForSequenceClassification.from_pretrained(
             hf_name, num_labels=6, ignore_mismatched_sizes=True)
+
+        # Enable gradient checkpointing for large models (≥330M params) to fit
+        # in ~10-12 GB GPUs. Trades compute for memory; ~30% slower per step.
+        # use_reentrant=False is required on PyTorch 2.x — the old reentrant
+        # implementation fails on DeBERTa's disentangled attention with
+        # "Trying to backward through the graph a second time".
+        if spec.get("gradient_checkpointing", False):
+            print(f"  Gradient checkpointing enabled (non-reentrant).")
+            model.config.use_cache = False
+            try:
+                model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+            except TypeError:
+                # Older transformers (< 4.34) don't accept the kwargs argument
+                model.gradient_checkpointing_enable()
 
         model = model.float().to(device)  # always fp32 to start; scaler handles fp16 if needed
         train_ds = BloomDataset(train_texts, train_labels_0, tokenizer)
@@ -347,3 +366,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

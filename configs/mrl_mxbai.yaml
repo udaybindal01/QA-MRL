@@ -1,0 +1,54 @@
+# MRL Baseline — mixedbread-ai/mxbai-embed-large-v1
+# Memory-tuned for 10.57 GB GPU.
+#
+# Note: mxbai-embed-large is already natively MRL-trained at [64,128,256,512,768,1024]
+# so this MRL fine-tune preserves and adapts that structure to the domain.
+
+model:
+  backbone: "mixedbread-ai/mxbai-embed-large-v1"
+  backbone_type: "standard"
+  embedding_dim: 1024
+  pooling: "cls"
+  normalize_embeddings: true
+  mrl_dims: [64, 128, 256, 512, 768, 1024]
+  query_instruction: "Represent this sentence for searching relevant passages: "
+
+data:
+  train_path: "./data/real/train_curriculum.jsonl"
+  val_path: "./data/real/val.jsonl"
+  test_path: "./data/real/test.jsonl"
+  corpus_path: "./data/real/corpus.jsonl"
+  bloom_levels: {1: "Remember", 2: "Understand", 3: "Apply", 4: "Analyze", 5: "Evaluate", 6: "Create"}
+  subjects: ["biology", "chemistry", "physics", "earth_science", "general_science"]
+  max_query_length: 128
+  max_passage_length: 256
+  num_hard_negatives: 7
+
+training:
+  seed: 42
+  num_epochs: 15
+  batch_size: 4
+  gradient_accumulation_steps: 32
+  fp16: true
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+  optimizer:
+    type: "adamw"
+    lr: 2.0e-5
+    weight_decay: 0.01
+  scheduler:
+    type: "cosine"
+    warmup_ratio: 0.1
+  checkpoint_dir: "/tmp/mrl-mxbai-ckpts/"
+  save_every_n_steps: 1000
+  eval_every_n_steps: 500
+
+evaluation:
+  retrieval_ks: [1, 5, 10, 20, 50, 100]
+  bloom_stratified: true
+
+logging:
+  use_wandb: true
+  wandb_project: "bam-emnlp"
+  wandb_entity: null
+  log_every_n_steps: 10

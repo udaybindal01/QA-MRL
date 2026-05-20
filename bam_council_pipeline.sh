@@ -5,6 +5,7 @@
 # Models trained per dataset:
 #   MRL baseline    — per backbone (fair comparison)
 #   BAM-PQ          — e5-large | BGE-large | Qwen-0.6B | Qwen-4B | LLM2Vec-7B | GritLM-7B
+#                     | EmbeddingGemma-300M | GTE-large-v1.5 | Nomic-embed-v1.5 | Jina-v3
 #
 # Datasets:
 #   educational     — SciQ / ARC / OpenBookQA / QASC  (small, curriculum negatives)
@@ -87,6 +88,10 @@ declare -A BACKBONE_MRL_EDU_CFG=(
     [roberta]="configs/mrl_roberta.yaml"
     [phi3mini]="configs/mrl_phi3mini.yaml"
     [bge_base]="configs/mrl_bge_base.yaml"
+    [emgemma]="configs/mrl_emgemma.yaml"
+    [gtelarge]="configs/mrl_gtelarge.yaml"
+    [nomic]="configs/mrl_nomic.yaml"
+    [mxbai]="configs/mrl_mxbai.yaml"
 )
 declare -A BACKBONE_MRL_MSMARCO_CFG=(
     [e5large]="configs/mrl_e5large_msmarco.yaml"
@@ -119,6 +124,10 @@ declare -A BACKBONE_STANDARD_FT_EDU_CFG=(
     [roberta]="configs/standard_ft_roberta.yaml"
     [phi3mini]="configs/standard_ft_phi3mini.yaml"
     [bge_base]="configs/standard_ft_bge_base.yaml"
+    [emgemma]="configs/standard_ft_emgemma.yaml"
+    [gtelarge]="configs/standard_ft_gtelarge.yaml"
+    [nomic]="configs/standard_ft_nomic.yaml"
+    [mxbai]="configs/standard_ft_mxbai.yaml"
 )
 declare -A BACKBONE_STANDARD_FT_MSMARCO_CFG=(
     [e5large]="configs/standard_ft_e5large_msmarco.yaml"
@@ -148,6 +157,10 @@ declare -A BACKBONE_EDU_CFG=(
     [roberta]="configs/bam_pq_roberta.yaml"
     [phi3mini]="configs/bam_pq_phi3mini.yaml"
     [bge_base]="configs/bam_pq_bge_base.yaml"
+    [emgemma]="configs/bam_pq_emgemma.yaml"
+    [gtelarge]="configs/bam_pq_gtelarge.yaml"
+    [nomic]="configs/bam_pq_nomic.yaml"
+    [mxbai]="configs/bam_pq_mxbai.yaml"
 )
 declare -A BACKBONE_MSMARCO_CFG=(
     [e5large]="configs/bam_pq_msmarco.yaml"
@@ -165,10 +178,10 @@ declare -A BACKBONE_MSMARCO_CFG=(
     [phi3mini]="configs/bam_pq_phi3mini_msmarco.yaml"
 )
 # All backbones warm-start BAM-PQ from their own backbone-matched MRL checkpoint.
-BACKBONE_USE_MRL_INIT="e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm llama1b llama3b arctic roberta phi3mini bge_base"
+BACKBONE_USE_MRL_INIT="e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm llama1b llama3b arctic roberta phi3mini bge_base emgemma gtelarge nomic mxbai"
 
 # Which backbones to run for BAM-PQ (override with --backbone or BACKBONES_TO_RUN)
-BACKBONES_TO_RUN="${BACKBONES_TO_RUN:-e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm llama1b llama3b arctic roberta phi3mini bge_base}"
+BACKBONES_TO_RUN="${BACKBONES_TO_RUN:-e5large bge qwen06b qwen4b qwen8b llm2vec llama8b gritlm llama1b llama3b arctic roberta phi3mini bge_base emgemma gtelarge nomic mxbai}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ARGUMENT PARSING
@@ -847,7 +860,6 @@ for DS in $DATASETS; do
                     mkdir -p "$BK_RESULTS/fair_comparison"
                     python3 scripts/eval_fair_comparison.py \
                         --config         "$BK_CFG_F" \
-                        --mrl_config     "$BK_MRL_CFG" \
                         --bam_checkpoint "$BK_BEST" \
                         --mrl_checkpoint "$BK_MRL_BASELINE" \
                         --bam_results    "$BK_RESULTS/results.json" \

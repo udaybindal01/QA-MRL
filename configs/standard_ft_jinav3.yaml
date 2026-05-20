@@ -1,0 +1,77 @@
+# Standard Fine-tuning Baseline — jinaai/jina-embeddings-v3 — educational + BEIR
+# mrl_dims: [1024] only → standard contrastive loss, no Matryoshka.
+#
+# Jina-v3: 570M params, 1024-dim, mean pooling, long context (8192).
+# Built on XLM-RoBERTa with task-specific LoRA adapters and native MRL training.
+# Largest model in 12GB budget — uses batch_size=8 + grad_accum=16 to fit.
+#
+# NOTE: Jina-v3 ships with 5 LoRA adapters (retrieval.query, retrieval.passage,
+# separation, classification, text-matching). When loaded via AutoModel, the
+# base model is used WITHOUT adapter activation. This codebase doesn't support
+# adapter switching, so we fine-tune the full base model end-to-end on our data —
+# a clean baseline but it sacrifices Jina-v3's task-conditional advantage.
+#
+# Requires trust_remote_code (auto-detected by encoder.py via "jinaai/" prefix).
+
+data:
+  bloom_levels:
+    1: Remember
+    2: Understand
+    3: Apply
+    4: Analyze
+    5: Evaluate
+    6: Create
+  corpus_path: ./data/real/corpus.jsonl
+  max_passage_length: 256
+  max_query_length: 128
+  num_hard_negatives: 15
+  subjects:
+  - biology
+  - chemistry
+  - physics
+  - earth_science
+  - general_science
+  test_path: ./data/real/test.jsonl
+  train_path: ./data/real/train_curriculum.jsonl
+  val_path: ./data/real/val.jsonl
+evaluation:
+  bloom_stratified: true
+  retrieval_ks:
+  - 1
+  - 5
+  - 10
+  - 20
+  - 50
+  - 100
+logging:
+  log_every_n_steps: 10
+  use_wandb: true
+  wandb_entity: null
+  wandb_project: bam-emnlp
+model:
+  backbone: jinaai/jina-embeddings-v3
+  backbone_type: standard
+  embedding_dim: 1024
+  mrl_dims:
+  - 1024
+  normalize_embeddings: true
+  pooling: mean
+  torch_dtype: bfloat16
+training:
+  batch_size: 8
+  checkpoint_dir: /tmp/standard-ft-jinav3-ckpts/
+  eval_every_n_steps: 500
+  fp16: false
+  bf16: true
+  gradient_accumulation_steps: 16
+  max_grad_norm: 1.0
+  num_epochs: 15
+  optimizer:
+    lr: 2.0e-05
+    type: adamw
+    weight_decay: 0.01
+  save_every_n_steps: 1000
+  scheduler:
+    type: cosine
+    warmup_ratio: 0.1
+  seed: 42
