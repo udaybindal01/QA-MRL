@@ -202,32 +202,22 @@ class FullEvaluator:
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
         elif use_static_mask:
-            # Option B: per-level masked corpus.
-            # normalize(q * mask_b) · normalize(corpus * mask_b) for each Bloom level b.
-            bloom_logit_w = model.bloom_mask_head.bloom_logit.weight.detach().cpu()  # [6, 768]
-            # Threshold at logit > 0, matching BloomMaskHead.forward() eval branch exactly.
-            # Training STE: hard_mask = (sigmoid((logit + Gumbel) / τ) > 0.5)
-            # Eval equivalent (no noise): sigmoid(logit) > 0.5  ⟺  logit > 0
-            # This aligns corpus masking with query masking — both use the same threshold.
-            bloom_masks_bin = (bloom_logit_w > 0).float()                            # [6, 768]
-            routing_labels = torch.tensor(learner_blooms_0idx, dtype=torch.long)      # [N]
-            for b in range(6):
-                level_idx = (routing_labels == b).nonzero(as_tuple=True)[0]
-                if len(level_idx) == 0:
-                    continue
-                mask_b = bloom_masks_bin[b].to(device)                                # [768]
-                c_b = F.normalize(corpus_embs.to(device) * mask_b, p=2, dim=-1)      # [C, 768]
-                for i in range(0, len(level_idx), chunk_size):
-                    chunk = level_idx[i:i + chunk_size]
-                    q_b = F.normalize(
-                        query_full_embs[chunk].to(device) * mask_b, p=2, dim=-1
-                    )
-                    sim = torch.mm(q_b, c_b.t())
-                    topk = sim.topk(max(self.ks), dim=-1).indices.cpu().numpy()
-                    rankings[chunk.numpy()] = topk
-                del c_b
+            # Option B / BAM-PQ: masked query · full corpus.
+            # query_embs = normalize(full_emb * mask) already computed per-query with the
+            # correct per-query Bloom label (including BAM-PQ's query-delta component).
+            # corpus_embs = full embeddings — single pre-built index, no re-indexing per level.
+            # This matches the training forward pass (masked_q · full_doc) and the realistic
+            # single-index deployment scenario. Zero query dims are naturally ignored.
+            corpus_embs_dev = corpus_embs.to(device)
+            for i in range(0, N, chunk_size):
+                q_chunk = query_embs[i:i + chunk_size].to(device)
+                sim = torch.mm(q_chunk, corpus_embs_dev.t())
+                topk = sim.topk(max(self.ks), dim=-1).indices.cpu().numpy()
+                rankings[i:i + chunk_size] = topk
+                del sim
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
+            del corpus_embs_dev
         else:
             # MRL baseline: full-dim dot product.
             for i in range(0, N, chunk_size):
@@ -354,11 +344,12 @@ class FullEvaluator:
                     )
         elif query_active_dims is not None:
             # Option B: scattered mask — note that this is NOT FAISS-compatible sub-indexing
+            emb_dim = float(self.config["model"].get("embedding_dim", 768))
             metrics["avg_active_dims"] = float(query_active_dims.float().mean().item())
             metrics["avg_active_dims_scattered"] = metrics["avg_active_dims"]
             metrics["efficiency_mode"] = "scattered_non_contiguous"
             metrics["sparse_ratio"] = float(
-                1.0 - query_active_dims.float().mean().item() / 768.0
+                1.0 - query_active_dims.float().mean().item() / emb_dim
             )
             metrics["faiss_subindex_compatible"] = False
             for level in range(1, 7):
@@ -528,7 +519,8 @@ class FullEvaluator:
             sparse = metrics.get("sparse_ratio", 0.0)
             faiss_ok = metrics.get("faiss_subindex_compatible", True)
             faiss_note = "" if faiss_ok else " [scattered — NOT FAISS sub-index]"
-            print(f"  Active dims: {metrics['avg_active_dims']:.0f} / 768  "
+            emb_dim = self.config["model"].get("embedding_dim", 768)
+            print(f"  Active dims: {metrics['avg_active_dims']:.0f} / {emb_dim}  "
                   f"(sparse_ratio={sparse:.2f}{faiss_note})")
 
         print(f"\n  Bloom-Stratified R@10 (query Bloom only):")

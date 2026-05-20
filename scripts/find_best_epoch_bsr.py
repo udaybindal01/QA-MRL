@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.misc import load_config, set_seed
 from models.bam import BloomAlignedMRL
+from evaluation.evaluator import FullEvaluator
 from transformers import AutoTokenizer
 
 BLOOM_NAMES = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
@@ -293,6 +294,7 @@ def main():
     global EMBEDDING_DIM
     EMBEDDING_DIM = float(config["model"].get("embedding_dim", 768))
     tokenizer = AutoTokenizer.from_pretrained(config["model"]["backbone"])
+    evaluator = FullEvaluator(config)
 
     test_path   = config["data"]["test_path"]
     corpus_path = config["data"]["corpus_path"]
@@ -356,7 +358,10 @@ def main():
 
     for epoch_num, name, ckpt_dir in epoch_dirs:
         model = load_bam(config, ckpt_dir, device)
-        metrics = evaluate_epoch(model, test_path, corpus_path, tokenizer, device)
+        metrics = evaluator.evaluate_model(
+            model, test_path, corpus_path, tokenizer, device,
+            compute_bootstrap=False,
+        )
         results[name] = metrics
 
         is_warmup = (epoch_num != 9999 and epoch_num < warmup_cutoff)
