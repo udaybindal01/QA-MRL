@@ -45,15 +45,18 @@ from typing import List, Optional
 
 class BloomMaskedContrastiveLoss(nn.Module):
     """
-    InfoNCE in query-masked subspace with inverse-sqrt class weighting.
+    InfoNCE with query-only masking — matches FAISS-deployable retrieval.
 
-    Both Option A and Option B mask both query and document with the query's bloom mask:
         masked_q = normalize(query_emb * mask)
-        masked_p = normalize(positive_emb * mask)
+        masked_p = normalize(positive_emb)              # docs NEVER masked
 
-    Option A (prefix mask): equivalent to normalize(q[:k]) · normalize(c[:k]) at eval.
-    Option B (static scattered mask): eval pre-masks corpus per Bloom level,
-        normalize(q * mask_b) · normalize(corpus * mask_b), matching training exactly.
+    Why query-only: at deployment the corpus is indexed once at full dims; per-query
+    masks make per-query corpus re-masking infeasible (BAM-PQ has unique masks per
+    query via alpha * query_mlp(cls), so static per-level FAISS sub-indexes don't apply).
+    The eval path in FullEvaluator uses the same objective.
+
+    Option A (prefix mask): equivalent to normalize(q[:k]) · normalize(c) at eval,
+    differing only in whether c is sub-sliced or zero-multiplied (same dot product).
 
     class_weights: [6] tensor, one weight per Bloom level (0-indexed).
     Computed from training data as 1/sqrt(freq), normalized to mean=1.
@@ -75,11 +78,10 @@ class BloomMaskedContrastiveLoss(nn.Module):
         bloom_labels: Optional[torch.Tensor] = None,
     ):
         masked_q = F.normalize(query_emb * query_mask, p=2, dim=-1)
-        masked_p = F.normalize(positive_emb * query_mask, p=2, dim=-1)
+        masked_p = F.normalize(positive_emb, p=2, dim=-1)
 
         if negative_embs is not None:
-            mask_exp = query_mask.unsqueeze(1).expand_as(negative_embs)
-            masked_n = F.normalize(negative_embs * mask_exp, p=2, dim=-1)
+            masked_n = F.normalize(negative_embs, p=2, dim=-1)
             pos_sim = (masked_q * masked_p).sum(dim=-1) / self.temperature
             neg_sim = torch.bmm(masked_n, masked_q.unsqueeze(-1)).squeeze(-1) / self.temperature
             logits = torch.cat([pos_sim.unsqueeze(-1), neg_sim], dim=-1)
