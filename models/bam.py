@@ -207,8 +207,11 @@ class BloomQueryMaskHead(nn.Module):
     Why this combination works:
       - Bloom anchor prevents per-query collapse (the chronic failure mode of
         self-supervised per-query routing with only contrastive loss).
-      - Query MLP output layer zero-initialized → model is identical to BAM-B at
-        epoch 0 and only grows per-query signal if it genuinely helps retrieval.
+      - Query MLP output layer initialized to small Gaussian (std=0.02) so the
+        delta starts quiet but non-zero — breaks the alpha/MLP dead-gradient
+        symmetry where zero-init MLP gives zero alpha gradient.
+      - Alpha init at sigmoid(-1.5) ≈ 0.18: starts noticeable but Bloom-dominated,
+        keeps sigmoid derivative non-vanishing for healthy gradient flow.
       - Alpha sigmoid-bounded to [0,1]: interpretable, stable, auditable.
         At convergence, alpha tells you "how much does query content matter
         beyond what the Bloom level already tells you?"
@@ -243,8 +246,10 @@ class BloomQueryMaskHead(nn.Module):
             nn.Linear(query_hidden, embedding_dim),
         )
 
-        # ── Mixing weight: sigmoid(-3) ≈ 0.047 → nearly pure Bloom at init ──
-        self.alpha_raw = nn.Parameter(torch.full((1,), -3.0))
+        # ── Mixing weight: sigmoid(-1.5) ≈ 0.18 → noticeable per-query weight at init,
+        # high enough that alpha gradient is not vanishingly small (sigmoid'(α_raw) = α(1-α)),
+        # low enough that the Bloom anchor still dominates at epoch 0.
+        self.alpha_raw = nn.Parameter(torch.full((1,), -1.5))
 
         with torch.no_grad():
             # Bloom logit init: same Gaussian-quantile calibration as BloomMaskHead
@@ -257,9 +262,13 @@ class BloomQueryMaskHead(nn.Module):
             else:
                 nn.init.normal_(self.bloom_logit.weight, mean=-0.100, std=1.0)
 
-            # Zero-init query MLP output layer: delta starts silent (pure Bloom).
-            # Gradient signal will grow alpha and the MLP if per-query adjustment helps.
-            nn.init.zeros_(self.query_mlp[3].weight)
+            # Small-Gaussian init query MLP output layer: delta starts quiet but non-zero.
+            # Pure zero-init creates a dead-gradient trap with alpha (both depend on the
+            # other being non-zero to receive gradient). std=0.02 keeps the per-query
+            # contribution small relative to bloom_logit at init (||bloom_logit|| ~ 1
+            # vs ||delta_logit|| ~ alpha * 0.02 * sqrt(H) ≈ 0.005) but breaks symmetry
+            # so alpha can actually receive gradient.
+            nn.init.normal_(self.query_mlp[3].weight, mean=0.0, std=0.02)
             nn.init.zeros_(self.query_mlp[3].bias)
 
     @property
