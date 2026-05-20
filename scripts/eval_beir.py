@@ -55,12 +55,16 @@ BEIR_QUICK = ["scifact", "nfcorpus", "fiqa", "arguana", "scidocs"]
 
 def load_local_jsonl_beir(data_dir: str, split: str = "test"):
     """
-    Load BEIR dataset from local JSONL files (pipeline format).
-    Expected files: corpus.jsonl, {split}.jsonl
-    corpus.jsonl  rows: {"_id": ..., "title": ..., "text": ...}
-    {split}.jsonl rows: {"_id": ..., "text": ..., "relevant_docs": [...]}
-                     OR {"query_id": ..., "query": ..., "relevant_docs": [...]}
-    Returns corpus, queries, qrels dicts.
+    Load BEIR dataset from local JSONL files (pipeline pair format).
+
+    corpus.jsonl  — one doc per line: {"_id": ..., "title": ..., "text": ...}
+    {split}.jsonl — one pair per line (build_beir_training_data.py output):
+        {"query": ..., "positive_id": ..., "negative_ids": [...],
+         "bloom_level": ..., "subject": ...}
+
+    Returns corpus, queries, qrels dicts suitable for retrieval eval.
+    Each pair line becomes one query; qrel = {positive_id: 1}.
+    Queries sharing the same text are merged (all their positives pooled).
     """
     import json as _json
     corpus_path = os.path.join(data_dir, "corpus.jsonl")
@@ -71,28 +75,59 @@ def load_local_jsonl_beir(data_dir: str, split: str = "test"):
     corpus = {}
     with open(corpus_path) as f:
         for line in f:
+            line = line.strip()
+            if not line:
+                continue
             row = _json.loads(line)
-            cid = str(row.get("_id") or row.get("doc_id") or row.get("id"))
-            corpus[cid] = {"title": row.get("title", ""), "text": row.get("text", "")}
+            cid = str(row.get("_id") or row.get("doc_id") or row.get("id", ""))
+            if cid:
+                corpus[cid] = {"title": row.get("title", ""), "text": row.get("text", "")}
 
-    queries, qrels = {}, defaultdict(dict)
+    # Merge duplicate queries (same text → same qid, pool positives)
+    text_to_qid: dict = {}
+    queries: dict = {}
+    qrels: dict = defaultdict(dict)
+    bloom_map: dict = {}   # qid → 0-indexed bloom level
+
     with open(split_path) as f:
-        for line in f:
+        for idx, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
             row = _json.loads(line)
-            qid = str(row.get("_id") or row.get("query_id") or row.get("id"))
-            qtxt = row.get("text") or row.get("query") or ""
-            queries[qid] = qtxt
+
+            # Support pipeline pair format {"query":..., "positive_id":...}
+            # and standard BEIR query format {"_id":..., "text":...}
+            qtxt = row.get("query") or row.get("text") or ""
+            pos_id = str(row.get("positive_id") or "")
+
+            # Use query text as dedup key; fall back to index-based ID
+            if qtxt in text_to_qid:
+                qid = text_to_qid[qtxt]
+            else:
+                qid = str(row.get("_id") or row.get("query_id") or f"q{idx}")
+                text_to_qid[qtxt] = qid
+                queries[qid] = qtxt
+                # bloom_level in pair records is 1-indexed; convert to 0-indexed
+                bl = row.get("bloom_level") or row.get("predicted_bloom_level")
+                if bl is not None:
+                    bloom_map[qid] = max(0, min(int(bl) - 1, 5))
+
+            if pos_id and pos_id in corpus:
+                qrels[qid][pos_id] = 1
+
+            # Also handle explicit relevant_docs list
             for rel in row.get("relevant_docs", []):
-                if isinstance(rel, dict):
-                    cid = str(rel.get("doc_id") or rel.get("_id"))
-                    score = int(rel.get("score", 1))
-                else:
-                    cid, score = str(rel), 1
-                qrels[qid][cid] = score
+                cid = str(rel.get("doc_id") or rel.get("_id") or rel) \
+                      if isinstance(rel, dict) else str(rel)
+                if cid in corpus:
+                    qrels[qid][cid] = int(rel.get("score", 1)) \
+                                      if isinstance(rel, dict) else 1
 
     print(f"  Loaded from local JSONL: corpus={len(corpus):,}  "
-          f"queries={len(queries):,}  qrels={len(qrels):,}")
-    return corpus, queries, dict(qrels)
+          f"queries={len(queries):,}  qrels={len(qrels):,}  "
+          f"bloom_labels={len(bloom_map):,}")
+    return corpus, queries, dict(qrels), bloom_map
 
 
 def load_beir_dataset(dataset_name: str, split: str = "test",
@@ -111,16 +146,17 @@ def load_beir_dataset(dataset_name: str, split: str = "test",
     ]
     for local_dir in search_dirs:
         if os.path.isdir(local_dir):
-            corpus, queries, qrels = load_local_jsonl_beir(local_dir, split)
-            if corpus is not None:
+            result = load_local_jsonl_beir(local_dir, split)
+            if result[0] is not None:
+                corpus, queries, qrels, bloom_map = result
                 print(f"  Using local data at {local_dir}")
-                return corpus, queries, qrels
+                return corpus, queries, qrels, bloom_map
             # Also try beir GenericDataLoader for standard BEIR format
             try:
                 from beir.datasets.data_loader import GenericDataLoader
                 corpus, queries, qrels = GenericDataLoader(local_dir).load(split=split)
                 print(f"  Using local BEIR data at {local_dir}")
-                return corpus, queries, qrels
+                return corpus, queries, qrels, {}
             except Exception:
                 pass
 
@@ -136,7 +172,7 @@ def load_beir_dataset(dataset_name: str, split: str = "test",
             beir_util.download_and_unzip(url, "data/beir")
 
         corpus, queries, qrels = GenericDataLoader(data_path).load(split=split)
-        return corpus, queries, qrels
+        return corpus, queries, qrels, {}
 
     except ImportError:
         pass
@@ -156,10 +192,10 @@ def load_beir_dataset(dataset_name: str, split: str = "test",
         qrels = defaultdict(dict)
         for row in ds_qrels:
             qrels[str(row["query-id"])][str(row["corpus-id"])] = int(row["score"])
-        return corpus, queries, dict(qrels)
+        return corpus, queries, dict(qrels), {}
     except Exception as e:
         print(f"  Failed to load {dataset_name}: {e}")
-        return None, None, None
+        return None, None, None, {}
 
 
 # ─────────────────────── Encoding ───────────────────────
@@ -527,7 +563,7 @@ def evaluate_on_beir(
     print(f"{'='*60}")
 
     # Load dataset
-    corpus, queries, qrels = load_beir_dataset(
+    corpus, queries, qrels, local_bloom_map = load_beir_dataset(
         dataset_name, split=split, beir_data_root=beir_data_root)
     if corpus is None:
         print(f"  Skipping {dataset_name} (failed to load)")
@@ -555,18 +591,28 @@ def evaluate_on_beir(
     # Annotate queries with Bloom levels for BAM routing
     bloom_labels = None
     if hasattr(model, "encode_queries"):
-        # Look for pre-built bloom cache alongside the data
-        cache_path = None
-        if beir_data_root:
-            candidate = os.path.join(beir_data_root, dataset_name,
-                                     f"{split}.jsonl.bloom_cache.json")
-            if os.path.exists(candidate):
-                cache_path = candidate
-        bloom_labels = annotate_bloom_labels(
-            query_texts, device,
-            cache_path=cache_path,
-            query_ids=query_ids,
-        )
+        if local_bloom_map and all(qid in local_bloom_map for qid in query_ids):
+            # Use bloom levels read directly from the JSONL pair records
+            bloom_labels = [local_bloom_map[qid] for qid in query_ids]
+            from collections import Counter
+            dist = Counter(bloom_labels)
+            bnames = {0:"Remember",1:"Understand",2:"Apply",3:"Analyze",4:"Evaluate",5:"Create"}
+            print("  Bloom distribution (from pair records):")
+            for b in sorted(dist):
+                print(f"    {bnames.get(b,b)}: {dist[b]} ({dist[b]/len(bloom_labels):.1%})")
+        else:
+            # Fall back: check cache file then run classifier
+            cache_path = None
+            if beir_data_root:
+                candidate = os.path.join(beir_data_root, dataset_name,
+                                         f"{split}.jsonl.bloom_cache.json")
+                if os.path.exists(candidate):
+                    cache_path = candidate
+            bloom_labels = annotate_bloom_labels(
+                query_texts, device,
+                cache_path=cache_path,
+                query_ids=query_ids,
+            )
 
     # Encode
     print("  Encoding corpus...")
