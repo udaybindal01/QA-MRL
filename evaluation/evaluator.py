@@ -330,10 +330,11 @@ class FullEvaluator:
         #   Compute saving at query time = fraction of zero dims (768-active)/768.
         if query_dims is not None:
             # Option A: prefix mask
+            emb_dim = float(self.config["model"].get("embedding_dim", 768))
             metrics["avg_active_dims"] = float(query_dims.float().mean().item())
             metrics["efficiency_mode"] = "prefix_contiguous"
             metrics["sparse_ratio"] = float(
-                1.0 - query_dims.float().mean().item() / 768.0
+                1.0 - query_dims.float().mean().item() / emb_dim
             )
             for level in range(1, 7):
                 mask = query_blooms == level

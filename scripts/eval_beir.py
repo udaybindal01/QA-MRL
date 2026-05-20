@@ -387,62 +387,16 @@ def retrieve_faiss(query_embs: np.ndarray, corpus_embs: np.ndarray,
 def retrieve_faiss_sparse(query_embs: np.ndarray, corpus_embs: np.ndarray,
                            query_masks: np.ndarray, k: int = 100) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Efficient sparse retrieval: only compute dot products over active dimensions.
+    BAM-PQ retrieval: masked query embeddings vs single full-corpus FAISS index.
 
-    This is the TRUE efficiency implementation for QA-MRL.
-    For each query, we extract only the non-zero dimensions and search
-    over the corresponding corpus dimensions.
+    query_embs are already normalize(q_full * mask) from encode_queries; corpus_embs
+    are normalize(c_full). Zero query dims are naturally ignored in the dot product,
+    so this matches the deployment scenario (one FAISS index, masked queries).
 
-    For production: you'd precompute group-specific sub-indices.
-    For evaluation: we do per-query sparse dot product.
+    query_masks is kept in the signature for compatibility / avg_active_dims logging
+    but is not used for retrieval — masking lives entirely on the query side.
     """
-    N_q = query_embs.shape[0]
-    N_c = corpus_embs.shape[0]
-
-    all_scores = np.zeros((N_q, k), dtype=np.float32)
-    all_indices = np.zeros((N_q, k), dtype=np.int64)
-
-    # Group queries by their active mask pattern for batched processing
-    mask_patterns = defaultdict(list)
-    for i in range(N_q):
-        active = tuple(np.where(query_masks[i] > 0.5)[0])
-        mask_patterns[active].append(i)
-
-    for active_dims, query_indices in tqdm(mask_patterns.items(),
-                                            desc="  sparse search", leave=False):
-        if len(active_dims) == 0:
-            continue
-
-        active_dims = list(active_dims)
-
-        # Extract only active dimensions
-        q_sparse = query_embs[query_indices][:, active_dims]  # [batch, d_active]
-        c_sparse = corpus_embs[:, active_dims]                 # [N_c, d_active]
-
-        # Normalize
-        q_norm = q_sparse / (np.linalg.norm(q_sparse, axis=1, keepdims=True) + 1e-9)
-        c_norm = c_sparse / (np.linalg.norm(c_sparse, axis=1, keepdims=True) + 1e-9)
-
-        if HAS_FAISS and len(active_dims) > 1:
-            d_active = len(active_dims)
-            index = faiss.IndexFlatIP(d_active)
-            index.add(np.ascontiguousarray(c_norm.astype(np.float32)))
-            scores, indices = index.search(
-                np.ascontiguousarray(q_norm.astype(np.float32)), k
-            )
-        else:
-            q_t = torch.from_numpy(q_norm.astype(np.float32))
-            c_t = torch.from_numpy(c_norm.astype(np.float32))
-            sim = torch.mm(q_t, c_t.t())
-            scores_t, indices_t = sim.topk(min(k, N_c), dim=-1)
-            scores = scores_t.numpy()
-            indices = indices_t.numpy()
-
-        for j, qi in enumerate(query_indices):
-            all_scores[qi] = scores[j]
-            all_indices[qi] = indices[j]
-
-    return all_scores, all_indices
+    return retrieve_faiss(query_embs, corpus_embs, k=k)
 
 
 # ─────────────────────── BEIR Metrics ───────────────────────

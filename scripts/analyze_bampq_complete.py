@@ -439,8 +439,8 @@ def efficiency_curves(mrl_q, mrl_c, bampq_q, bampq_c,
                       max_dims=768, k=10, device=None):
     """Sweep fixed-dim budgets for MRL; compute BAM-PQ operating points per Bloom."""
 
-    dim_budgets = sorted(set([64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768])
-                         & set(range(1, max_dims+1)))
+    # Generate dim budgets in 64-dim steps up to max_dims (covers 768, 1024, etc.)
+    dim_budgets = sorted(set(range(64, max_dims + 1, 64)) | {max_dims})
     dim_budgets = [d for d in dim_budgets if d <= max_dims]
 
     print("\n" + "="*60)
