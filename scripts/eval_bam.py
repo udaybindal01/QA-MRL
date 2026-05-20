@@ -156,28 +156,16 @@ def main():
     evaluator = FullEvaluator(config)
     all_results = {}
 
-    # --- BAM v3/v4-A (prefix routing) ---
+    # --- BAM-PQ ---
     print("=" * 60)
-    print("BAM v3/v4-A (prefix routing)")
+    print("BAM-PQ")
     print("=" * 60)
     bam_model = load_bam(config, args.checkpoint, device)
     bam_metrics = evaluator.evaluate_model(
         bam_model, test_path, corpus_path, tokenizer, device,
         compute_bootstrap=True,
     )
-    all_results["BAM"] = bam_metrics
-
-    # BAM encoder truncated (no routing) — isolates routing gain from encoder quality gain
-    print("\n" + "=" * 60)
-    print("BAM Encoder (no routing)")
-    print("=" * 60)
-    bam_encoder_model = load_mrl(config, args.checkpoint, device)
-    bam_enc_metrics = evaluator.evaluate_model(
-        bam_encoder_model, test_path, corpus_path, tokenizer, device,
-        mrl_truncation_dims=config["model"]["mrl_dims"],
-        compute_bootstrap=True,
-    )
-    all_results["BAM Encoder (no routing)"] = bam_enc_metrics
+    all_results["BAM-PQ"] = bam_metrics
 
     # --- BAM v4 Option B (scattered mask) ---
     if args.checkpoint_v4:
@@ -277,17 +265,16 @@ def main():
     dims_list = config["model"]["mrl_dims"]
     print(f"\n{'Truncation R@10 comparison':45s}")
     print("-" * 55)
-    print(f"  {'Dims':>6}  {'MRL':>8}  {'MRL-cont':>10}  {'BAM-enc':>9}  {'BAM (routed)':>13}")
+    print(f"  {'Dims':>6}  {'MRL':>8}  {'MRL-cont':>10}  {'BAM-PQ (routed)':>16}")
+    fmt = lambda v: f"{v:.4f}" if isinstance(v, float) else " " * 8
     for d in dims_list:
         key = f"mrl_d{d}_recall@10"
-        fmt = lambda v: f"{v:.4f}" if isinstance(v, float) else " " * 8
         print(f"  {d:>6}  "
               f"{fmt(all_results.get('MRL Baseline', {}).get(key, '-')):>8}  "
-              f"{fmt(all_results.get('MRL Continued', {}).get(key, '-')):>10}  "
-              f"{fmt(all_results.get('BAM Encoder (no routing)', {}).get(key, '-')):>9}")
+              f"{fmt(all_results.get('MRL Continued', {}).get(key, '-')):>10}")
     avg_dim = bam_metrics.get("avg_active_dims", 0)
-    print(f"  {'~'+str(int(avg_dim)):>6}  {'':>8}  {'':>10}  {'':>9}  "
-          f"{bam_metrics.get('recall@10', 0):>13.4f}  ← BAM routed")
+    print(f"  {'~'+str(int(avg_dim)):>6}  {'':>8}  {'':>10}  "
+          f"{bam_metrics.get('recall@10', 0):>16.4f}  ← BAM-PQ routed")
 
     # --- Option B mask specialization ---
     if args.checkpoint_v4:
