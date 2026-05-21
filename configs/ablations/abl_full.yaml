@@ -48,7 +48,7 @@ data:
 
 training:
   seed: 42
-  num_epochs: 20                   # 8 frozen + 12 fine-tuning
+  num_epochs: 20                   # all frozen (ablation: encoder held fixed)
   batch_size: 16
   gradient_accumulation_steps: 8   # effective batch = 128
   fp16: true
@@ -93,7 +93,7 @@ training:
   balanced_bloom_sampling: true
   use_pcgrad: false
   encoder_freeze_after_epochs: null
-  encoder_unfreeze_after_epochs: 8
+  encoder_unfreeze_after_epochs: null
   bloom_noise_rate: 0.0
   hard_neg_refresh_epochs: null
   checkpoint_dir: "/tmp/bam-pq-ckpts/abl_full/"
