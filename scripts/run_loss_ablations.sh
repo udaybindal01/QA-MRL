@@ -2,7 +2,7 @@
 # Loss ablation study for BAM-PQ (bge-base backbone — smallest/fastest).
 #
 # Step 0: Train the MRL baseline (bge-base) on the educational dataset.
-#         Finds best epoch and saves to /tmp/bam-pq-ckpts/abl_mrl/best
+#         Finds best epoch and saves to $ABL_CKPT_ROOT/abl_mrl/best
 # Step 1: Train all 7 BAM-PQ ablation variants, each warm-started from
 #         the same MRL checkpoint — controlled experiment.
 # Step 2: Collect results and print table.
@@ -14,13 +14,17 @@
 #   bash scripts/run_loss_ablations.sh --from no_variance     # resume from this variant onwards
 #   SKIP_MRL=1 bash scripts/run_loss_ablations.sh             # skip MRL training
 #   SKIP_MRL=1 bash scripts/run_loss_ablations.sh --from no_variance  # resume + skip MRL
+#
+# Env overrides:
+#   ABL_CKPT_ROOT=/path   # where to store ablation checkpoints (default /tmp/bam-pq-ckpts)
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-MRL_CKPT_DIR="/tmp/bam-pq-ckpts/abl_mrl"
+ABL_CKPT_ROOT="${ABL_CKPT_ROOT:-/tmp/bam-pq-ckpts}"
+MRL_CKPT_DIR="${ABL_CKPT_ROOT}/abl_mrl"
 MRL_BEST="${MRL_CKPT_DIR}/best"
 MRL_CFG="configs/mrl_bge_base.yaml"
 SKIP_MRL="${SKIP_MRL:-0}"
@@ -83,7 +87,7 @@ fi
 run_variant() {
     local name="$1"
     local cfg="configs/ablations/abl_${name}.yaml"
-    local ckpt_dir="/tmp/bam-pq-ckpts/abl_${name}"
+    local ckpt_dir="${ABL_CKPT_ROOT}/abl_${name}"
     local best_dir="${ckpt_dir}/best_bsr"
 
     echo ""
