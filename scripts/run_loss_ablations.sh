@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Loss ablation study for BAM-PQ (e5-large backbone).
+# Loss ablation study for BAM-PQ (bge-base backbone — smallest/fastest).
 #
-# Step 0: Train the MRL baseline (e5-large) on the educational dataset.
+# Step 0: Train the MRL baseline (bge-base) on the educational dataset.
 #         Finds best epoch and saves to /tmp/bam-pq-ckpts/abl_mrl/best
 # Step 1: Train all 7 BAM-PQ ablation variants, each warm-started from
 #         the same MRL checkpoint — controlled experiment.
@@ -22,7 +22,7 @@ cd "$ROOT"
 
 MRL_CKPT_DIR="/tmp/bam-pq-ckpts/abl_mrl"
 MRL_BEST="${MRL_CKPT_DIR}/best"
-MRL_CFG="configs/mrl_e5large.yaml"
+MRL_CFG="configs/mrl_bge_base.yaml"
 SKIP_MRL="${SKIP_MRL:-0}"
 
 # ── Step 0: Train MRL baseline ───────────────────────────────────────────────
@@ -33,7 +33,7 @@ elif [[ -f "${MRL_BEST}/checkpoint.pt" ]] && [[ "$SKIP_MRL" != "0" ]]; then
 else
     echo ""
     echo "══════════════════════════════════════════════════"
-    echo "  Step 0: Training MRL baseline (e5-large)"
+    echo "  Step 0: Training MRL baseline (bge-base)"
     echo "══════════════════════════════════════════════════"
     mkdir -p "${MRL_CKPT_DIR}"
     python scripts/train_baseline_mrl.py \
