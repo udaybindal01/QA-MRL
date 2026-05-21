@@ -92,6 +92,7 @@ declare -A BACKBONE_MRL_EDU_CFG=(
     [gtelarge]="configs/mrl_gtelarge.yaml"
     [nomic]="configs/mrl_nomic.yaml"
     [mxbai]="configs/mrl_mxbai.yaml"
+    [qwen2505b]="configs/mrl_qwen2505b.yaml"
 )
 declare -A BACKBONE_MRL_MSMARCO_CFG=(
     [e5large]="configs/mrl_e5large_msmarco.yaml"
@@ -128,6 +129,7 @@ declare -A BACKBONE_STANDARD_FT_EDU_CFG=(
     [gtelarge]="configs/standard_ft_gtelarge.yaml"
     [nomic]="configs/standard_ft_nomic.yaml"
     [mxbai]="configs/standard_ft_mxbai.yaml"
+    [qwen2505b]="configs/standard_ft_qwen2505b.yaml"
 )
 declare -A BACKBONE_STANDARD_FT_MSMARCO_CFG=(
     [e5large]="configs/standard_ft_e5large_msmarco.yaml"
@@ -161,6 +163,7 @@ declare -A BACKBONE_EDU_CFG=(
     [gtelarge]="configs/bam_pq_gtelarge.yaml"
     [nomic]="configs/bam_pq_nomic.yaml"
     [mxbai]="configs/bam_pq_mxbai.yaml"
+    [qwen2505b]="configs/bam_pq_qwen2505b.yaml"
 )
 declare -A BACKBONE_MSMARCO_CFG=(
     [e5large]="configs/bam_pq_msmarco.yaml"
