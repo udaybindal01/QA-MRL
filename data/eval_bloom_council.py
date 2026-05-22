@@ -20,7 +20,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-COUNCIL_DIR  = "/tmp/bloom-council"
+COUNCIL_DIR  = os.environ.get("COUNCIL_DIR", "/tmp/bloom-council")
 WEIGHTS_FILE = os.path.join(COUNCIL_DIR, "council_weights.json")
 BLOOM_LABELS = {0: "Remember", 1: "Understand", 2: "Apply",
                 3: "Analyze",  4: "Evaluate",   5: "Create"}
