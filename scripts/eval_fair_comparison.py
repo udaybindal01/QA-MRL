@@ -140,12 +140,18 @@ def encode_queries_mrl(model, samples, tokenizer, device, batch_size=64):
 
 
 def recall_at_k(q_embs, c_embs, gt_indices, k, device, chunk=256):
-    """Compute R@k for given query/corpus embeddings (already normalized)."""
+    """Compute R@k for given query/corpus embeddings (already normalized).
+
+    Cast to float32 — bf16 backbones emit bf16 embeddings; this keeps MRL
+    retrieval in the same dtype as the BAM path (fp32) so the comparison is
+    apples-to-apples and avoids bf16 matmul precision loss.
+    """
     N = len(q_embs)
     hits = []
+    c_dev = c_embs.float().to(device)
     for i in range(0, N, chunk):
-        q = q_embs[i:i + chunk].to(device)
-        sim = torch.mm(q, c_embs.to(device).t())
+        q = q_embs[i:i + chunk].float().to(device)
+        sim = torch.mm(q, c_dev.t())
         topk = sim.topk(k, dim=-1).indices.cpu().numpy()
         for j, row in enumerate(topk):
             hits.append(int(gt_indices[i + j] in row))
@@ -161,26 +167,33 @@ def bam_retrieval_per_level(
 
     level_idx: global query indices for this level (used to slice full_embs/dims/masks)
     level_gt:  gt_indices already subset to this level (len == len(level_idx))
-    Option A (is_prefix=True): normalize(q[:d]) · normalize(c[:d])
-    Option B (is_prefix=False): normalize(q*mask) · normalize(c*mask)
+    Option A (is_prefix=True):  normalize(q[:d]) · normalize(c[:d])
+    Option B (is_prefix=False): normalize(q*mask) · normalize(c)   — full corpus
+
+    Embeddings cast to float32 (bf16 backbones emit bf16; matmul needs fp32).
     """
     N = len(level_idx)
     hits = np.zeros(N)
 
     if is_prefix:
+        corpus_f = corpus_embs.float()
         for j, qi in enumerate(level_idx):
             d = int(dims[qi].item())
             d = max(1, min(d, corpus_embs.shape[1]))
-            q_v = F.normalize(full_embs[qi:qi+1, :d], p=2, dim=-1).to(device)
-            c_v = F.normalize(corpus_embs[:, :d], p=2, dim=-1).to(device)
+            q_v = F.normalize(full_embs[qi:qi+1, :d].float(), p=2, dim=-1).to(device)
+            c_v = F.normalize(corpus_f[:, :d], p=2, dim=-1).to(device)
             sim = torch.mm(q_v, c_v.t())
             topk = sim.topk(k, dim=-1).indices.cpu().numpy()[0]
             hits[j] = int(level_gt[j] in topk)
     else:
+        # Option B / BAM-PQ: masked query vs FULL corpus. Masking the corpus with
+        # the query's mask is oracle eval — infeasible at deployment (one FAISS
+        # index serves all queries) and inflates recall. Corpus is constant across
+        # queries, so build it once outside the loop.
+        c_v = F.normalize(corpus_embs.float().to(device), p=2, dim=-1)
         for j, qi in enumerate(level_idx):
-            m = masks[qi].to(device)
-            q_v = F.normalize(full_embs[qi:qi+1].to(device) * m, p=2, dim=-1)
-            c_v = F.normalize(corpus_embs.to(device) * m, p=2, dim=-1)
+            m = masks[qi].float().to(device)
+            q_v = F.normalize(full_embs[qi:qi+1].float().to(device) * m, p=2, dim=-1)
             sim = torch.mm(q_v, c_v.t())
             topk = sim.topk(k, dim=-1).indices.cpu().numpy()[0]
             hits[j] = int(level_gt[j] in topk)
