@@ -161,6 +161,15 @@ class FullEvaluator:
             learner_blooms_0idx=learner_blooms_0idx,
         )
 
+        # Cast embeddings to float32 — bf16 backbones (e.g. Qwen2.5) emit bf16
+        # embeddings, but retrieval matmuls / topk require a consistent dtype
+        # (query and corpus must match). fp32 also avoids bf16 precision loss
+        # in the similarity scores.
+        corpus_embs = corpus_embs.float()
+        query_embs = query_embs.float()
+        if query_full_embs is not None:
+            query_full_embs = query_full_embs.float()
+
         gt_indices = np.array([corpus_id_to_idx[s["positive_id"]] for s in valid_samples])
         # query_blooms is 1-indexed for display/stratification (BLOOM_NAMES keys are 1-6).
         # Use ground-truth bloom_level for stratification reporting regardless of routing source,
