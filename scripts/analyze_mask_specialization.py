@@ -107,8 +107,12 @@ def run_analysis(args):
     names = [BLOOM_DISPLAY[b] for b in present]
     L = len(present)
 
-    # Pairwise cosine similarity on mean soft masks
-    means_t = torch.stack([mean_soft[b] for b in present])  # [L, 768]
+    # Pairwise cosine similarity on mean HARD masks (deployment-relevant).
+    # At retrieval the mask is hard-thresholded 0/1; the soft sigmoid is only
+    # used for training gradients. The per-Bloom mean of hard masks is the
+    # fraction of queries with each dim active — the cosine of these vectors
+    # measures similarity between the actually-deployed routing patterns.
+    means_t = torch.stack([mean_hard[b] for b in present])  # [L, D]
     normed = F.normalize(means_t, p=2, dim=-1)
     sim_matrix = torch.mm(normed, normed.t()).numpy()  # [L, L]
 
@@ -139,7 +143,7 @@ def run_analysis(args):
     for b in present:
         print(f"  {BLOOM_DISPLAY[b]:12s}: {active_dims[b]:.0f}  ({active_dims[b]/768*100:.1f}%)")
 
-    print(f"\nPairwise cosine similarity (mean soft masks):")
+    print(f"\nPairwise cosine similarity (mean hard masks — deployment-relevant):")
     header = f"{'':14s}" + "".join(f"{n:>12s}" for n in names)
     print(header)
     print("-" * len(header))
@@ -183,7 +187,7 @@ def run_analysis(args):
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
         for ax, matrix, title, fmt in [
-            (axes[0], sim_matrix, "Cosine Similarity\n(mean soft masks per level)", ".2f"),
+            (axes[0], sim_matrix, "Cosine Similarity\n(mean hard masks per level)", ".2f"),
             (axes[1], overlap_matrix, "Mask Overlap\n(% of row level's dims in col level)", ".0%"),
         ]:
             im = ax.imshow(matrix, cmap="RdYlGn_r" if "Overlap" in title else "coolwarm_r",
