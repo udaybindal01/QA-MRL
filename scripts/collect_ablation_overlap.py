@@ -219,8 +219,9 @@ def main():
         f.write("Variant & Dim range & Spread & "
                 "Mean overlap & Rem$\\to$Eval & Eval$\\to$Rem \\\\\n\\midrule\n")
         for v in VARIANTS:
+            v_tex = v.replace("_", "\\_")
             if v not in summary:
-                f.write(f"{v.replace('_', '\\_')} & -- & -- & -- & -- & -- \\\\\n")
+                f.write(v_tex + " & -- & -- & -- & -- & -- \\\\\n")
                 continue
             r = summary[v]
             dim_range = f"{r['dim_min']}--{r['dim_max']}"
@@ -229,7 +230,7 @@ def main():
             er_ov = r['evaluate_remember_overlap']
             re_s = f"{re_ov*100:.1f}\\%" if re_ov is not None else "--"
             er_s = f"{er_ov*100:.1f}\\%" if er_ov is not None else "--"
-            f.write(f"{v.replace('_', '\\_')} & {dim_range} & {r['dim_spread']} & "
+            f.write(f"{v_tex} & {dim_range} & {r['dim_spread']} & "
                     f"{mo*100:.1f}\\% & {re_s} & {er_s} \\\\\n")
         f.write("\\bottomrule\n\\end{tabular}\n")
         f.write("\\caption{Mask specialisation diagnostics across loss ablations. "
