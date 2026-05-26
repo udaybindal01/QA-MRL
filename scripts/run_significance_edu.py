@@ -80,6 +80,14 @@ BACKBONES = {
         "mrl_ckpt":      f"{CKPT_ROOT}/mrl_arctic/best/",
         "ft_ckpt":       f"{CKPT_ROOT}/standard_ft_arctic/best/",
     },
+    "mxbai": {
+        "bampq_config":  "configs/bam_pq_mxbai.yaml",
+        "mrl_config":    "configs/mrl_mxbai.yaml",
+        "ft_config":     "configs/standard_ft_mxbai.yaml",
+        "bampq_ckpt":    f"{CKPT_ROOT}/bam_pq_mxbai/best_bsr/",
+        "mrl_ckpt":      f"{CKPT_ROOT}/mrl_mxbai/best/",
+        "ft_ckpt":       f"{CKPT_ROOT}/standard_ft_mxbai/best/",
+    },
 }
 
 METRICS = ["recall@1", "recall@10", "recall@50", "ndcg@10"]
