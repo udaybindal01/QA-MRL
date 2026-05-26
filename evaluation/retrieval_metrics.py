@@ -63,3 +63,20 @@ def compute_all_metrics(
     metrics["mrr"] = mrr(rankings, relevant)
     metrics["map"] = mean_average_precision(rankings, relevant)
     return metrics
+
+
+def per_query_recall(rankings: np.ndarray, relevant: np.ndarray, k: int) -> np.ndarray:
+    """Binary per-query R@k. Shape: (N_queries,) in {0.0, 1.0}."""
+    topk = rankings[:, :k]
+    return np.any(topk == relevant[:, None], axis=1).astype(float)
+
+
+def per_query_ndcg(rankings: np.ndarray, relevant: np.ndarray, k: int) -> np.ndarray:
+    """Per-query NDCG@k with binary single-relevant. Shape: (N_queries,)."""
+    out = np.zeros(len(relevant), dtype=float)
+    for i in range(len(relevant)):
+        for j, doc in enumerate(rankings[i, :k]):
+            if doc == relevant[i]:
+                out[i] = 1.0 / np.log2(j + 2)
+                break
+    return out

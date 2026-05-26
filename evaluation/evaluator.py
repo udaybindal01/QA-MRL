@@ -245,12 +245,15 @@ class FullEvaluator:
             topk = rankings[:, :k]
             hits = np.array([gt_indices[i] in topk[i] for i in range(N)])
             metrics[f"recall@{k}"] = float(hits.mean())
+            # Per-query binary hits for paired significance testing (Wilcoxon / McNemar).
+            metrics[f"per_query_recall@{k}"] = hits.astype(float)
 
         mrrs = []
         for i in range(N):
             found = np.where(rankings[i] == gt_indices[i])[0]
             mrrs.append(1.0 / (found[0] + 1) if len(found) > 0 else 0.0)
         metrics["mrr"] = float(np.mean(mrrs))
+        metrics["per_query_mrr"] = np.array(mrrs)
 
         ndcgs = []
         for i in range(N):
@@ -261,6 +264,10 @@ class FullEvaluator:
             else:
                 ndcgs.append(0.0)
         metrics["ndcg@10"] = float(np.mean(ndcgs))
+        metrics["per_query_ndcg@10"] = np.array(ndcgs)
+
+        # Auxiliary arrays for downstream significance / stratification scripts.
+        metrics["_query_blooms_1idx"] = query_blooms.copy()
 
         # 6. Bloom-stratified metrics
         bloom_entropies = None
