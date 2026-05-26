@@ -49,7 +49,7 @@ CKPT_ROOT = "/scratch/ishaan.karan/bampq-checkpoints/educational"
 
 BACKBONES = {
     "e5-large": {
-        "bampq_config":  "configs/bam_optionb_e5large.yaml",
+        "bampq_config":  "configs/bam_pq.yaml",
         "mrl_config":    "configs/mrl_e5large.yaml",
         "ft_config":     "configs/standard_ft_e5large.yaml",
         "bampq_ckpt":    f"{CKPT_ROOT}/bam_pq_e5large/best_bsr/",
