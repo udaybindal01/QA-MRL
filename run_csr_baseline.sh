@@ -26,12 +26,9 @@ echo "=========================================="
 # Navigate + activate
 cd ~/QA-MRL
 source ~/myenv/bin/activate
-
-# Single-threaded git to avoid 'unable to create thread' on constrained
-# clusters (ulimit -u trips index-pack's default multi-threaded unpack).
-git -c pack.threads=1 -c core.preloadIndex=false fetch origin
+git fetch origin
 git checkout BAM-PQ
-git -c pack.threads=1 -c core.preloadIndex=false pull origin BAM-PQ
+git pull origin BAM-PQ
 
 # ── Output paths (edit if you want them elsewhere) ────────────────────────
 export OUT_ROOT=${OUT_ROOT:-$HOME/bampq_cluster_baseline/results}
@@ -45,15 +42,6 @@ mkdir -p "$HF_HOME"
 
 # ── PyTorch memory hint ────────────────────────────────────────────────────
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-
-# ── Thread caps — this cluster has ulimit -u = 200, so pin every framework
-#     to single-digit threads to avoid 'unable to create thread' failures.
-export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
-export MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
-export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-4}
-export NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-4}
-export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
-export FAISS_NUM_THREADS=${FAISS_NUM_THREADS:-4}
 
 # ── Run CSR sweep on pretrained bge-base ──────────────────────────────────
 python scripts/eval_csr_baseline.py \
