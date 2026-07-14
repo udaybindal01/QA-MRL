@@ -50,6 +50,22 @@ from evaluation.retrieval_metrics import per_query_recall, per_query_ndcg
 from scripts.eval_bam import load_mrl
 
 
+def load_encoder(cfg, ckpt_path, device):
+    """Load MRL encoder from a checkpoint if provided, else pretrained-only.
+
+    `load_mrl` gracefully falls back to just the HuggingFace pretrained
+    weights when `os.path.exists(<ckpt>/checkpoint.pt)` is False, so
+    passing an empty path effectively means "use raw pretrained encoder".
+    """
+    if ckpt_path:
+        print(f"  Loading MRL fine-tuned checkpoint from {ckpt_path}")
+        return load_mrl(cfg, ckpt_path, device)
+    print(f"  No --checkpoint given: using pretrained "
+          f"{cfg['model']['backbone']} weights only "
+          f"(no MRL fine-tune applied).")
+    return load_mrl(cfg, "", device)
+
+
 BLOOM_NAMES = {1: "L1 Remember", 2: "L2 Understand", 3: "L3 Apply",
                4: "L4 Analyze",  5: "L5 Evaluate",   6: "L6 Create"}
 
@@ -160,8 +176,12 @@ def aggregate(per_q: dict, blooms_1idx: np.ndarray) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config",       required=True)
-    ap.add_argument("--checkpoint",   required=True,
-                    help="MRL baseline checkpoint dir")
+    ap.add_argument("--checkpoint",   default=None,
+                    help="MRL baseline checkpoint dir. Omit to use the "
+                         "raw pretrained HuggingFace encoder (no MRL "
+                         "fine-tune) — useful when the MRL ckpt is "
+                         "unavailable. Cluster-routing then fits on top "
+                         "of pretrained embeddings.")
     ap.add_argument("--train_path",   default="data/real/train_curriculum.jsonl",
                     help="Training queries used to fit clusters + masks")
     ap.add_argument("--test_path",    default="data/real/test.jsonl")
@@ -185,7 +205,7 @@ def main():
     cfg = load_config(args.config)
     set_seed(cfg["training"].get("seed", args.seed))
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"]["backbone"])
-    model = load_mrl(cfg, args.checkpoint, device)
+    model = load_encoder(cfg, args.checkpoint, device)
     model.eval()
 
     # === Load data ===
