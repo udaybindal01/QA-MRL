@@ -20,7 +20,10 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-COUNCIL_DIR   = "/tmp/bloom-council"
+# COUNCIL_DIR is overridable via env so users on servers without /tmp
+# persistence (or without root access to write there) can point at their
+# own trained-council directory.
+COUNCIL_DIR   = os.environ.get("COUNCIL_DIR", "/tmp/bloom-council")
 WEIGHTS_FILE  = os.path.join(COUNCIL_DIR, "council_weights.json")
 FALLBACK_MODEL = "cip29/bert-blooms-taxonomy-classifier"
 
