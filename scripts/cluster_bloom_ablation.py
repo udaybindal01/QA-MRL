@@ -36,7 +36,7 @@ from sklearn.cluster import (
     KMeans,
     SpectralClustering,
 )
-from sklearn.decomposition import DictionaryLearning
+from sklearn.decomposition import MiniBatchDictionaryLearning
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
@@ -115,28 +115,40 @@ def report_clustering(name: str, embeddings: np.ndarray,
     }
 
 
-def csr_sparse_representation(embeddings: np.ndarray, n_atoms: int = 1024,
-                              alpha: float = 1.0, seed: int = 42) -> np.ndarray:
+def csr_sparse_representation(embeddings: np.ndarray, n_atoms: int = 256,
+                              n_nonzero: int = 20, max_iter: int = 50,
+                              batch_size: int = 256,
+                              seed: int = 42) -> np.ndarray:
     """
-    Sparse dictionary coding (sklearn) as a CSR proxy.
+    Fast CSR-style sparse coding via mini-batch dictionary learning + OMP.
 
-    True CSR (Wen et al. 2025) is contrastively trained; this is the
-    sklearn-only stand-in that still tests the 'sparse encoding cannot
-    recover Bloom' hypothesis on the same embeddings.
+    True CSR (Wen et al. 2025) is contrastively trained end-to-end; this is
+    the sklearn-only proxy that still tests the 'sparse encoding does not
+    recover Bloom' hypothesis on the same encoder embeddings. We use:
+      - MiniBatchDictionaryLearning (online updates, batches of `batch_size`)
+      - Orthogonal Matching Pursuit (OMP) with a hard sparsity budget of
+        `n_nonzero` active atoms per query — much faster than lasso_lars
+        and directly parallel to CSR's fixed-budget hard-sparse code.
+
+    Wall-clock on 3,296 x 768 with n_atoms=256, n_nonzero=20, max_iter=50:
+    ~30 seconds on CPU (vs ~5-15 min for full-batch lasso_lars).
     """
     print(f"  Learning sparse dictionary "
-          f"(n_atoms={n_atoms}, alpha={alpha})...")
-    dl = DictionaryLearning(
+          f"(n_atoms={n_atoms}, n_nonzero={n_nonzero}, "
+          f"max_iter={max_iter}, batch_size={batch_size})...")
+    dl = MiniBatchDictionaryLearning(
         n_components=n_atoms,
-        alpha=alpha,
-        max_iter=100,
-        transform_algorithm="lasso_lars",
+        max_iter=max_iter,
+        batch_size=batch_size,
+        transform_algorithm="omp",
+        transform_n_nonzero_coefs=n_nonzero,
         n_jobs=-1,
         random_state=seed,
     )
     sparse_codes = dl.fit_transform(embeddings)
     density = float((sparse_codes != 0).sum() / sparse_codes.size)
-    print(f"  Sparse code density: {density:.3f}")
+    print(f"  Sparse code density: {density:.3f} "
+          f"(target ~{n_nonzero / n_atoms:.3f})")
     return sparse_codes
 
 
@@ -196,12 +208,16 @@ def main():
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--k", type=int, default=6,
                     help="Number of clusters (default: 6 = Bloom levels)")
-    ap.add_argument("--n_atoms", type=int, default=1024,
-                    help="Sparse dictionary size for CSR proxy")
-    ap.add_argument("--csr_alpha", type=float, default=1.0,
-                    help="Sparsity strength for CSR proxy")
+    ap.add_argument("--n_atoms", type=int, default=256,
+                    help="Sparse dictionary size for CSR proxy (default: 256)")
+    ap.add_argument("--n_nonzero", type=int, default=20,
+                    help="OMP hard sparsity budget (active atoms per query)")
+    ap.add_argument("--csr_max_iter", type=int, default=50,
+                    help="MiniBatchDictionaryLearning max iterations")
+    ap.add_argument("--csr_batch_size", type=int, default=256,
+                    help="Mini-batch size for online dictionary update")
     ap.add_argument("--skip_csr", action="store_true",
-                    help="Skip CSR sparse coding (slow on large N)")
+                    help="Skip CSR sparse coding entirely")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -254,16 +270,21 @@ def main():
 
     # === CSR proxy: sparse dictionary coding + k-means ===
     if not args.skip_csr:
-        print("\n=== CSR proxy (sparse dictionary coding) ===")
+        print("\n=== CSR proxy (mini-batch sparse dictionary + OMP) ===")
         sparse = csr_sparse_representation(
-            embeddings, n_atoms=args.n_atoms,
-            alpha=args.csr_alpha, seed=args.seed,
+            embeddings,
+            n_atoms=args.n_atoms,
+            n_nonzero=args.n_nonzero,
+            max_iter=args.csr_max_iter,
+            batch_size=args.csr_batch_size,
+            seed=args.seed,
         )
+        csr_tag = f"CSR-sparse(K={args.n_atoms},nz={args.n_nonzero})"
         for method in ["kmeans", "gmm"]:
             print(f"Clustering CSR-sparse codes with {method}...")
             row = report_clustering(method, sparse, labels,
                                     k=args.k, seed=args.seed)
-            row["representation"] = f"CSR-sparse(alpha={args.csr_alpha})"
+            row["representation"] = csr_tag
             rows.append(row)
             print(f"  ARI={row['ARI']:+.4f}  NMI={row['NMI']:.4f}  "
                   f"purity={row['purity']:.4f}")
