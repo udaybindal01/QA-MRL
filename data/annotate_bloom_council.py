@@ -395,6 +395,40 @@ def _parse_label(val) -> int:
 def _load_kaggle_dataset(name: str) -> Optional[Tuple[List[str], List[int]]]:
     import glob
     import pandas as pd
+
+    # ── Env override: skip kagglehub entirely and load local CSVs ─────────
+    # If BLOOM_DATA_DIR is set, glob its CSVs (recursively) and treat them
+    # as the source for whichever `name` we were asked to fetch. This makes
+    # every call to _load_kaggle_dataset('<any-kaggle-handle>') return the
+    # union of everything under BLOOM_DATA_DIR. To avoid loading the same
+    # local corpus multiple times, we cache a sentinel so subsequent calls
+    # for other 'name's return an empty (already-consumed) result.
+    local_dir = os.environ.get("BLOOM_DATA_DIR")
+    if local_dir:
+        if not os.path.isdir(local_dir):
+            raise FileNotFoundError(
+                f"BLOOM_DATA_DIR={local_dir!r} is set but not a directory"
+            )
+        if getattr(_load_kaggle_dataset, "_local_consumed", False):
+            print(f"    (BLOOM_DATA_DIR already consumed on prior call; "
+                  f"skipping {name})")
+            return None
+        print(f"    BLOOM_DATA_DIR={local_dir} — using local CSVs "
+              f"instead of downloading {name}")
+        texts, labels = [], []
+        csv_paths = sorted(glob.glob(os.path.join(local_dir, "**/*.csv"),
+                                     recursive=True))
+        if not csv_paths:
+            raise FileNotFoundError(
+                f"No CSVs found under BLOOM_DATA_DIR={local_dir}"
+            )
+        _load_kaggle_dataset._local_consumed = True   # sentinel
+        for csv_path in csv_paths:
+            _extract_bloom_from_csv(csv_path, texts, labels, pd)
+        print(f"    Local: {len(texts)} examples from {len(csv_paths)} CSV(s)")
+        return (texts, labels) if texts else None
+
+    # ── Normal path: use kagglehub ─────────────────────────────────────────
     try:
         import kagglehub
     except ImportError:
@@ -405,52 +439,59 @@ def _load_kaggle_dataset(name: str) -> Optional[Tuple[List[str], List[int]]]:
         path = kagglehub.dataset_download(name)
         texts, labels = [], []
         for csv_path in glob.glob(os.path.join(path, "**/*.csv"), recursive=True):
-            try:
-                df = pd.read_csv(csv_path, on_bad_lines="skip")
-            except Exception:
-                try:
-                    df = pd.read_csv(csv_path, error_bad_lines=False)
-                except Exception:
-                    continue
-            text_candidates = ["Question", "question", "Text", "text", "Sentence",
-                               "sentence", "query", "Query", "Question_Text",
-                               "question_text", "Questions", "questions"]
-            text_col = next((c for c in text_candidates if c in df.columns), None)
-            if text_col is None:
-                obj_cols = [c for c in df.columns if df[c].dtype == "object"]
-                if obj_cols:
-                    text_col = max(obj_cols,
-                                   key=lambda c: df[c].dropna().astype(str).str.len().mean())
-            label_candidates = ["Bloom's Taxonomy Level", "bloom_level", "Bloom Level",
-                                "Bloom's Level", "blooms_level", "Bloom_Level",
-                                "Level", "level", "label", "Label", "cognitive_level",
-                                "Category", "category", "class", "Class",
-                                "Taxonomy", "taxonomy", "BT_Level", "bt_level"]
-            label_col = next((c for c in label_candidates if c in df.columns), None)
-            if label_col is None:
-                other = [c for c in df.columns if c != text_col]
-                if other:
-                    label_col = min(other, key=lambda c: df[c].nunique())
-            if text_col is None or label_col is None:
-                continue
-            df = df.dropna(subset=[label_col])
-            parsed = 0
-            for _, row in df.iterrows():
-                lv = _parse_label(row[label_col])
-                txt = str(row[text_col]).strip()
-                if lv != -1 and len(txt) > 10:
-                    texts.append(txt)
-                    labels.append(lv)
-                    parsed += 1
-            if parsed == 0:
-                sample = df[label_col].dropna().unique()[:8].tolist()
-                print(f"      0 valid labels in {os.path.basename(csv_path)}. "
-                      f"Sample values: {sample}")
+            _extract_bloom_from_csv(csv_path, texts, labels, pd)
         print(f"    {name}: {len(texts)} examples")
         return (texts, labels) if texts else None
     except Exception as e:
         print(f"    WARNING: {name}: {e}")
         return None
+
+
+def _extract_bloom_from_csv(csv_path, texts, labels, pd):
+    """Autodetect (text, label) columns in one CSV and append parsed rows
+    (text, Bloom level 1-6) to the given lists. Silent-continue on parse errors."""
+    try:
+        df = pd.read_csv(csv_path, on_bad_lines="skip")
+    except Exception:
+        try:
+            df = pd.read_csv(csv_path, error_bad_lines=False)
+        except Exception:
+            return
+    text_candidates = ["Question", "question", "Text", "text", "Sentence",
+                       "sentence", "query", "Query", "Question_Text",
+                       "question_text", "Questions", "questions", "QUESTION"]
+    text_col = next((c for c in text_candidates if c in df.columns), None)
+    if text_col is None:
+        obj_cols = [c for c in df.columns if df[c].dtype == "object"]
+        if obj_cols:
+            text_col = max(obj_cols,
+                           key=lambda c: df[c].dropna().astype(str).str.len().mean())
+    label_candidates = ["Bloom's Taxonomy Level", "bloom_level", "Bloom Level",
+                        "Bloom's Level", "blooms_level", "Bloom_Level",
+                        "Level", "level", "label", "Label", "cognitive_level",
+                        "Category", "category", "class", "Class",
+                        "Taxonomy", "taxonomy", "BT_Level", "bt_level",
+                        "BT LEVEL", "BT Level"]
+    label_col = next((c for c in label_candidates if c in df.columns), None)
+    if label_col is None:
+        other = [c for c in df.columns if c != text_col]
+        if other:
+            label_col = min(other, key=lambda c: df[c].nunique())
+    if text_col is None or label_col is None:
+        return
+    df = df.dropna(subset=[label_col])
+    parsed = 0
+    for _, row in df.iterrows():
+        lv = _parse_label(row[label_col])
+        txt = str(row[text_col]).strip()
+        if lv != -1 and len(txt) > 10:
+            texts.append(txt)
+            labels.append(lv)
+            parsed += 1
+    if parsed == 0:
+        sample = df[label_col].dropna().unique()[:8].tolist()
+        print(f"      0 valid labels in {os.path.basename(csv_path)}. "
+              f"Sample values: {sample}")
 
 
 # ─── Calibration ──────────────────────────────────────────────────────────────

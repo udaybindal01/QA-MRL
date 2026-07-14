@@ -47,17 +47,28 @@ export HF_HUB_CACHE=${HF_HUB_CACHE:-$HF_HOME/hub}
 export TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE:-$HF_HOME/transformers}
 mkdir -p "$HF_HOME"
 
-# ── Kaggle credentials ─────────────────────────────────────────────────────
-#   Prefer env vars set by the caller (via export KAGGLE_USERNAME=... KAGGLE_KEY=...);
-#   otherwise fall back to ~/.kaggle/kaggle.json which kagglehub reads automatically.
-if [[ -z "${KAGGLE_USERNAME:-}" || -z "${KAGGLE_KEY:-}" ]]; then
-    if [[ ! -f "$HOME/.kaggle/kaggle.json" ]]; then
-        echo "ERROR: No Kaggle credentials found."
-        echo "  Either export KAGGLE_USERNAME and KAGGLE_KEY, or place a"
-        echo "  kaggle.json at ~/.kaggle/kaggle.json (chmod 600)."
+# ── Bloom training data source ─────────────────────────────────────────────
+#   If BLOOM_DATA_DIR is set, the loader reads local CSVs from that directory
+#   (auto-detects text + label columns) and skips Kaggle entirely.
+#   Otherwise falls back to Kaggle download via kagglehub.
+if [[ -n "${BLOOM_DATA_DIR:-}" ]]; then
+    if [[ ! -d "$BLOOM_DATA_DIR" ]]; then
+        echo "ERROR: BLOOM_DATA_DIR=$BLOOM_DATA_DIR is not a directory."
         exit 1
     fi
-    chmod 600 "$HOME/.kaggle/kaggle.json"
+    echo "  BLOOM_DATA_DIR = $BLOOM_DATA_DIR (using local CSVs)"
+else
+    if [[ -z "${KAGGLE_USERNAME:-}" || -z "${KAGGLE_KEY:-}" ]]; then
+        if [[ ! -f "$HOME/.kaggle/kaggle.json" ]]; then
+            echo "ERROR: No BLOOM_DATA_DIR set AND no Kaggle credentials found."
+            echo "  Either export BLOOM_DATA_DIR pointing at a folder of CSVs,"
+            echo "  or export KAGGLE_USERNAME + KAGGLE_KEY, or place a"
+            echo "  kaggle.json at ~/.kaggle/kaggle.json (chmod 600)."
+            exit 1
+        fi
+        chmod 600 "$HOME/.kaggle/kaggle.json"
+    fi
+    echo "  BLOOM_DATA_DIR = (unset — will download from Kaggle)"
 fi
 
 # ── PyTorch memory hint ────────────────────────────────────────────────────
