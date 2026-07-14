@@ -26,9 +26,12 @@ echo "=========================================="
 # Navigate + activate
 cd ~/QA-MRL
 source ~/myenv/bin/activate
-git fetch origin
+
+# Single-threaded git to avoid 'unable to create thread' on constrained
+# clusters (ulimit -u trips index-pack's default multi-threaded unpack).
+git -c pack.threads=1 -c core.preloadIndex=false fetch origin
 git checkout BAM-PQ
-git pull origin BAM-PQ
+git -c pack.threads=1 -c core.preloadIndex=false pull origin BAM-PQ
 
 # ── Output paths (edit if you want them elsewhere) ────────────────────────
 export OUT_ROOT=${OUT_ROOT:-$HOME/bampq_cluster_baseline/results}
