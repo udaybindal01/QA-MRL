@@ -48,28 +48,21 @@ export TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE:-$HF_HOME/transformers}
 mkdir -p "$HF_HOME"
 
 # ── Bloom training data source ─────────────────────────────────────────────
-#   If BLOOM_DATA_DIR is set, the loader reads local CSVs from that directory
-#   (auto-detects text + label columns) and skips Kaggle entirely.
-#   Otherwise falls back to Kaggle download via kagglehub.
-if [[ -n "${BLOOM_DATA_DIR:-}" ]]; then
-    if [[ ! -d "$BLOOM_DATA_DIR" ]]; then
-        echo "ERROR: BLOOM_DATA_DIR=$BLOOM_DATA_DIR is not a directory."
-        exit 1
-    fi
-    echo "  BLOOM_DATA_DIR = $BLOOM_DATA_DIR (using local CSVs)"
-else
-    if [[ -z "${KAGGLE_USERNAME:-}" || -z "${KAGGLE_KEY:-}" ]]; then
-        if [[ ! -f "$HOME/.kaggle/kaggle.json" ]]; then
-            echo "ERROR: No BLOOM_DATA_DIR set AND no Kaggle credentials found."
-            echo "  Either export BLOOM_DATA_DIR pointing at a folder of CSVs,"
-            echo "  or export KAGGLE_USERNAME + KAGGLE_KEY, or place a"
-            echo "  kaggle.json at ~/.kaggle/kaggle.json (chmod 600)."
-            exit 1
-        fi
-        chmod 600 "$HOME/.kaggle/kaggle.json"
-    fi
-    echo "  BLOOM_DATA_DIR = (unset — will download from Kaggle)"
+#   Default: read local CSVs from $HOME/bloom-data (BLOOM_DATA_DIR override
+#   supported). The loader (data/annotate_bloom_council.py) globs **/*.csv
+#   there and auto-detects text + label columns, so no Kaggle credentials
+#   are needed. If the directory is missing, print a clear error.
+export BLOOM_DATA_DIR=${BLOOM_DATA_DIR:-$HOME/bloom-data}
+if [[ ! -d "$BLOOM_DATA_DIR" ]]; then
+    echo "ERROR: BLOOM_DATA_DIR=$BLOOM_DATA_DIR does not exist."
+    echo "  Copy the Bloom training CSVs to that directory:"
+    echo "    scp <your-mac>:/path/to/blooms_taxonomy_dataset.csv \\"
+    echo "        <your-mac>:/path/to/collected_dataset.csv         \\"
+    echo "        <your-mac>:/path/to/q_bt_human_label.csv          \\"
+    echo "        ${USER}@${HOSTNAME}:$BLOOM_DATA_DIR/"
+    exit 1
 fi
+echo "  BLOOM_DATA_DIR = $BLOOM_DATA_DIR"
 
 # ── PyTorch memory hint ────────────────────────────────────────────────────
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
